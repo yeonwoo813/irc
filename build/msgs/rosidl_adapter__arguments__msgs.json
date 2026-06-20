@@ -1,0 +1,6 @@
+{
+  "package_name": "msgs",
+  "non_idl_tuples": [
+    "/home/pyy/irc/src/msgs:msg/LineResult.msg"
+  ]
+}

@@ -1,0 +1,1 @@
+/home/pyy/irc/build/msgs/rosidl_typesupport_introspection_cpp/msgs/msg/detail/line_result__rosidl_typesupport_introspection_cpp.hpp

@@ -1,0 +1,1 @@
+/home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/line_result__type_support.h

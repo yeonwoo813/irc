@@ -1,0 +1,14 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from msgs/msg/LineResult.msg
+// generated code does not contain a copyright notice
+
+
+module msgs {
+  module msg {
+    struct LineResult {
+      uint8 status;
+
+      uint8 angle;
+    };
+  };
+};

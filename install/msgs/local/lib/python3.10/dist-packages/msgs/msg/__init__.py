@@ -1,0 +1,1 @@
+/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/__init__.py

@@ -1,0 +1,1 @@
+/home/pyy/irc/build/msgs/ament_cmake_core/msgsConfig-version.cmake

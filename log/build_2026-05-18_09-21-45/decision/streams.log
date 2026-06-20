@@ -1,0 +1,24 @@
+[0.640s] Invoking command in '/home/pyy/irc/build/decision': PYTHONPATH=/home/pyy/irc/build/decision/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pyy/irc/install/decision/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pyy/irc/build/decision/build --no-deps symlink_data
+[0.992s] running develop
+[1.171s] running egg_info
+[1.171s] creating decision.egg-info
+[1.171s] writing decision.egg-info/PKG-INFO
+[1.172s] writing dependency_links to decision.egg-info/dependency_links.txt
+[1.172s] writing entry points to decision.egg-info/entry_points.txt
+[1.173s] writing requirements to decision.egg-info/requires.txt
+[1.173s] writing top-level names to decision.egg-info/top_level.txt
+[1.173s] writing manifest file 'decision.egg-info/SOURCES.txt'
+[1.174s] reading manifest file 'decision.egg-info/SOURCES.txt'
+[1.175s] writing manifest file 'decision.egg-info/SOURCES.txt'
+[1.176s] running build_ext
+[1.177s] Creating /home/pyy/irc/install/decision/lib/python3.10/site-packages/decision.egg-link (link to .)
+[1.178s] Installing main_decision script to /home/pyy/irc/install/decision/lib/decision
+[1.178s] 
+[1.182s] Installed /home/pyy/irc/build/decision
+[1.182s] running symlink_data
+[1.182s] creating /home/pyy/irc/install/decision/share/ament_index
+[1.183s] creating /home/pyy/irc/install/decision/share/ament_index/resource_index
+[1.183s] creating /home/pyy/irc/install/decision/share/ament_index/resource_index/packages
+[1.183s] symbolically linking /home/pyy/irc/build/decision/resource/decision -> /home/pyy/irc/install/decision/share/ament_index/resource_index/packages
+[1.183s] symbolically linking /home/pyy/irc/build/decision/package.xml -> /home/pyy/irc/install/decision/share/decision
+[1.221s] Invoked command in '/home/pyy/irc/build/decision' returned '0': PYTHONPATH=/home/pyy/irc/build/decision/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/pyy/irc/install/decision/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/pyy/irc/build/decision/build --no-deps symlink_data

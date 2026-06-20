@@ -1,0 +1,1 @@
+/home/pyy/irc/build/msgs/rosidl_generator_cpp/msgs/msg/detail/line_result__traits.hpp
