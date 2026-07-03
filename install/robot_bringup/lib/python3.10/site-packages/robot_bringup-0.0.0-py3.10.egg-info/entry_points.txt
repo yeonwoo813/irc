@@ -1,0 +1,3 @@
+[console_scripts]
+robot_bringup = robot_bringup.robot_bringup:main
+

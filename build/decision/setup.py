@@ -1,1 +1,0 @@
-/home/pyy/irc/src/decision/setup.py

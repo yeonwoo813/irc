@@ -1,0 +1,3 @@
+[console_scripts]
+main_decision = decision.main_decision:main
+

@@ -57,16 +57,19 @@ class LineResult(metaclass=Metaclass_LineResult):
     __slots__ = [
         '_status',
         '_angle',
+        '_follow_point',
     ]
 
     _fields_and_field_types = {
         'status': 'uint8',
-        'angle': 'uint8',
+        'angle': 'uint32',
+        'follow_point': 'boolean',
     }
 
     SLOT_TYPES = (
         rosidl_parser.definition.BasicType('uint8'),  # noqa: E501
-        rosidl_parser.definition.BasicType('uint8'),  # noqa: E501
+        rosidl_parser.definition.BasicType('uint32'),  # noqa: E501
+        rosidl_parser.definition.BasicType('boolean'),  # noqa: E501
     )
 
     def __init__(self, **kwargs):
@@ -75,6 +78,7 @@ class LineResult(metaclass=Metaclass_LineResult):
             ', '.join(sorted(k for k in kwargs.keys() if '_' + k not in self.__slots__))
         self.status = kwargs.get('status', int())
         self.angle = kwargs.get('angle', int())
+        self.follow_point = kwargs.get('follow_point', bool())
 
     def __repr__(self):
         typename = self.__class__.__module__.split('.')
@@ -109,6 +113,8 @@ class LineResult(metaclass=Metaclass_LineResult):
             return False
         if self.angle != other.angle:
             return False
+        if self.follow_point != other.follow_point:
+            return False
         return True
 
     @classmethod
@@ -142,6 +148,19 @@ class LineResult(metaclass=Metaclass_LineResult):
             assert \
                 isinstance(value, int), \
                 "The 'angle' field must be of type 'int'"
-            assert value >= 0 and value < 256, \
-                "The 'angle' field must be an unsigned integer in [0, 255]"
+            assert value >= 0 and value < 4294967296, \
+                "The 'angle' field must be an unsigned integer in [0, 4294967295]"
         self._angle = value
+
+    @builtins.property
+    def follow_point(self):
+        """Message field 'follow_point'."""
+        return self._follow_point
+
+    @follow_point.setter
+    def follow_point(self, value):
+        if __debug__:
+            assert \
+                isinstance(value, bool), \
+                "The 'follow_point' field must be of type 'bool'"
+        self._follow_point = value

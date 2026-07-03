@@ -15,8 +15,16 @@ set(CMAKE_MULTIPLE_OUTPUT_PAIRS
   "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_c.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
   "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_introspection_c.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
   "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/__init__.py" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_ball_result.py" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_ball_result_s.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_hurdle_result.py" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_hurdle_result_s.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
   "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_line_result.py" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
   "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_line_result_s.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_motion_command.py" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_motion_command_s.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_motion_end.py" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/msg/_motion_end_s.c" "/home/pyy/irc/build/msgs/rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
   )
 
 

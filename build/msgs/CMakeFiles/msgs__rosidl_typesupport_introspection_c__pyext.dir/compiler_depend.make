@@ -245,8 +245,36 @@ CMakeFiles/msgs__rosidl_typesupport_introspection_c__pyext.dir/rosidl_generator_
   rosidl_generator_c/msgs/msg/detail/line_result__type_support.h \
   rosidl_generator_c/msgs/msg/rosidl_generator_c__visibility_control.h \
   rosidl_generator_c/msgs/msg/detail/line_result__struct.h \
-  rosidl_generator_c/msgs/msg/detail/line_result__functions.h
+  rosidl_generator_c/msgs/msg/detail/line_result__functions.h \
+  rosidl_generator_c/msgs/msg/detail/ball_result__type_support.h \
+  rosidl_generator_c/msgs/msg/detail/ball_result__struct.h \
+  rosidl_generator_c/msgs/msg/detail/ball_result__functions.h \
+  rosidl_generator_c/msgs/msg/detail/hurdle_result__type_support.h \
+  rosidl_generator_c/msgs/msg/detail/hurdle_result__struct.h \
+  rosidl_generator_c/msgs/msg/detail/hurdle_result__functions.h \
+  rosidl_generator_c/msgs/msg/detail/motion_end__type_support.h \
+  rosidl_generator_c/msgs/msg/detail/motion_end__struct.h \
+  rosidl_generator_c/msgs/msg/detail/motion_end__functions.h \
+  rosidl_generator_c/msgs/msg/detail/motion_command__type_support.h \
+  rosidl_generator_c/msgs/msg/detail/motion_command__struct.h \
+  rosidl_generator_c/msgs/msg/detail/motion_command__functions.h
 
+
+rosidl_generator_c/msgs/msg/detail/motion_command__functions.h:
+
+rosidl_generator_c/msgs/msg/detail/motion_end__struct.h:
+
+rosidl_generator_c/msgs/msg/detail/motion_end__type_support.h:
+
+rosidl_generator_c/msgs/msg/detail/hurdle_result__functions.h:
+
+rosidl_generator_c/msgs/msg/detail/hurdle_result__struct.h:
+
+rosidl_generator_c/msgs/msg/detail/hurdle_result__type_support.h:
+
+rosidl_generator_c/msgs/msg/detail/ball_result__functions.h:
+
+rosidl_generator_c/msgs/msg/detail/ball_result__type_support.h:
 
 rosidl_generator_c/msgs/msg/detail/line_result__functions.h:
 
@@ -460,6 +488,8 @@ rosidl_generator_c/msgs/msg/detail/line_result__functions.h:
 
 /usr/include/x86_64-linux-gnu/bits/libm-simd-decl-stubs.h:
 
+rosidl_generator_c/msgs/msg/detail/motion_command__type_support.h:
+
 /usr/include/asm-generic/posix_types.h:
 
 /usr/include/stdc-predef.h:
@@ -538,6 +568,8 @@ rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_introspection_c.c:
 
 /usr/include/x86_64-linux-gnu/gnu/stubs.h:
 
+rosidl_generator_c/msgs/msg/detail/motion_command__struct.h:
+
 /usr/include/python3.10/objimpl.h:
 
 /usr/include/inttypes.h:
@@ -614,6 +646,8 @@ rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_introspection_c.c:
 
 /usr/include/x86_64-linux-gnu/bits/struct_mutex.h:
 
+rosidl_generator_c/msgs/msg/detail/motion_end__functions.h:
+
 /usr/include/python3.10/cpython/compile.h:
 
 /usr/include/python3.10/cpython/methodobject.h:
@@ -655,6 +689,8 @@ rosidl_generator_py/msgs/_msgs_s.ep.rosidl_typesupport_introspection_c.c:
 /usr/include/x86_64-linux-gnu/bits/posix2_lim.h:
 
 /usr/include/stdint.h:
+
+rosidl_generator_c/msgs/msg/detail/ball_result__struct.h:
 
 /usr/include/x86_64-linux-gnu/bits/fp-fast.h:
 

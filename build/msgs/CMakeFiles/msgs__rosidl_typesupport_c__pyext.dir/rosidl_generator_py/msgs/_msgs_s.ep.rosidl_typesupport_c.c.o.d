@@ -204,4 +204,16 @@ CMakeFiles/msgs__rosidl_typesupport_c__pyext.dir/rosidl_generator_py/msgs/_msgs_
  /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/line_result__type_support.h \
  /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/rosidl_generator_c__visibility_control.h \
  /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/line_result__struct.h \
- /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/line_result__functions.h
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/line_result__functions.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/ball_result__type_support.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/ball_result__struct.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/ball_result__functions.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/hurdle_result__type_support.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/hurdle_result__struct.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/hurdle_result__functions.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/motion_end__type_support.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/motion_end__struct.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/motion_end__functions.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/motion_command__type_support.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/motion_command__struct.h \
+ /home/pyy/irc/build/msgs/rosidl_generator_c/msgs/msg/detail/motion_command__functions.h

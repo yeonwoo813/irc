@@ -21,16 +21,32 @@ namespace msg
 namespace builder
 {
 
+class Init_LineResult_follow_point
+{
+public:
+  explicit Init_LineResult_follow_point(::msgs::msg::LineResult & msg)
+  : msg_(msg)
+  {}
+  ::msgs::msg::LineResult follow_point(::msgs::msg::LineResult::_follow_point_type arg)
+  {
+    msg_.follow_point = std::move(arg);
+    return std::move(msg_);
+  }
+
+private:
+  ::msgs::msg::LineResult msg_;
+};
+
 class Init_LineResult_angle
 {
 public:
   explicit Init_LineResult_angle(::msgs::msg::LineResult & msg)
   : msg_(msg)
   {}
-  ::msgs::msg::LineResult angle(::msgs::msg::LineResult::_angle_type arg)
+  Init_LineResult_follow_point angle(::msgs::msg::LineResult::_angle_type arg)
   {
     msg_.angle = std::move(arg);
-    return std::move(msg_);
+    return Init_LineResult_follow_point(msg_);
   }
 
 private:

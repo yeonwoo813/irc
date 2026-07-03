@@ -5,4 +5,8 @@ msgs.egg-info/SOURCES.txt
 msgs.egg-info/dependency_links.txt
 msgs.egg-info/top_level.txt
 msgs/msg/__init__.py
+msgs/msg/_ball_result.py
+msgs/msg/_hurdle_result.py
 msgs/msg/_line_result.py
+msgs/msg/_motion_command.py
+msgs/msg/_motion_end.py

@@ -71,6 +71,26 @@ CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__builder.
 CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__struct.hpp
 CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__traits.hpp
 CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__type_support.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/ball_result.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__builder.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__struct.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__traits.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__type_support.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/hurdle_result.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__builder.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__struct.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__traits.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__type_support.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/motion_end.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__builder.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__struct.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__traits.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__type_support.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/motion_command.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__builder.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__struct.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__traits.hpp
+CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__type_support.hpp
 CMakeFiles/msgs__cpp: rosidl_generator_cpp/msgs/msg/rosidl_generator_cpp__visibility_control.hpp
 
 rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/lib/rosidl_generator_cpp/rosidl_generator_cpp
@@ -89,6 +109,10 @@ rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/share/rosidl_gene
 rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/share/rosidl_generator_cpp/resource/srv__struct.hpp.em
 rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/share/rosidl_generator_cpp/resource/srv__traits.hpp.em
 rosidl_generator_cpp/msgs/msg/line_result.hpp: rosidl_adapter/msgs/msg/LineResult.idl
+rosidl_generator_cpp/msgs/msg/line_result.hpp: rosidl_adapter/msgs/msg/BallResult.idl
+rosidl_generator_cpp/msgs/msg/line_result.hpp: rosidl_adapter/msgs/msg/HurdleResult.idl
+rosidl_generator_cpp/msgs/msg/line_result.hpp: rosidl_adapter/msgs/msg/MotionEnd.idl
+rosidl_generator_cpp/msgs/msg/line_result.hpp: rosidl_adapter/msgs/msg/MotionCommand.idl
 rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/share/std_msgs/msg/Bool.idl
 rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/share/std_msgs/msg/Byte.idl
 rosidl_generator_cpp/msgs/msg/line_result.hpp: /opt/ros/humble/share/std_msgs/msg/ByteMultiArray.idl
@@ -136,12 +160,92 @@ rosidl_generator_cpp/msgs/msg/detail/line_result__traits.hpp: rosidl_generator_c
 rosidl_generator_cpp/msgs/msg/detail/line_result__type_support.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
 	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/line_result__type_support.hpp
 
+rosidl_generator_cpp/msgs/msg/ball_result.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/ball_result.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/ball_result__builder.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/ball_result__builder.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/ball_result__struct.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/ball_result__struct.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/ball_result__traits.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/ball_result__traits.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/ball_result__type_support.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/ball_result__type_support.hpp
+
+rosidl_generator_cpp/msgs/msg/hurdle_result.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/hurdle_result.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/hurdle_result__builder.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/hurdle_result__builder.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/hurdle_result__struct.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/hurdle_result__struct.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/hurdle_result__traits.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/hurdle_result__traits.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/hurdle_result__type_support.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/hurdle_result__type_support.hpp
+
+rosidl_generator_cpp/msgs/msg/motion_end.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/motion_end.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_end__builder.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_end__builder.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_end__struct.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_end__struct.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_end__traits.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_end__traits.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_end__type_support.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_end__type_support.hpp
+
+rosidl_generator_cpp/msgs/msg/motion_command.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/motion_command.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_command__builder.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_command__builder.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_command__struct.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_command__struct.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_command__traits.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_command__traits.hpp
+
+rosidl_generator_cpp/msgs/msg/detail/motion_command__type_support.hpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+	@$(CMAKE_COMMAND) -E touch_nocreate rosidl_generator_cpp/msgs/msg/detail/motion_command__type_support.hpp
+
 msgs__cpp: CMakeFiles/msgs__cpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/ball_result.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__builder.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__struct.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__traits.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/ball_result__type_support.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__builder.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__struct.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__traits.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/hurdle_result__type_support.hpp
 msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__builder.hpp
 msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__struct.hpp
 msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__traits.hpp
 msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/line_result__type_support.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__builder.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__struct.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__traits.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_command__type_support.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__builder.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__struct.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__traits.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/detail/motion_end__type_support.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/hurdle_result.hpp
 msgs__cpp: rosidl_generator_cpp/msgs/msg/line_result.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/motion_command.hpp
+msgs__cpp: rosidl_generator_cpp/msgs/msg/motion_end.hpp
 msgs__cpp: CMakeFiles/msgs__cpp.dir/build.make
 .PHONY : msgs__cpp
 

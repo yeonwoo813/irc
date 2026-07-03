@@ -1,1 +1,5 @@
 /home/pyy/irc/build/msgs/rosidl_adapter/msgs:msg/LineResult.idl
+/home/pyy/irc/build/msgs/rosidl_adapter/msgs:msg/BallResult.idl
+/home/pyy/irc/build/msgs/rosidl_adapter/msgs:msg/HurdleResult.idl
+/home/pyy/irc/build/msgs/rosidl_adapter/msgs:msg/MotionEnd.idl
+/home/pyy/irc/build/msgs/rosidl_adapter/msgs:msg/MotionCommand.idl

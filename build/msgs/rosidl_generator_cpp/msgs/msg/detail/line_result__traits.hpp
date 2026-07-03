@@ -36,6 +36,13 @@ inline void to_flow_style_yaml(
   {
     out << "angle: ";
     rosidl_generator_traits::value_to_yaml(msg.angle, out);
+    out << ", ";
+  }
+
+  // member: follow_point
+  {
+    out << "follow_point: ";
+    rosidl_generator_traits::value_to_yaml(msg.follow_point, out);
   }
   out << "}";
 }  // NOLINT(readability/fn_size)
@@ -61,6 +68,16 @@ inline void to_block_style_yaml(
     }
     out << "angle: ";
     rosidl_generator_traits::value_to_yaml(msg.angle, out);
+    out << "\n";
+  }
+
+  // member: follow_point
+  {
+    if (indentation > 0) {
+      out << std::string(indentation, ' ');
+    }
+    out << "follow_point: ";
+    rosidl_generator_traits::value_to_yaml(msg.follow_point, out);
     out << "\n";
   }
 }  // NOLINT(readability/fn_size)

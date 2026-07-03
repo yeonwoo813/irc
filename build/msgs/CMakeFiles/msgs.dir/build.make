@@ -67,6 +67,10 @@ include CMakeFiles/msgs.dir/compiler_depend.make
 include CMakeFiles/msgs.dir/progress.make
 
 CMakeFiles/msgs: /home/pyy/irc/src/msgs/msg/LineResult.msg
+CMakeFiles/msgs: /home/pyy/irc/src/msgs/msg/BallResult.msg
+CMakeFiles/msgs: /home/pyy/irc/src/msgs/msg/HurdleResult.msg
+CMakeFiles/msgs: /home/pyy/irc/src/msgs/msg/MotionEnd.msg
+CMakeFiles/msgs: /home/pyy/irc/src/msgs/msg/MotionCommand.msg
 CMakeFiles/msgs: /opt/ros/humble/share/std_msgs/msg/Bool.idl
 CMakeFiles/msgs: /opt/ros/humble/share/std_msgs/msg/Byte.idl
 CMakeFiles/msgs: /opt/ros/humble/share/std_msgs/msg/ByteMultiArray.idl

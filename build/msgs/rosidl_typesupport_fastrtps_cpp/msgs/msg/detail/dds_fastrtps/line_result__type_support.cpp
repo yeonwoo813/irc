@@ -36,6 +36,8 @@ cdr_serialize(
   cdr << ros_message.status;
   // Member: angle
   cdr << ros_message.angle;
+  // Member: follow_point
+  cdr << (ros_message.follow_point ? true : false);
   return true;
 }
 
@@ -50,6 +52,13 @@ cdr_deserialize(
 
   // Member: angle
   cdr >> ros_message.angle;
+
+  // Member: follow_point
+  {
+    uint8_t tmp;
+    cdr >> tmp;
+    ros_message.follow_point = tmp ? true : false;
+  }
 
   return true;
 }  // NOLINT(readability/fn_size)
@@ -76,6 +85,12 @@ get_serialized_size(
   // Member: angle
   {
     size_t item_size = sizeof(ros_message.angle);
+    current_alignment += item_size +
+      eprosima::fastcdr::Cdr::alignment(current_alignment, item_size);
+  }
+  // Member: follow_point
+  {
+    size_t item_size = sizeof(ros_message.follow_point);
     current_alignment += item_size +
       eprosima::fastcdr::Cdr::alignment(current_alignment, item_size);
   }
@@ -115,6 +130,15 @@ max_serialized_size_LineResult(
   {
     size_t array_size = 1;
 
+    last_member_size = array_size * sizeof(uint32_t);
+    current_alignment += array_size * sizeof(uint32_t) +
+      eprosima::fastcdr::Cdr::alignment(current_alignment, sizeof(uint32_t));
+  }
+
+  // Member: follow_point
+  {
+    size_t array_size = 1;
+
     last_member_size = array_size * sizeof(uint8_t);
     current_alignment += array_size * sizeof(uint8_t);
   }
@@ -127,7 +151,7 @@ max_serialized_size_LineResult(
     using DataType = msgs::msg::LineResult;
     is_plain =
       (
-      offsetof(DataType, angle) +
+      offsetof(DataType, follow_point) +
       last_member_size
       ) == ret_val;
   }
