@@ -24,6 +24,10 @@ class Motion:
     Neck_Left = 15
     Neck_Right = 16
     Neck_Center = 17
+    Hurdle_Forward_20 = 18
+    Hurdle_Go = 19
+    Forward_4step = 20
+
 
     Data_None = 99
     
@@ -44,17 +48,35 @@ class Ball:
 class Line:
     Line_None = 99
 
+class Hurdle:
+    Hurdle_Detected = Motion.Hurdle_Forward_20
+    Hurdle_Go = 19
+    Hurdle_None = 99
+
+
     
 class MainDecision(Node):
     def __init__(self):
         super().__init__('main_decision')
 
+        #test_mode 파라미터 선언 및 초기화
+        self.declare_parameter('test_mode', False)
+        test_mode_param = self.get_parameter('test_mode').value
+        if isinstance(test_mode_param, str):
+            self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
+        else:
+            self.test_mode = bool(test_mode_param)
+
         #초기값 설정
         self.status = 0
-        self.motion_end = False
+        #test mode true/false에 따라 초기값 조정
+        self.motion_end = self.test_mode
         self.line_data = False
         self.ball_data = False
         self.hurdle_data = False
+
+        if self.test_mode:
+            self.get_logger().info("test_mode enabled: motion_end will stay true")
 
         #ball
         self.has_ball = False
@@ -75,6 +97,10 @@ class MainDecision(Node):
         self.goal_count = 0
         self.turn_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
+
+        #hurdle
+        self.hurdle_step = 0
+        self.hurdle_done = False
         
         #최근 5개의 데이터를 저장하는 버퍼
         self.line_buffer = deque(maxlen=5)
@@ -89,12 +115,6 @@ class MainDecision(Node):
         self.motion_end_sub = self.create_subscription(MotionEnd, 'motion_end', self.MotionEndCallback, 10)
         #publish
         self.motion_pub = self.create_publisher(MotionCommand, 'motion_command', 10)
-
-        self.motion_name_by_command = {
-            value: name
-            for name, value in Motion.__dict__.items()
-            if not name.startswith('_') and isinstance(value, int)
-        }
         
     # 콜백함수에서 모션 종료 여부를 업데이트
     def MotionEndCallback(self, motion_end_msg:MotionEnd):
@@ -184,7 +204,7 @@ class MainDecision(Node):
             self.BallMode()
 
         #우선순위 2 : hurdle mode
-        elif self.hurdle_status == 11:
+        elif self.hurdle_status != Hurdle.Hurdle_None:
             self.lost_count = 0
             self.lost_step = 0
             self.lost_found_dir = 0
@@ -354,7 +374,20 @@ class MainDecision(Node):
         
     #Hurdle mission            
     def HurdleMode(self):
-        pass
+        #step 0: 허들 감지 후 20번 종종걸음
+        if self.hurdle_step == 0:
+            self.hurdle_step = 1
+            self.status = Motion.Hurdle_Forward_20
+            self.MotionCommand()
+            return
+        
+        #step 1: 허들 넘기 실행
+        if self.hurdle_step == 1:
+            self.hurdle_step = 0
+            self.status = Motion.Hurdle_Go
+            self.MotionCommand()
+            return
+
     
     #Lost             
     def LostMode(self):
@@ -536,15 +569,24 @@ class MainDecision(Node):
 
         elif self.status == 17:
             motion_msg.command = Motion.Neck_Center
+
+        elif self.status == 18:
+            motion_msg.command = Motion.Hurdle_Forward_20
+            
+        elif self.status == 19:
+            motion_msg.command = Motion.Hurdle_Go
+            
+        elif self.status == 20:
+            motion_msg.command = Motion.Forward_4step
         
         self.motion_pub.publish(motion_msg)
-        motion_name = self.motion_name_by_command.get(motion_msg.command, "Unknown")
-        self.get_logger().info(f"motion command: {motion_name} ({motion_msg.command})")
+        self.get_logger().info(f"motion command: {motion_msg.command}")
         
         self.line_data = False
         self.ball_data = False
         self.hurdle_data = False
-        self.motion_end = False
+        #test mode일 때는 true 로 유지
+        self.motion_end = True if self.test_mode else False
         self.line_buffer.clear()
         self.ball_buffer.clear()
         self.ball_in_hand_buffer.clear()

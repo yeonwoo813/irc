@@ -68,6 +68,15 @@ bool msgs__msg__line_result__convert_from_py(PyObject * _pymsg, void * _ros_mess
     ros_message->angle = PyLong_AsUnsignedLong(field);
     Py_DECREF(field);
   }
+  {  // follow_point
+    PyObject * field = PyObject_GetAttrString(_pymsg, "follow_point");
+    if (!field) {
+      return false;
+    }
+    assert(PyBool_Check(field));
+    ros_message->follow_point = (Py_True == field);
+    Py_DECREF(field);
+  }
 
   return true;
 }
@@ -106,6 +115,17 @@ PyObject * msgs__msg__line_result__convert_to_py(void * raw_ros_message)
     field = PyLong_FromUnsignedLong(ros_message->angle);
     {
       int rc = PyObject_SetAttrString(_pymessage, "angle", field);
+      Py_DECREF(field);
+      if (rc) {
+        return NULL;
+      }
+    }
+  }
+  {  // follow_point
+    PyObject * field = NULL;
+    field = PyBool_FromLong(ros_message->follow_point ? 1 : 0);
+    {
+      int rc = PyObject_SetAttrString(_pymessage, "follow_point", field);
       Py_DECREF(field);
       if (rc) {
         return NULL;

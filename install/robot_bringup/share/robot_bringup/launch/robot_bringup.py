@@ -17,6 +17,7 @@ def generate_launch_description():
     use_motion = LaunchConfiguration('use_motion')
     use_vision = LaunchConfiguration('use_vision')
     use_decision = LaunchConfiguration('use_decision')
+    decision_test_mode = LaunchConfiguration('decision_test_mode')
 
     declare_use_realsense = DeclareLaunchArgument(
         'use_realsense',
@@ -43,6 +44,11 @@ def generate_launch_description():
         default_value='true',
         description='Start decision package node',
     )
+    declare_decision_test_mode = DeclareLaunchArgument(
+        'decision_test_mode',
+        default_value='false',
+        description='Keep motion_end true for decision-only tests',
+    )
 
     # 1. Dynamixel motion 노드
     motion_node = Node(
@@ -55,6 +61,7 @@ def generate_launch_description():
         remappings=[
             ('motion_command', '/motion_command'),
             ('motion_end', '/motion_end'),
+            ('motion_prepare', '/motion_prepare'),
         ],
         arguments=['--ros-args', '--log-level', 'info'],
     )
@@ -173,7 +180,13 @@ def generate_launch_description():
                     ('ball_result', '/ball_result'),
                     ('hurdle_result', '/hurdle_result'),
                     ('motion_end', '/motion_end'),
+                    ('motion_prepare', '/motion_prepare'),
                     ('motion_command', '/motion_command'),
+                ],
+                parameters=[
+                    {
+                        'test_mode': decision_test_mode,
+                    }
                 ],
                 arguments=['--ros-args', '--log-level', 'info'],
             )
@@ -186,6 +199,7 @@ def generate_launch_description():
         declare_use_motion,
         declare_use_vision,
         declare_use_decision,
+        declare_decision_test_mode,
         motion_node,
         realsense_launch,
         webcam_node,
