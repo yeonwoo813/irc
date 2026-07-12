@@ -24,6 +24,10 @@ class Motion:
     Neck_Left = 15
     Neck_Right = 16
     Neck_Center = 17
+    Hurdle_Forward_20 = 18
+    Hurdle_Go = 19
+    Forward_4step = 20
+
 
     Data_None = 99
     
@@ -44,6 +48,12 @@ class Ball:
 class Line:
     Line_None = 99
 
+class Hurdle:
+    Hurdle_Detected = Motion.Hurdle_Forward_20
+    Hurdle_Go = 19
+    Hurdle_None = 99
+
+
     
 class MainDecision(Node):
     def __init__(self):
@@ -52,16 +62,9 @@ class MainDecision(Node):
         #초기값 설정
         self.status = 0
         self.motion_end = False
-        self.command_sent_for_current_motion = False
         self.line_data = False
         self.ball_data = False
         self.hurdle_data = False
-        self.line_status = Line.Line_None
-        self.ball_status = Ball.Ball_None
-        self.hurdle_status = Line.Line_None
-        self.angle = 0
-        self.ball_angle = 0
-        self.hurdle_angle = 0
 
         #ball
         self.has_ball = False
@@ -82,6 +85,10 @@ class MainDecision(Node):
         self.goal_count = 0
         self.turn_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
+
+        #hurdle
+        self.hurdle_step = 0
+        self.hurdle_done = False
         
         #최근 5개의 데이터를 저장하는 버퍼
         self.line_buffer = deque(maxlen=5)
@@ -94,80 +101,75 @@ class MainDecision(Node):
         self.ball_result_sub = self.create_subscription(BallResult, 'ball_result', self.BallResultCallback, 10)
         self.hurdle_result_sub = self.create_subscription(HurdleResult, 'hurdle_result', self.HurdleResultCallback, 10)
         self.motion_end_sub = self.create_subscription(MotionEnd, 'motion_end', self.MotionEndCallback, 10)
-        self.motion_prepare_sub = self.create_subscription(MotionEnd, 'motion_prepare', self.MotionPrepareCallback, 10)
         #publish
         self.motion_pub = self.create_publisher(MotionCommand, 'motion_command', 10)
-
-        self.motion_name_by_command = {
-            value: name
-            for name, value in Motion.__dict__.items()
-            if not name.startswith('_') and isinstance(value, int)
-        }
         
     # 콜백함수에서 모션 종료 여부를 업데이트
     def MotionEndCallback(self, motion_end_msg:MotionEnd):
         self.motion_end = motion_end_msg.motion_end
-        if motion_end_msg.motion_end == True:
-            self.command_sent_for_current_motion = False
         self.get_logger().info(f"motion_end: {motion_end_msg.motion_end}")
-
-    # motion에서 모션 종료 직전 prepare=True를 보내면 다음 명령을 미리 판단
-    def MotionPrepareCallback(self, motion_prepare_msg:MotionEnd):
-        if motion_prepare_msg.motion_end != True:
-            return
-
-        if self.command_sent_for_current_motion == True:
-            self.get_logger().info("motion_prepare received, but command already sent")
-            return
-
-        self.get_logger().info("motion_prepare received: prepare next motion command")
-        self.PrepareDecision()
-
-    def PrepareDecision(self):
-        if len(self.line_buffer) < 3:
-            self.get_logger().info("not enough data in line buffer")
-            return
-
-        if len(self.ball_buffer) < 3:
-            self.get_logger().info("not enough data in ball buffer")
-            return
-
-        if len(self.hurdle_buffer) < 3:
-            self.get_logger().info("not enough data in hurdle buffer")
-            return
-
-        self.line_status = Counter(self.line_buffer).most_common(1)[0][0]
-        self.ball_status = Counter(self.ball_buffer).most_common(1)[0][0]
-        self.ball_in_hand = Counter(self.ball_in_hand_buffer).most_common(1)[0][0]
-        self.hurdle_status = Counter(self.hurdle_buffer).most_common(1)[0][0]
-
-        self.line_data = True
-        self.ball_data = True
-        self.hurdle_data = True
-
-        self.get_logger().info(
-            f"[PreparedData] line: {self.line_status}, ball: {self.ball_status}, "
-            f"hurdle: {self.hurdle_status}, in_hand: {self.ball_in_hand}"
-        )
-        self.Decision()
         
         
     def LineResultCallback(self, line_msg:LineResult):
         #최신 데이터 갱신
         self.line_buffer.append(line_msg.status)
-        self.angle = line_msg.angle
-        self.get_logger().info(f"[LineResult] status: {line_msg.status}, angle: {line_msg.angle}")
+        if self.motion_end == True:
+            if len (self.line_buffer) >= 3:
+                # Counter를 사용해 가장 빈도수가 높은 값 추출
+                counts = Counter(self.line_buffer)
+                most_common_status = counts.most_common(1)[0][0]
+                #다수결 따라 라인 status 결정
+                self.line_status = most_common_status
+                self.angle = line_msg.angle
+                #라인 데이터 ready
+                self.line_data = True
+                # line result 상태, 각도를 로그로 출력
+                self.get_logger().info(f"[LineResult] status: {line_msg.status}, angle: {line_msg.angle}")
+                self.Decision()
+            else:
+                self.get_logger().info(f"not enough data in line buffer")
+        else:
+            self.get_logger().info(f"line: motion not ended yet")
             
     def BallResultCallback(self, ball_msg:BallResult):
         self.ball_buffer.append(ball_msg.status)
         self.ball_in_hand_buffer.append(bool(getattr(ball_msg, 'ball_in_hand', False)))
-        self.ball_angle = ball_msg.angle
-        self.get_logger().info(f"[BallResult] status: {ball_msg.status}, angle: {ball_msg.angle}, in_hand: {self.ball_in_hand}")
+        
+        if self.motion_end == True:
+            if len (self.ball_buffer) >= 3:
+                counts = Counter(self.ball_buffer)
+                most_common_status = counts.most_common(1)[0][0]
+                hand_counts = Counter(self.ball_in_hand_buffer)
+                #다수결 따라 ball status 결정
+                self.ball_status = most_common_status
+                self.ball_angle = ball_msg.angle
+                self.ball_in_hand = hand_counts.most_common(1)[0][0]
+                #ball 데이터 ready
+                self.ball_data = True
+                self.get_logger().info(f"[BallResult] status: {ball_msg.status}, angle: {ball_msg.angle}, in_hand: {self.ball_in_hand}")
+                self.Decision()
+            else:
+                self.get_logger().info(f"not enough data in ball buffer")
+        else:
+            self.get_logger().info(f"ball: motion not ended yet")
             
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
         self.hurdle_buffer.append(hurdle_msg.status)
-        self.hurdle_angle = hurdle_msg.angle
-        self.get_logger().info(f"[HurdleResult] status: {hurdle_msg.status}, angle: {hurdle_msg.angle}")
+        if self.motion_end == True:
+            if len (self.hurdle_buffer) >= 3:
+                counts = Counter(self.hurdle_buffer)
+                most_common_status = counts.most_common(1)[0][0]
+                #다수결 따라 hurdle status 결정
+                self.hurdle_status = most_common_status
+                self.hurdle_angle = hurdle_msg.angle
+                #hurdle 데이터 ready
+                self.hurdle_data = True
+                self.get_logger().info(f"[HurdleResult] status: {hurdle_msg.status}, angle: {hurdle_msg.angle}")
+                self.Decision()
+            else:
+                self.get_logger().info(f"not enough data in hurdle buffer")
+        else:
+            self.get_logger().info(f"hurdle: motion not ended yet")
 
 
 ###### 판단 로직 시작 #######
@@ -190,7 +192,7 @@ class MainDecision(Node):
             self.BallMode()
 
         #우선순위 2 : hurdle mode
-        elif self.hurdle_status == 11:
+        elif self.hurdle_status == Hurdle.Hurdle_None:
             self.lost_count = 0
             self.lost_step = 0
             self.lost_found_dir = 0
@@ -360,7 +362,20 @@ class MainDecision(Node):
         
     #Hurdle mission            
     def HurdleMode(self):
-        pass
+        #step 0: 허들 감지 후 20번 종종걸음
+        if self.hurdle_step == 0:
+            self.hurdle_step = 1
+            self.status = Motion.Hurdle_Forward_20
+            self.MotionCommand()
+            return
+        
+        #step 1: 허들 넘기 실행
+        if self.hurdle_step == 1:
+            self.hurdle_step = 0
+            self.status = Motion.Hurdle_Go
+            self.MotionCommand()
+            return
+
     
     #Lost             
     def LostMode(self):
@@ -542,11 +557,18 @@ class MainDecision(Node):
 
         elif self.status == 17:
             motion_msg.command = Motion.Neck_Center
+
+        elif self.status == 18:
+            motion_msg.command = Motion.Hurdle_Forward_20
+            
+        elif self.status == 19:
+            motion_msg.command = Motion.Hurdle_Go
+            
+        elif self.status == 20:
+            motion_msg.command = Motion.Forward_4step
         
         self.motion_pub.publish(motion_msg)
-        self.command_sent_for_current_motion = True
-        motion_name = self.motion_name_by_command.get(motion_msg.command, "Unknown")
-        self.get_logger().info(f"motion command: {motion_name} ({motion_msg.command})")
+        self.get_logger().info(f"motion command: {motion_msg.command}")
         
         self.line_data = False
         self.ball_data = False
