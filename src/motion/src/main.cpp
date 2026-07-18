@@ -1,342 +1,507 @@
 #include "main.hpp"
 
 #include <chrono>
+#include <exception>
 #include <functional>
-#include <memory>
+#include <utility>
 
 using namespace std::chrono_literals;
 
-
-// SDK 관절 수와 Dynamixel 개수가 다르면 컴파일 중 오류
 static_assert(
     NUMBER_OF_JOINTS == NUMBER_OF_DYNAMIXELS,
-    "SDK 관절 수와 Dynamixel 개수가 다릅니다."
-);
+    "SDK 관절 수와 Dynamixel 개수가 다릅니다.");
 
-// ==========================================================
-// MainNode 생성자
-// ==========================================================
-MainNode::MainNode() 
+
+MainNode::MainNode()
 : Node("motion_main_node")
 {
     RCLCPP_INFO(
-        this->get_logger(), "Motion MainNode 시작");
-    
-    // Callback 객체 생성
+        this->get_logger(),
+        "Motion MainNode 시작");
+
     callback_ = std::make_shared<Callback>();
-    // Dxl 객체 생성
     dxl_port_ = std::make_shared<Dxl>(false);
 
-    // motion_end와 motion_ready를 같이 보내는 publisher
-    auto motion_state_qos = rclcpp::QoS(1).reliable().transient_local();
-    motion_end_pub_ = this->create_publisher<msgs::msg::MotionEnd>(
-        "motion_end", motion_state_qos);
+    auto motion_state_qos =
+        rclcpp::QoS(1).reliable().transient_local();
+    motion_end_pub_ =
+        this->create_publisher<msgs::msg::MotionEnd>(
+            "motion_end",
+            motion_state_qos);
 
-    // command subscriber
-    motion_command_sub_ = this->create_subscription<msgs::msg::MotionCommand>(
-        "motion_command", 10, std::bind(
-            &MainNode::MotionCallback,
-            this,
-            std::placeholders::_1));
+    hurdle_recalibrate_client_ =
+        this->create_client<std_srvs::srv::Trigger>(
+            "/hurdle/recalibrate");
 
-    // 200Hz 제어루프 타이머 생성
-    timer_ = this->create_wall_timer(
-        5ms, std::bind(&MainNode::ControlLoop, this));
-    // 초기에는 타이머를 멈춤, 초기 자세 완료 후 시작
-    timer_->cancel(); 
-    
-    //초기자세 Publish 후 실행
+    motion_command_sub_ =
+        this->create_subscription<msgs::msg::MotionCommand>(
+            "motion_command",
+            10,
+            std::bind(
+                &MainNode::MotionCallback,
+                this,
+                std::placeholders::_1));
+
+    // 작업 스레드가 끝났는지만 확인하는 timer입니다.
+    // 200Hz 모션 전송에는 관여하지 않습니다.
+    completion_timer_ = this->create_wall_timer(
+        1ms,
+        std::bind(
+            &MainNode::HandleMotionCompletion,
+            this));
+
     PublishMotionState(false, false);
-    StartInitialPose();
+
+    if (!dxl_port_->IsReady())
+    {
+        RCLCPP_FATAL(
+            this->get_logger(),
+            "Dynamixel 포트 초기화 실패. 초기자세를 시작하지 않습니다.");
+        return;
+    }
+
+    // 생성자 안에서 스레드를 바로 시작하지 않고 executor가 시작된 직후 실행합니다.
+    // v3의 200ms 안정화 지연은 제거했습니다.
+    startup_timer_ = this->create_wall_timer(
+        1ms,
+        [this]()
+        {
+            startup_timer_->cancel();
+            StartInitialPose();
+        });
 }
+
+
+MainNode::~MainNode()
+{
+    stop_requested_.store(true);
+
+    if (startup_timer_)
+    {
+        startup_timer_->cancel();
+    }
+    if (completion_timer_)
+    {
+        completion_timer_->cancel();
+    }
+    if (calibration_timer_)
+    {
+        calibration_timer_->cancel();
+    }
+    if (ready_timer_)
+    {
+        ready_timer_->cancel();
+    }
+
+    if (motion_thread_.joinable())
+    {
+        motion_thread_.join();
+    }
+}
+
 
 void MainNode::StartInitialPose()
 {
-    //다이나믹셀 현재 괁절각 읽기
-    RCLCPP_INFO(this->get_logger(), "다이나믹셀 현재 관절값 읽기");
-    Eigen::VectorXd current_theta = dxl_port_->GetThetaAct();   
-
-    //관절각 유효성 검사
-    if (!IsValidTheta(current_theta)) {
-        RCLCPP_ERROR(this->get_logger(), "다이나믹셀 현재 관절값이 유효하지 않습니다. 초기자세를 시작할 수 없습니다.");
-        //초기자세를 시작하면 안되므로
-        PublishMotionState(false, false);
-        return;
-    }
-
-    //Callback 객체에 현재 관절각 설정
-    callback_->SetCurrentTheta(current_theta);
-
-    //초기자세까지 3초동안 이동하는 궤적 생성
-    callback_->SelectMotion(0);
-
-    if (!callback_->IsMoving()) {
-        RCLCPP_ERROR(this->get_logger(), "초기자세 궤적 생성 실패");
-        PublishMotionState(false, false);
-        return;
-    }
-    current_motion_id_ = 0;
-    //이동중이므로 아직 false
-    PublishMotionState(false, false);
-    //제어루프 타이머 시작
-    timer_->reset(); 
-    
-    RCLCPP_INFO(this->get_logger(), "초기자세 이동 시작");
-}
-
-// ==========================================================
-// Decision에서 모션 명령 수신
-// ==========================================================
-void MainNode::MotionCallback(
-    const msgs::msg::MotionCommand::SharedPtr msg)
-{
-    //MotionCommand 메시지에서 command 번호를 꺼내기
-    const int command = msg->command;
-
-    RCLCPP_INFO(this->get_logger(), "MotionCommand 수신: %d", command);
-
-    //초기 자세 완료 여부 확인
-    if (!initial_pose_done_) {
-        RCLCPP_WARN(this->get_logger(), "초기자세 완료 전, 모션 명령 무시");
-        return;
-    }
-
-    //다른 모션이 실행중인지 확인
-    if (callback_->IsMoving()) {
-        RCLCPP_WARN(this->get_logger(), "다른 모션이 실행중, 모션 명령 무시");
-        return;
-    }
-
-    //모션 시작 전 현재 관절각 읽기
-    Eigen::VectorXd current_theta = dxl_port_->GetThetaAct();
-
-    if (!IsValidTheta(current_theta)) {
-        RCLCPP_ERROR(this->get_logger(), "다이나믹셀 현재 관절값이 유효하지 않습니다. 모션을 시작할 수 없습니다.");
-        PublishMotionState(false, false);
-        return;
-    }
-
-    //현재 자세를 새 궤적의 시작점으로 설정
-    callback_->SetCurrentTheta(current_theta);
-
-    //command -> selectmotion
-    switch (command)
-    {
-        case 0:
-            callback_->SelectMotion(0);
-            break;
-
-        case 1:
-            callback_->SelectMotion(1);
-            break;
-
-        case 2: 
-            callback_->SelectMotion(2);
-            break;
-
-        case 3:
-            callback_->SelectMotion(3);
-            break;
-
-        case 4:
-            callback_->SelectMotion(4);
-            break;
-
-        case 5:
-            callback_->SelectMotion(5);
-            break;
-
-        case 6:
-            callback_->SelectMotion(6);
-            break;
-
-        case 7:
-            callback_->SelectMotion(7);
-            break;
-
-        case 8:
-            callback_->SelectMotion(8);
-            break;
-
-        case 9:
-            callback_->SelectMotion(9);
-            break;
-
-        case 10:
-            callback_->SelectMotion(10);
-            break;
-
-        case 11:
-            callback_->SelectMotion(11);
-            break;
-
-        case 12:
-            callback_->SelectMotion(12);
-            break;
-
-        case 13:
-            callback_->SelectMotion(13);
-            break;
-
-        case 14:
-            callback_->SelectMotion(14);
-            break;
-
-        case 15:
-            callback_->SelectMotion(15);
-            break;
-
-        case 16:
-            callback_->SelectMotion(16);
-            break;
-
-        case 17:
-            callback_->SelectMotion(17);
-            break;
-
-        case 18:
-            callback_->SelectMotion(18);
-            break;
-        
-        case 19:
-            callback_->SelectMotion(19);
-            break;
-
-        case 20:
-            callback_->SelectMotion(20);
-            break;
-        
-        case 21:
-            callback_->SelectMotion(21);
-            break;
-
-        case 22:
-            callback_->SelectMotion(22);
-            break;
-
-        case 23:
-            callback_->SelectMotion(23);
-            break;
-
-        case 24:
-            callback_->SelectMotion(24);
-            break;
-
-        default:
-            RCLCPP_WARN(this->get_logger(), "알 수 없는 모션 명령: %d", command);
-            return;
-    }
-    current_motion_id_ = command;
-
-    //motion 실행 중 상태 발행
-    PublishMotionState(false, true);
-    //제어루프 타이머 시작
-    timer_->reset();
-
-    RCLCPP_INFO(this->get_logger(), "모션 %d 실행 시작", current_motion_id_);
-
-}
-
-// ==========================================================
-// 200Hz 제어 루프
-// ==========================================================
-void MainNode::ControlLoop()
-{
-    //실행중인 궤적이 없으면 타이머 중지
-    if (!callback_->IsMoving()) {
-        timer_->cancel();
-        return;
-    }
-
-    //다음 5ms tick 목표각 계산
-    // callback의 배열을 Eigen::VectorXd로 변환
-    callback_->Write_All_Theta();
-    Eigen::VectorXd target_theta =
-        Eigen::Map<Eigen::VectorXd>(
-            callback_->All_Theta,
-             NUMBER_OF_JOINTS);
-
-    //목표각 검사 
-    // 잘못된 목표각은 중지, 리셋
-    if (!IsValidTheta(target_theta))
-    {
-        RCLCPP_ERROR(this->get_logger(), "다음 tick 목표각이 유효하지 않습니다. 모션을 중지합니다.");
-        timer_->cancel();
-        current_motion_id_ = -1;
-        PublishMotionState(false, false);
-        return;
-    }
-    
-    //목표 관절각 Dxl 객체에 저장
-    dxl_port_->SetThetaRef(target_theta);
-
-    //다이나믹셀에 목표각 전송
-    dxl_port_->syncWriteTheta();
-
-    // 모션이 끝났는지 확인
-    if (callback_->IsMoving())
-    {
-        return;
-    }
-    //모션 완료 후 타이머 중지
-    timer_->cancel();
-
-    /////초기자세 완료 처리
-    if (!initial_pose_done_ && current_motion_id_ == 0) {
-        initial_pose_done_ = true;
-        current_motion_id_ = -1;
-        //초기자세 완료. motion ready
-        PublishMotionState(true, true);
-        RCLCPP_INFO(this->get_logger(), "초기자세 완료");
-        return;
-    }
-
-    //일반 모션 완료 처리
-    RCLCPP_INFO(this->get_logger(), "모션 %d 완료", current_motion_id_);
-    current_motion_id_ = -1;
-    //모션 완료. motion end
-    PublishMotionState(true, true);
-
-}
-
-
-// ==========================================================
-// 관절각 데이터 검사
-// ==========================================================
-bool MainNode::IsValidTheta(
-    const Eigen::VectorXd& theta) const
-{
-    // 관절 개수가 SDK 설정과 같은지 검사
-    if (theta.size() != NUMBER_OF_JOINTS)
+    if (!StartMotion(0, true))
     {
         RCLCPP_ERROR(
             this->get_logger(),
-            "관절각 개수 오류: 현재=%ld, 필요=%d",
-            static_cast<long>(theta.size()),
-            NUMBER_OF_JOINTS
-        );
+            "초기자세 모션을 시작하지 못했습니다.");
+        PublishMotionState(false, false);
+    }
+}
 
+
+bool MainNode::StartMotion(int motion_id, bool initial_motion)
+{
+    if (!dxl_port_->IsReady())
+    {
         return false;
     }
 
+    if (motion_running_.load())
+    {
+        return false;
+    }
 
-    // NaN 또는 Inf가 포함되어 있는지 검사
-    if (!theta.allFinite())
+    if (!callback_->HasMotion(motion_id))
     {
         RCLCPP_ERROR(
             this->get_logger(),
-            "관절각에 NaN 또는 Inf가 포함되어 있습니다."
-        );
-
+            "존재하지 않는 모션 ID: %d",
+            motion_id);
         return false;
     }
 
+    JoinFinishedMotionThread();
+
+    // getpose.py 재생 버튼 순서와 동일합니다.
+    // 1) 전체 Torque ON
+    // 2) move_sequence_smoothly() 내부에서 Present Position 읽기
+    dxl_port_->EnableTorqueAllStreamlitStyle();
+
+    Dxl::RawArray current_raw{};
+    if (!dxl_port_->ReadPresentRawStreamlitStyle(current_raw))
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "Dynamixel 현재 위치를 읽을 수 없습니다.");
+        return false;
+    }
+
+    callback_->SetCurrentRaw(current_raw);
+
+    if (!callback_->SelectMotion(motion_id) ||
+        !callback_->IsMoving())
+    {
+        return false;
+    }
+
+    current_motion_id_.store(motion_id);
+    motion_running_.store(true);
+
+    if (initial_motion)
+    {
+        PublishMotionState(false, false);
+    }
+    else
+    {
+        PublishMotionState(false, true);
+    }
+
+    try
+    {
+        motion_thread_ = std::thread(
+            &MainNode::RunMotionStreamlitStyle,
+            this,
+            motion_id,
+            initial_motion,
+            current_raw);
+    }
+    catch (const std::exception& error)
+    {
+        motion_running_.store(false);
+        current_motion_id_.store(-1);
+        callback_->AbortMotion();
+
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "모션 스레드 생성 실패: %s",
+            error.what());
+        return false;
+    }
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "모션 %d 실행 시작",
+        motion_id);
 
     return true;
 }
 
 
-void MainNode::PublishMotionState(bool motion_end, bool motion_ready)
+void MainNode::RunMotionStreamlitStyle(
+    int motion_id,
+    bool initial_motion,
+    Dxl::RawArray start_raw)
+{
+    MotionCompletion result;
+    result.motion_id = motion_id;
+    result.initial_motion = initial_motion;
+
+    Dxl::RawArray last_raw = start_raw;
+    const auto motion_start = std::chrono::steady_clock::now();
+
+    if (!dxl_port_->BeginStreamWrite())
+    {
+        result.stopped = true;
+    }
+    else
+    {
+        // getpose.py: dt = 1.0 / hz
+        const std::chrono::duration<double> dt_seconds(1.0 / HZ);
+
+        while (!stop_requested_.load() && callback_->IsMoving())
+        {
+            // getpose.py는 각 outer segment 진입 시 계수를 먼저 계산하고,
+            // 그 다음 inner tick의 loop_start를 측정합니다.
+            if (callback_->NeedsSegmentPreparation() &&
+                !callback_->PrepareCurrentSegment())
+            {
+                result.stopped = true;
+                break;
+            }
+
+            // getpose.py: loop_start = time.time()
+            const auto loop_start = std::chrono::steady_clock::now();
+
+            Dxl::RawArray target_raw{};
+            if (!callback_->GetNextRaw(target_raw))
+            {
+                result.stopped = true;
+                break;
+            }
+
+            // getpose.py와 동일하게 txPacket 결과 때문에 tick 진행을 바꾸지 않습니다.
+            const int comm_result =
+                dxl_port_->StreamWriteRaw(target_raw);
+            if (comm_result != COMM_SUCCESS)
+            {
+                ++result.tx_failure_count;
+            }
+
+            last_raw = target_raw;
+            ++result.tick_count;
+
+            // getpose.py:
+            // elapsed = time.time() - loop_start
+            // time.sleep(max(0.0, dt - elapsed))
+            const auto elapsed =
+                std::chrono::steady_clock::now() - loop_start;
+            const auto remaining = dt_seconds - elapsed;
+
+            if (remaining.count() > 0.0)
+            {
+                std::this_thread::sleep_for(remaining);
+            }
+        }
+
+        dxl_port_->EndStreamWrite();
+    }
+
+    if (stop_requested_.load())
+    {
+        result.stopped = true;
+    }
+
+    // Streamlit은 함수 반환 후 저장된 마지막 pose를 slider에 반영합니다.
+    // 마지막 보간 tick의 부동소수점 오차값이 아니라 원본 저장 pose를 사용합니다.
+    Dxl::RawArray final_pose_raw{};
+    if (callback_->GetFinalRaw(final_pose_raw))
+    {
+        dxl_port_->SetFallbackRaw(final_pose_raw);
+    }
+    else
+    {
+        dxl_port_->SetFallbackRaw(last_raw);
+    }
+
+    result.elapsed_seconds =
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - motion_start)
+            .count();
+
+    {
+        std::lock_guard<std::mutex> lock(completion_mutex_);
+        completion_ = result;
+    }
+}
+
+
+void MainNode::HandleMotionCompletion()
+{
+    std::optional<MotionCompletion> result;
+
+    {
+        std::lock_guard<std::mutex> lock(completion_mutex_);
+        if (!completion_.has_value())
+        {
+            return;
+        }
+
+        result = completion_;
+        completion_.reset();
+    }
+
+    if (motion_thread_.joinable())
+    {
+        motion_thread_.join();
+    }
+
+    motion_running_.store(false);
+    current_motion_id_.store(-1);
+
+    if (!result.has_value() || result->stopped)
+    {
+        callback_->AbortMotion();
+        PublishMotionState(false, false);
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "모션 %d 실행이 중단되었습니다.",
+            result.has_value() ? result->motion_id : -1);
+        return;
+    }
+
+    if (result->tx_failure_count > 0)
+    {
+        // 모션 중에는 출력하지 않아 Streamlit 루프 시간을 건드리지 않고,
+        // 종료 후에만 진단 정보를 한 번 표시합니다.
+        RCLCPP_WARN(
+            this->get_logger(),
+            "모션 %d 중 txPacket 실패 %llu회. "
+            "Streamlit과 동일하게 해당 tick은 재시도하지 않고 진행했습니다.",
+            result->motion_id,
+            static_cast<unsigned long long>(result->tx_failure_count));
+    }
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "모션 %d 완료: ticks=%llu, 실제 실행시간=%.6f초",
+        result->motion_id,
+        static_cast<unsigned long long>(result->tick_count),
+        result->elapsed_seconds);
+
+    if (result->initial_motion && !initial_pose_done_)
+    {
+        initial_pose_done_ = true;
+        PublishMotionState(false, false);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "초기자세 완료: 5초 뒤 hurdle 캘리브레이션, "
+            "10초 뒤 motion_ready=true");
+
+        SchedulePostInitialPoseSequence();
+        return;
+    }
+
+    PublishMotionState(true, true);
+}
+
+
+void MainNode::JoinFinishedMotionThread()
+{
+    if (!motion_running_.load() && motion_thread_.joinable())
+    {
+        motion_thread_.join();
+    }
+}
+
+
+void MainNode::MotionCallback(
+    const msgs::msg::MotionCommand::SharedPtr msg)
+{
+    const int command = msg->command;
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "MotionCommand 수신: %d",
+        command);
+
+    if (!initialization_ready_)
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "초기자세 후 대기/캘리브레이션 완료 전, 모션 명령 무시");
+        return;
+    }
+
+    if (motion_running_.load())
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "모션 %d 실행 중, 새 모션 %d 명령 무시",
+            current_motion_id_.load(),
+            command);
+        return;
+    }
+
+    if (!StartMotion(command, false))
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "모션 %d 시작 실패",
+            command);
+        PublishMotionState(true, true);
+    }
+}
+
+
+void MainNode::SchedulePostInitialPoseSequence()
+{
+    calibration_timer_ = this->create_wall_timer(
+        5s,
+        std::bind(
+            &MainNode::RequestHurdleRecalibration,
+            this));
+
+    ready_timer_ = this->create_wall_timer(
+        10s,
+        std::bind(
+            &MainNode::FinishInitialization,
+            this));
+}
+
+
+void MainNode::RequestHurdleRecalibration()
+{
+    calibration_timer_->cancel();
+
+    if (!hurdle_recalibrate_client_->service_is_ready())
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "/hurdle/recalibrate 서비스를 찾지 못했습니다. "
+            "캘리브레이션을 시작할 수 없습니다.");
+        return;
+    }
+
+    auto request =
+        std::make_shared<std_srvs::srv::Trigger::Request>();
+
+    hurdle_recalibrate_client_->async_send_request(
+        request,
+        [this](
+            rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+        {
+            const auto response = future.get();
+
+            if (response->success)
+            {
+                hurdle_calibration_started_ = true;
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Hurdle 캘리브레이션 시작: "
+                    "약 3초 동안 초기자세를 유지합니다.");
+            }
+            else
+            {
+                RCLCPP_ERROR(
+                    this->get_logger(),
+                    "Hurdle 캘리브레이션 요청 실패: %s",
+                    response->message.c_str());
+            }
+        });
+}
+
+
+void MainNode::FinishInitialization()
+{
+    ready_timer_->cancel();
+
+    if (!hurdle_calibration_started_)
+    {
+        PublishMotionState(false, false);
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "Hurdle 캘리브레이션 시작이 확인되지 않아 "
+            "motion_ready=false를 유지합니다.");
+        return;
+    }
+
+    initialization_ready_ = true;
+    PublishMotionState(true, true);
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "초기자세 후 10초 대기 완료: "
+        "motion_ready=true, motion_end=true");
+}
+
+
+void MainNode::PublishMotionState(
+    bool motion_end,
+    bool motion_ready)
 {
     msgs::msg::MotionEnd msg;
     msg.motion_end = motion_end;
@@ -345,7 +510,7 @@ void MainNode::PublishMotionState(bool motion_end, bool motion_ready)
 }
 
 
-int main(int argc, char ** argv)
+int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<MainNode>();

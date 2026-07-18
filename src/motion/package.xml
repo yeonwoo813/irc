@@ -12,6 +12,7 @@
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>msgs</depend>
+  <depend>std_srvs</depend>
 
   <depend>dynamixel_sdk</depend>
   <depend>eigen</depend>

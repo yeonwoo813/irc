@@ -1,53 +1,63 @@
 cmake_minimum_required(VERSION 3.8)
 project(motion)
 
-# C++ 17 사용
-set(CMAKE_CXX_STANDARD 17)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 필수 패키지 찾기
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(dynamixel_sdk REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(Threads REQUIRED)
 
-# 헤더 경로 설정
-include_directories(include)
-
-# 🚀 실행 파일 이름을 'main'으로 변경
 add_executable(main
   src/main.cpp
   src/callback.cpp
-  src/sdk.cpp
   src/dynamixel.cpp
-  src/dynamixel_controller.cpp
+  src/sdk.cpp
 )
 
-# 인클루드 디렉토리 타겟 설정
-target_include_directories(main PUBLIC
+target_include_directories(main PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  ${Eigen3_INCLUDE_DIRS}
 )
 
-# 의존성 연결
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(main PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+  )
+endif()
+
 ament_target_dependencies(main
   rclcpp
-  std_msgs
   msgs
+  std_srvs
   dynamixel_sdk
 )
 
-# Eigen3 타겟 링크
-target_link_libraries(main Eigen3::Eigen)
+target_link_libraries(main
+  Eigen3::Eigen
+  Threads::Threads
+)
 
-# 설치 설정 (ros2 run motion main 으로 실행 가능하게)
-install(TARGETS
-  main
+install(TARGETS main
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# ROS 2 패키지 등록
+install(DIRECTORY include/
+  DESTINATION include
+)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
 ament_package()

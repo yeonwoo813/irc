@@ -1,71 +1,65 @@
 #pragma once
 
-#include <vector>
-#include <map>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
-#include <algorithm>
+#include <map>
+#include <vector>
 
 constexpr int NUMBER_OF_JOINTS = 22;
-
-// 200Hz 제어
-// 1 tick = 1 / 200 = 0.005초
 constexpr double HZ = 200.0;
 constexpr double PI = 3.14159265358979323846;
 
-// 포즈 이음새 방식
 enum class BlendType
 {
-    Stop,   // 해당 포즈에서 속도 0, 가속도 0으로 멈춤
-    Smooth  // 해당 포즈를 멈추지 않고 평균속도로 지나감
+    Stop,
+    Smooth
 };
 
-// 모션 시퀀스 구조체
+// Streamlit 호환 버전에서는 pose를 Dynamixel raw count 단위로 저장합니다.
 struct MotionSequence
 {
-    std::vector<std::vector<double>> poses; // poses[i] = i번째 포즈의 관절각 배열
-    std::vector<double> durations; // durations[0] = current_pose -> poses[0], 이후 포즈 사이 이동 시간 (초)
-    std::vector<BlendType> blends; // blends[i] = poses[i] -> poses[i+1] 이동 시, stop/smooth 선택
+    std::vector<std::vector<double>> poses;
+    std::vector<double> durations;
+    std::vector<BlendType> blends;
 };
 
-// 5차 다항식으로 만들어진 한 구간
 struct TrajectorySegment
 {
-    std::vector<double> c0, c1, c2, c3, c4, c5; // 5차 다항식 계수
-    int total_ticks = 0; // 이 구간을 몇 tick 동안 실행할지 (HZ 기준)
-    double T = 0.0; // 이 구간의 총 시간 (초)
+    std::vector<double> c0, c1, c2, c3, c4, c5;
+    int total_ticks = 0;
+    double T = 0.0;
 };
 
-class SDK_Motion // SDK_Motion 클래스는 모션 라이브러리와 궤적 생성 기능을 제공합니다.
+class SDK_Motion
 {
 public:
     SDK_Motion();
 
-    // 모션 궤적 생성
-    //
-    // active_trajectory_ 안에 앞으로 실행할 궤적을 미리 만들어두는 함수.
-    //
-    // current_pose부터 모션 내부 poses를 durations/blends 기준으로 실행함.
-    bool Generate_Trajectory(int motion_id, double* current_pose);
+    // getpose.py처럼 current pose, waypoints, waypoint 속도/가속도까지만 준비합니다.
+    bool Generate_Trajectory(int motion_id, const double* current_pose_raw);
 
-    // 200Hz마다 호출되는 함수
-    // 매 tick마다 다음 목표 관절각을 All_Theta에 써줌.
-    // main.cpp나 callback.cpp에서 이 값을 실제 모터로 보내면 됨.
-    bool Get_Next_Tick(double* All_Theta);
+    // Python outer for-loop처럼 각 segment 계수는 해당 segment 진입 직전에 계산합니다.
+    bool Needs_Segment_Preparation() const;
+    bool Prepare_Current_Segment();
 
-    // 현재 모션 실행 중인지 확인
+    // Python inner for-loop 한 번과 동일합니다.
+    // 목표 raw를 계산하고 통신 결과와 무관하게 내부 tick을 즉시 진행합니다.
+    bool Get_Next_Tick(double* all_raw);
+
+    bool Get_Final_Pose(double* final_raw) const;
+
+    void Abort_Motion();
+
     bool Is_Moving() const;
-
-    // 모션 ID 존재 여부 확인
     bool Has_Motion(int motion_id) const;
 
 private:
     void define_motions();
 
-    // 시간을 0.005초 단위로 보정
+    // Streamlit은 duration을 5ms 배수로 별도 반올림하지 않습니다.
     double Snap_Time(double seconds) const;
 
-    // 한 구간 q0 -> qf를 5차 다항식 계수로 변환
     void calculate_coefficients(
         const std::vector<double>& q0,
         const std::vector<double>& qf,
@@ -74,13 +68,20 @@ private:
         const std::vector<double>& a0,
         const std::vector<double>& af,
         double T,
-        TrajectorySegment& segment
-    );
+        TrajectorySegment& segment);
+
+    void ClearActiveMotion();
 
 private:
     std::map<int, MotionSequence> motion_library_;
 
-    std::vector<TrajectorySegment> active_trajectory_;
+    std::vector<std::vector<double>> active_waypoints_;
+    std::vector<double> active_durations_;
+    std::vector<std::vector<double>> active_velocities_;
+    std::vector<std::vector<double>> active_accelerations_;
+
+    TrajectorySegment current_segment_;
+    bool segment_prepared_ = false;
 
     int current_seg_idx_ = 0;
     int current_tick_ = 0;
@@ -88,4 +89,5 @@ private:
 
     std::vector<double> current_v_;
     std::vector<double> current_a_;
+    std::vector<double> final_pose_raw_;
 };

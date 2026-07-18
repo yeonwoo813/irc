@@ -1,5 +1,7 @@
 #include "dynamixel_controller.hpp"
 
+#include <limits>
+
 // dynamixel_controller.cpp 파일을 사용하는 이유는 Dxl_Controller 클래스의 메서드 구현을 이 파일에 작성하기 위해서입니다.
 // Dxl_Controller 클래스는 Dxl 클래스의 객체를 사용하여 다이나믹셀 모터의 상태를 읽고 제어하는 역할을 합니다. 
 // 따라서 Dxl_Controller 클래스의 메서드 구현에서는 Dxl 클래스의 메서드를 호출하여 관절의 각도와 속도를 읽거나 목표 각도를 설정하는 등의 작업을 수행합니다.
@@ -26,7 +28,9 @@ Dxl_Controller::Dxl_Controller(Dxl *dxlPtr) : dxlPtr(dxlPtr)
 VectorXd Dxl_Controller::GetJointTheta() // 관절 각도 [rad] 반환
 {
     VectorXd th_(NUMBER_OF_DYNAMIXELS);
-    th_ = dxlPtr->GetThetaAct();
+    if (!dxlPtr->GetThetaAct(th_)) {
+        th_.setConstant(std::numeric_limits<double>::quiet_NaN());
+    }
     for (uint8_t i=0; i<NUMBER_OF_DYNAMIXELS; i++)
     {
         th_cont[i] = th_[i]; // th_에 저장되어있던 각도 데이터를 th_cont 벡터에 복사합니다.
@@ -74,4 +78,3 @@ void Dxl_Controller::SetPosition(VectorXd theta)
     }
     dxlPtr->SetThetaRef(th_cont);
 }
-

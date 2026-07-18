@@ -1,21 +1,39 @@
 #pragma once
+
+#include <array>
+#include <cstdint>
+
 #include <rclcpp/rclcpp.hpp>
-#include <Eigen/Dense>
+
 #include "sdk.hpp"
 
 class Callback : public rclcpp::Node
-// Callback 클래스는 ROS 2 노드로서, 모션 제어와 관련된 콜백 기능을 제공합니다.
 {
-private:
-    SDK_Motion sdk_motion; // SDK_Motion를 사용하여 모션 라이브러리와 궤적 생성 기능을 제공합니다.
-
 public:
-    Callback(); // 생성자
-    
-    double All_Theta[NUMBER_OF_JOINTS]; 
+    Callback();
 
-    void SetCurrentTheta(const Eigen::VectorXd& theta);
-    void SelectMotion(int go);
-    void Write_All_Theta();
-    bool IsMoving();
+    // getpose.py의 q_start와 동일하게 Dynamixel raw count를 시작점으로 사용합니다.
+    bool SetCurrentRaw(
+        const std::array<int32_t, NUMBER_OF_JOINTS>& raw);
+
+    bool SelectMotion(int motion_id);
+
+    bool NeedsSegmentPreparation() const;
+    bool PrepareCurrentSegment();
+
+    // getpose.py inner-loop 한 tick과 동일합니다.
+    // SDK tick은 이 함수 호출 시 즉시 진행되며 통신 성공 여부와 연결되지 않습니다.
+    bool GetNextRaw(
+        std::array<int32_t, NUMBER_OF_JOINTS>& raw_target);
+
+    bool GetFinalRaw(
+        std::array<int32_t, NUMBER_OF_JOINTS>& final_raw) const;
+
+    bool IsMoving() const;
+    bool HasMotion(int motion_id) const;
+    void AbortMotion();
+
+private:
+    SDK_Motion sdk_motion_;
+    double all_raw_[NUMBER_OF_JOINTS]{};
 };
