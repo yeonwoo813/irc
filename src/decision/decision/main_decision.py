@@ -84,9 +84,6 @@ class MainDecision(Node):
         #test mode true/false에 따라 초기값 조정
         self.motion_end = self.test_mode
         self.motion_ready = self.test_mode
-        self.ball_decision_delay_sec = 1.0
-        self.motion_end_received_time_ns = None
-        self.ball_delay_log_printed = False
         self.line_data = False
         self.ball_data = False
         self.hurdle_data = False
@@ -153,15 +150,9 @@ class MainDecision(Node):
             return
         #메시지 받기 이전 상태 저장
         was_ready = self.motion_ready
-        was_motion_end = self.motion_end
         #최신 상태 갱신
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
-
-        # 모션 종료 신호가 새로 들어온 시각 저장
-        if self.motion_end and not was_motion_end:
-            self.motion_end_received_time_ns = self.get_clock().now().nanoseconds
-            self.ball_delay_log_printed = False
 
         self.get_logger().info(
             f"motion_ready: {self.motion_ready}, motion_end: {self.motion_end}"
@@ -268,24 +259,6 @@ class MainDecision(Node):
             or self.turn_after_shoot == True
             or (self.ball_status != Ball.Ball_None)
         ):
-            # BallMode만 motion_end 수신 후 1초가 지난 뒤 판단
-            if (
-                not self.test_mode
-                and self.motion_end_received_time_ns is not None
-            ):
-                elapsed_sec = (
-                    self.get_clock().now().nanoseconds
-                    - self.motion_end_received_time_ns
-                ) / 1_000_000_000
-
-                if elapsed_sec < self.ball_decision_delay_sec:
-                    if not self.ball_delay_log_printed:
-                        self.get_logger().info(
-                            "BallMode 판단 대기: motion_end 수신 후 1초 대기합니다."
-                        )
-                        self.ball_delay_log_printed = True
-                    return
-
             self.BallMode()
 
         #우선순위 2 : hurdle mode
