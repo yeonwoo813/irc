@@ -20,8 +20,7 @@ class BallStatus:
     Left_Move = 10
     Right_Move = 11
     Pick_Ready = 12
-    Recatch = 13
-    Shoot = 14
+    Shoot = 13
     Left_Half_Forward_3step = 21
     Right_Half_Forward_3step = 22
     Left_Turn_Ball = 23
