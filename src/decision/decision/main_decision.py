@@ -20,12 +20,12 @@ class Motion:
     Left_Move = 10
     Right_Move = 11
     Pick = 12
-    Recatch = 13
-    Shoot = 14
+    Shoot = 13
+    Neck_Up = 14
     Neck_Left = 15
     Neck_Right = 16
     Neck_Center = 17
-    Hurdle_Forward_20 = 18
+    Neck_Down = 18
     Hurdle_Go = 19
     Forward_3step = 20
     Left_Half_Forward_3step = 21
@@ -33,6 +33,7 @@ class Motion:
     Left_Turn_Ball = 23
     Right_Turn_Ball = 24
     Hurdle_1step = 25
+    Hurdle_Forward_20 = 26
 
     Data_None = 99
     
@@ -53,9 +54,10 @@ class Ball:
     Ball_Right = Motion.Right_Move
     Ball_Left = Motion.Left_Move
     Pick_Ready = Motion.Pick
+    Shoot = Motion.Shoot
     Ball_In_Hand = 50
 
-    Shoot_Ready = Motion.Shoot
+
 
 class Line:
     Line_None = 99
@@ -115,6 +117,7 @@ class MainDecision(Node):
         self.lost_body_turn_count = 0
         #goal
         self.goal_count = 0
+        self.neck_down_pending = False
         self.turn_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
 
@@ -381,10 +384,18 @@ class MainDecision(Node):
     def BallMode(self):
         self.current_mode = "BallMode"
 
-        #Pick 이후 공 확인, 회전 처리
+        #Pick 이후 공 확인, 성공했을 때만 Neck Up 실행
         if self.pick_done == True:
-            self.CheckBall()
+            pick_succeeded = self.CheckBall()
             self.turn_after_pick = True
+            self.turn_count = 0
+
+            if pick_succeeded:
+                self.status = Motion.Neck_Up
+                self.MotionCommand()
+                return
+
+            #Pick 실패 시 Neck Up을 건너뛰고 기존 회전 처리
             self.TurnAfterPick()
             return
         
@@ -392,8 +403,15 @@ class MainDecision(Node):
         if self.turn_after_pick == True:
             self.TurnAfterPick()
             return
-        
-        #Shoot 회전루프
+
+        #Shoot 완료 후 Neck Down을 한 번만 실행
+        if self.neck_down_pending == True:
+            self.neck_down_pending = False
+            self.status = Motion.Neck_Down
+            self.MotionCommand()
+            return
+
+        #Neck Down 완료 후 Shoot 회전루프
         if self.turn_after_shoot == True:
             self.TurnAfterShoot()
             return
@@ -410,10 +428,11 @@ class MainDecision(Node):
                 return
             
             #shoot 준비완료
-            if self.ball_status == Ball.Shoot_Ready:
+            if self.ball_status == Ball.Shoot:
                 self.status = Motion.Shoot
-                #shoot 이후 처리
+                #shoot 이후 처리 
                 self.has_ball = False
+                self.neck_down_pending = True
                 self.turn_after_shoot = True
                 self.turn_count = 0
                 self.MotionCommand()
@@ -426,7 +445,7 @@ class MainDecision(Node):
         
         ##### 공이 없으면 Pick Mode #####
         #공이 없는데 ShootReady이면 무시
-        if self.ball_status == Ball.Shoot_Ready:
+        if self.ball_status == Ball.Shoot:
             self.LineTracking()
             return
         
@@ -651,10 +670,10 @@ class MainDecision(Node):
             motion_msg.command = Motion.Pick
         
         elif self.status == 13:
-            motion_msg.command = Motion.Recatch
+            motion_msg.command = Motion.Shoot
 
         elif self.status == 14:
-            motion_msg.command = Motion.Shoot
+            motion_msg.command = Motion.Neck_Up
 
         elif self.status == 15:
             motion_msg.command = Motion.Neck_Left
@@ -666,7 +685,7 @@ class MainDecision(Node):
             motion_msg.command = Motion.Neck_Center
 
         elif self.status == 18:
-            motion_msg.command = Motion.Hurdle_Forward_20
+            motion_msg.command = Motion.Neck_Down
             
         elif self.status == 19:
             motion_msg.command = Motion.Hurdle_Go
@@ -688,6 +707,9 @@ class MainDecision(Node):
 
         elif self.status == 25:
             motion_msg.command = Motion.Hurdle_1step
+
+        elif self.status == 26:
+            motion_msg.command = Motion.Hurdle_Forward_20
         
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')
