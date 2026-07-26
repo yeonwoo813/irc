@@ -32,6 +32,7 @@ class Motion:
     Right_Half_Forward_3step = 22
     Left_Turn_Ball = 23
     Right_Turn_Ball = 24
+    Hurdle_1step = 25
 
     Data_None = 99
     
@@ -63,6 +64,8 @@ class Hurdle:
     Hurdle_Detected = Motion.Hurdle_Forward_20
     Hurdle_Go = 19
     Hurdle_None = 99
+    Hurdle_1step = 25
+
 
 
     
@@ -118,6 +121,8 @@ class MainDecision(Node):
         #hurdle
         self.hurdle_step = 0
         self.hurdle_done = False
+        self.hurdle_count = 0
+        self.hurdle_ready = False
 
         #최근 5개의 데이터를 저장하는 버퍼
         self.line_buffer = deque(maxlen=5)
@@ -229,9 +234,14 @@ class MainDecision(Node):
                 #다수결 따라 hurdle status 결정
                 self.hurdle_status = most_common_status
                 self.hurdle_angle = hurdle_msg.angle
+                self.hurdle_ready = hurdle_msg.hurdle_ready
                 #hurdle 데이터 ready
                 self.hurdle_data = True
-                self.get_logger().info(f"[HurdleResult] status: {hurdle_msg.status}, angle: {hurdle_msg.angle}")
+                self.get_logger().info(
+                    f"[HurdleResult] status={self.hurdle_status}, "
+                    f"ready={self.hurdle_ready}, "
+                    f"angle={self.hurdle_angle}"
+                )
                 self.Decision()
             else:
                 self.get_logger().info(f"not enough data in hurdle buffer")
@@ -262,7 +272,14 @@ class MainDecision(Node):
             self.BallMode()
 
         #우선순위 2 : hurdle mode
-        elif self.hurdle_status != Hurdle.Hurdle_None:
+        elif (
+            self.hurdle_count < 2
+            and (
+                self.hurdle_step != 0
+                or self.hurdle_ready
+                or self.hurdle_status != Hurdle.Hurdle_None
+            )
+        ):
             self.lost_count = 0
             self.lost_step = 0
             self.lost_found_dir = 0
@@ -436,16 +453,24 @@ class MainDecision(Node):
     def HurdleMode(self):
         self.current_mode = "HurdleMode"
 
-        #step 0: 허들 감지 후 20번 종종걸음
+        #step 0: Ready 전 접근명령
         if self.hurdle_step == 0:
+            if not self.hurdle_ready:
+                self.status = self.hurdle_status
+                self.MotionCommand()
+                return
+
+            #Ready 후 20번 종종걸음
             self.hurdle_step = 1
             self.status = Motion.Hurdle_Forward_20
             self.MotionCommand()
             return
         
         #step 1: 허들 넘기 실행
-        if self.hurdle_step == 1:
+        elif self.hurdle_step == 1:
             self.hurdle_step = 0
+            self.hurdle_count += 1
+
             self.status = Motion.Hurdle_Go
             self.MotionCommand()
             return
@@ -660,6 +685,9 @@ class MainDecision(Node):
         
         elif self.status == 24:
             motion_msg.command = Motion.Right_Turn_Ball
+
+        elif self.status == 25:
+            motion_msg.command = Motion.Hurdle_1step
         
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')
