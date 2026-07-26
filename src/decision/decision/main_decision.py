@@ -430,7 +430,7 @@ class MainDecision(Node):
             #shoot 준비완료
             if self.ball_status == Ball.Shoot:
                 self.status = Motion.Shoot
-                #shoot 이후 처리 
+                #shoot 이후 처리
                 self.has_ball = False
                 self.neck_down_pending = True
                 self.turn_after_shoot = True
