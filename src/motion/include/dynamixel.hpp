@@ -44,13 +44,12 @@ public:
 
     bool IsReady() const;
 
-    // getpose.py의 재생 버튼과 동일: 1~22번 Torque Enable=1을 순서대로 쓰고
-    // 통신 결과 때문에 재생 흐름을 바꾸지 않습니다.
+    // 최초 호출 때만 1~22번 Torque Enable=1을 쓰고 이후에는 켠 상태를 유지합니다.
     void EnableTorqueAllStreamlitStyle();
     void DisableTorqueAll();
 
-    // getpose.py의 q_start 구성과 동일합니다.
-    // 각 ID를 한 번 읽고, COMM_SUCCESS가 아니면 이전 UI slider 역할의 fallback 값을 씁니다.
+    // 모든 ID의 Present Position을 GroupSyncRead 한 번으로 읽습니다.
+    // 읽지 못한 ID는 이전 UI slider 역할의 fallback 값을 씁니다.
     bool ReadPresentRawStreamlitStyle(RawArray& raw);
 
     // getpose.py처럼 모션 시작 시 GroupSyncWrite를 한 번 만들고 전체 모션 동안 재사용합니다.
@@ -112,6 +111,7 @@ private:
     bool virtual_mode_{false};
     bool ready_{false};
     bool port_open_{false};
+    bool torque_enabled_{false};
 
     static constexpr double kPi = 3.14159265358979323846;
 };

@@ -61,25 +61,15 @@ Dxl::Dxl(bool use_virtual)
     // getpose.py init_dxl()과 동일합니다.
     portHandler_->clearPort();
 
-    // Streamlit UI의 최초 slider 초기화와 동일합니다.
-    // 각 모터를 한 번 읽고 실패하면 2048을 fallback으로 둡니다.
+    // 포트가 준비된 뒤 전체 모터의 현재 위치를 한 패킷으로 읽습니다.
+    // 실패한 모터는 초기 fallback인 2048을 사용합니다.
+    ready_ = true;
+    RawArray initial_raw{};
+    ReadPresentRawStreamlitStyle(initial_raw);
+
     for (std::size_t i = 0; i < dxl_id_.size(); ++i)
     {
-        uint32_t present_position = 0;
-        uint8_t dxl_error = 0;
-        const int comm_result = packetHandler_->read4ByteTxRx(
-            portHandler_,
-            dxl_id_[i],
-            DxlReg_PresentPosition,
-            &present_position,
-            &dxl_error);
-
-        if (comm_result == COMM_SUCCESS)
-        {
-            fallback_raw_[i] =
-                static_cast<int32_t>(present_position);
-        }
-
+        fallback_raw_[i] = initial_raw[i];
         position_[i] = fallback_raw_[i];
         last_goal_raw_[i] = fallback_raw_[i];
         th_[static_cast<Eigen::Index>(i)] =
@@ -93,10 +83,8 @@ Dxl::Dxl(bool use_virtual)
             static_cast<double>(fallback_raw_[i]);
     }
 
-    ready_ = true;
-
     std::cout
-        << "[Info] Dynamixel Streamlit-compatible initialization complete."
+        << "[Info] Dynamixel sync-read initialization complete."
         << std::endl;
 }
 
@@ -127,7 +115,7 @@ bool Dxl::IsReady() const
 
 void Dxl::EnableTorqueAllStreamlitStyle()
 {
-    if (virtual_mode_ || !ready_)
+    if (virtual_mode_ || !ready_ || torque_enabled_)
     {
         return;
     }
@@ -143,6 +131,10 @@ void Dxl::EnableTorqueAllStreamlitStyle()
             1,
             &dxl_error);
     }
+
+    // 기존 동작처럼 개별 응답 오류로 모션 흐름을 중단하지 않습니다.
+    // 이후 모션에서는 Torque Enable 패킷을 다시 보내지 않습니다.
+    torque_enabled_ = true;
 }
 
 
@@ -163,6 +155,8 @@ void Dxl::DisableTorqueAll()
             0,
             &dxl_error);
     }
+
+    torque_enabled_ = false;
 }
 
 
@@ -179,25 +173,38 @@ bool Dxl::ReadPresentRawStreamlitStyle(RawArray& raw)
         return false;
     }
 
-    // getpose.py move_sequence_smoothly()의 q_start 구성과 동일:
-    // ID별 한 번 읽고 COMM_SUCCESS가 아니면 slider fallback 사용.
+    dynamixel::GroupSyncRead group_sync_read(
+        portHandler_,
+        packetHandler_,
+        DxlReg_PresentPosition,
+        4);
+
     for (std::size_t i = 0; i < dxl_id_.size(); ++i)
     {
-        uint32_t present_position = 0;
-        uint8_t dxl_error = 0;
-        const int comm_result = packetHandler_->read4ByteTxRx(
-            portHandler_,
-            dxl_id_[i],
-            DxlReg_PresentPosition,
-            &present_position,
-            &dxl_error);
-
-        raw[i] =
-            (comm_result == COMM_SUCCESS)
-            ? static_cast<int32_t>(present_position)
-            : fallback_raw_[i];
+        raw[i] = fallback_raw_[i];
+        group_sync_read.addParam(dxl_id_[i]);
     }
 
+    const int comm_result = group_sync_read.txRxPacket();
+    if (comm_result == COMM_SUCCESS)
+    {
+        for (std::size_t i = 0; i < dxl_id_.size(); ++i)
+        {
+            if (group_sync_read.isAvailable(
+                    dxl_id_[i],
+                    DxlReg_PresentPosition,
+                    4))
+            {
+                raw[i] = static_cast<int32_t>(
+                    group_sync_read.getData(
+                        dxl_id_[i],
+                        DxlReg_PresentPosition,
+                        4));
+            }
+        }
+    }
+
+    group_sync_read.clearParam();
     return true;
 }
 

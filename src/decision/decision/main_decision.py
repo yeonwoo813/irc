@@ -92,6 +92,12 @@ class MainDecision(Node):
         self.line_data = False
         self.ball_data = False
         self.hurdle_data = False
+        self.latest_line_angle = 0.0
+        self.latest_line_follow_point = False
+        self.latest_ball_angle = 0.0
+        self.latest_ball_in_hand = False
+        self.latest_hurdle_angle = 0.0
+        self.latest_hurdle_ready = False
 
         if self.test_mode:
             self.get_logger().info(
@@ -127,11 +133,9 @@ class MainDecision(Node):
         self.hurdle_count = 0
         self.hurdle_ready = False
 
-        #최근 5개의 데이터를 저장하는 버퍼
+        # 최근 5개의 비전 상태를 저장합니다.
         self.line_buffer = deque(maxlen=5)
-        self.line_follow_point_buffer = deque(maxlen=5)
         self.ball_buffer = deque(maxlen=5)
-        self.ball_in_hand_buffer = deque(maxlen=5)
         self.hurdle_buffer = deque(maxlen=5)
         
         # subscribe
@@ -158,6 +162,7 @@ class MainDecision(Node):
             return
         #메시지 받기 이전 상태 저장
         was_ready = self.motion_ready
+        was_motion_end = self.motion_end
         #최신 상태 갱신
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
@@ -167,89 +172,111 @@ class MainDecision(Node):
         )
         if self.motion_ready and not was_ready:
             self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
+
+        # 모션 실행 중 쌓인 최신 비전 결과를 모션 종료 즉시 집계합니다.
+        # 다음 line/ball/hurdle 콜백을 기다리지 않도록 false -> true
+        # 전환에서만 판단을 시도합니다.
+        if self.motion_end and not was_motion_end:
+            self._try_decision_from_cached_results()
         
         
     def LineResultCallback(self, line_msg:LineResult):
+        self.latest_line_angle = line_msg.angle
+        self.latest_line_follow_point = line_msg.follow_point
+
         if not self.motion_ready:
             return
 
         #최신 데이터 갱신
         self.line_buffer.append(line_msg.status)
-        self.line_follow_point_buffer.append(line_msg.follow_point)
         if self.motion_end == True:
-            if len (self.line_buffer) >= 3:
-                # Counter를 사용해 가장 빈도수가 높은 값 추출
-                counts = Counter(self.line_buffer)
-                most_common_status = counts.most_common(1)[0][0]
-                #다수결 따라 라인 status 결정
-                self.line_status = most_common_status
-                follow_counts = Counter(self.line_follow_point_buffer)
-                self.line_follow_point = follow_counts.most_common(1)[0][0]
-                self.angle = line_msg.angle
-                #라인 데이터 ready
-                self.line_data = True
-                # line result 상태, 각도를 로그로 출력
-                self.get_logger().info(
-                    f"[LineResult] status: {line_msg.status}, "
-                    f"angle: {line_msg.angle}, "
-                    f"follow_point: {self.line_follow_point}"
-                )
-                self.Decision()
-            else:
-                self.get_logger().info(f"not enough data in line buffer")
+            self._try_decision_from_cached_results()
         else:
             self.get_logger().info(f"line: motion not ended yet")
             
     def BallResultCallback(self, ball_msg:BallResult):
+        self.latest_ball_angle = ball_msg.angle
+        self.latest_ball_in_hand = bool(
+            getattr(ball_msg, 'ball_in_hand', False)
+        )
+
         if not self.motion_ready:
             return
 
         self.ball_buffer.append(ball_msg.status)
-        self.ball_in_hand_buffer.append(bool(getattr(ball_msg, 'ball_in_hand', False)))
         
         if self.motion_end == True:
-            if len (self.ball_buffer) >= 3:
-                counts = Counter(self.ball_buffer)
-                most_common_status = counts.most_common(1)[0][0]
-                hand_counts = Counter(self.ball_in_hand_buffer)
-                #다수결 따라 ball status 결정
-                self.ball_status = most_common_status
-                self.ball_angle = ball_msg.angle
-                self.ball_in_hand = hand_counts.most_common(1)[0][0]
-                #ball 데이터 ready
-                self.ball_data = True
-                self.get_logger().info(f"[BallResult] status: {ball_msg.status}, angle: {ball_msg.angle}, in_hand: {self.ball_in_hand}")
-                self.Decision()
-            else:
-                self.get_logger().info(f"not enough data in ball buffer")
+            self._try_decision_from_cached_results()
         else:
             self.get_logger().info(f"ball: motion not ended yet")
             
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
+        self.latest_hurdle_angle = hurdle_msg.angle
+        self.latest_hurdle_ready = hurdle_msg.hurdle_ready
+
         if not self.motion_ready:
             return
 
         self.hurdle_buffer.append(hurdle_msg.status)
         if self.motion_end == True:
-            if len (self.hurdle_buffer) >= 3:
-                counts = Counter(self.hurdle_buffer)
-                most_common_status = counts.most_common(1)[0][0]
-                #다수결 따라 hurdle status 결정
-                self.hurdle_status = most_common_status
-                self.hurdle_angle = hurdle_msg.angle
-                self.hurdle_ready = hurdle_msg.hurdle_ready
-                #hurdle 데이터 ready
-                self.hurdle_data = True
-                self.get_logger().info(
-                    f"[HurdleResult] status={self.hurdle_status}, "
-                    f"ready={self.hurdle_ready}, "
-                    f"angle={self.hurdle_angle}"
-                )
-                self.Decision()
-            else:
-                self.get_logger().info(f"not enough data in hurdle buffer")
+            self._try_decision_from_cached_results()
         else:
             self.get_logger().info(f"hurdle: motion not ended yet")
+
+    def _try_decision_from_cached_results(self):
+        if not self.motion_ready or not self.motion_end:
+            return False
+
+        # 이미 현재 종료 사이클의 판단을 시작했다면 중복 명령을 막습니다.
+        if self.line_data and self.ball_data and self.hurdle_data:
+            return False
+
+        if (
+            len(self.line_buffer) < 3
+            or len(self.ball_buffer) < 3
+            or len(self.hurdle_buffer) < 3
+        ):
+            self.get_logger().info(
+                "저장된 비전 데이터 부족: "
+                f"line={len(self.line_buffer)}, "
+                f"ball={len(self.ball_buffer)}, "
+                f"hurdle={len(self.hurdle_buffer)}"
+            )
+            return False
+
+        # status는 모션 중 저장된 최근 샘플의 다수결을 사용합니다.
+        self.line_status = Counter(
+            self.line_buffer
+        ).most_common(1)[0][0]
+        self.ball_status = Counter(
+            self.ball_buffer
+        ).most_common(1)[0][0]
+        self.hurdle_status = Counter(
+            self.hurdle_buffer
+        ).most_common(1)[0][0]
+
+        # 연속값과 상태 플래그는 각 콜백에서 저장한 최신값을 사용합니다.
+        self.angle = self.latest_line_angle
+        self.line_follow_point = self.latest_line_follow_point
+        self.ball_angle = self.latest_ball_angle
+        self.ball_in_hand = self.latest_ball_in_hand
+        self.hurdle_angle = self.latest_hurdle_angle
+        self.hurdle_ready = self.latest_hurdle_ready
+
+        self.line_data = True
+        self.ball_data = True
+        self.hurdle_data = True
+
+        self.get_logger().info(
+            "[CachedVision] "
+            f"line={self.line_status}, "
+            f"ball={self.ball_status}, "
+            f"ball_in_hand={self.ball_in_hand}, "
+            f"hurdle={self.hurdle_status}, "
+            f"hurdle_ready={self.hurdle_ready}"
+        )
+        self.Decision()
+        return True
 
 
 ###### 판단 로직 시작 #######
@@ -724,9 +751,7 @@ class MainDecision(Node):
         #test mode일 때는 true 로 유지
         self.motion_end = True if self.test_mode else False
         self.line_buffer.clear()
-        self.line_follow_point_buffer.clear()
         self.ball_buffer.clear()
-        self.ball_in_hand_buffer.clear()
         self.hurdle_buffer.clear()
         
         

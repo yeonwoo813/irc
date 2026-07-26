@@ -135,9 +135,8 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
 
     JoinFinishedMotionThread();
 
-    // getpose.py 재생 버튼 순서와 동일합니다.
-    // 1) 전체 Torque ON
-    // 2) move_sequence_smoothly() 내부에서 Present Position 읽기
+    // 최초 모션에서만 실제 Torque ON 패킷을 보내며 이후에는 켠 상태를 유지합니다.
+    // 현재 위치는 모든 모터를 GroupSyncRead 한 번으로 읽습니다.
     dxl_port_->EnableTorqueAllStreamlitStyle();
 
     Dxl::RawArray current_raw{};
