@@ -8,7 +8,7 @@ class HurdleStatus:
     Left_Turn = 6
     Right_Turn = 7
     Backward_half = 9
-    Hurdle_Forward_20 = 18
+    Hurdle_Forward_20 = 26
     Hurdle_1step = 25
     Hurdle_None = 99
 
