@@ -54,13 +54,13 @@ class LineDecision:
     def __init__(self):
         #직진, 미세회전, 회전 각도 기준 설정
         self.forward_angle = 10.0
-        self.turn_angle = 30.0
+        self.turn_angle = 25.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
         self.curve_a = 1e-4
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
-        self.move_distance = 80.0
+        self.move_distance = 100.0
 
 
     def decide(self, features: LineFeatures) -> Tuple[int, float]:
@@ -84,8 +84,13 @@ class LineDecision:
                 return LineStatus.Right_Half_Forward, 0.0
             return self._status_from_line_angle(features.line_angle)
 
-        # 점 4개 이상은 곡선 상황이다.
-        # 라인이 중심선으로부터 move_distance 이상 벗어나면
+        # 점 4개 이상은 이차함수의 a값으로 직선과 곡선을 구분한다.
+        # 곡선이면 거리 기준을 사용하지 않고 접선 각도만으로 판단한다.
+        curve_a = features.curve_a
+        if curve_a is not None and abs(curve_a) > self.curve_a:
+            return self._status_from_line_angle(features.tangent_angle)
+
+        # 직선이면 라인이 중심선으로부터 move_distance 이상 벗어났을 때
         # 각도보다 거리 보정을 우선하여 라인이 있는 방향으로 미세회전한다.
         distance = features.line_distance
         if (
@@ -96,8 +101,8 @@ class LineDecision:
                 return LineStatus.Left_Half_Forward, 0.0
             return LineStatus.Right_Half_Forward, 0.0
 
-        # 중심선과 가까우면 곡선의 접선 각도를 기준으로 판단한다.
-        return self._status_from_line_angle(features.tangent_angle)
+        # 중심선과 가까우면 직선 각도를 기준으로 판단한다.
+        return self._status_from_line_angle(features.line_angle)
 
     def _status_from_follow_angle(self, angle: Optional[float]) -> Tuple[int, float]:
         if angle is None:

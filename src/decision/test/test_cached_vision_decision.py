@@ -30,6 +30,10 @@ def _make_harness():
         latest_ball_in_hand=True,
         latest_hurdle_angle=3.5,
         latest_hurdle_ready=True,
+        hurdle_count=0,
+        hurdle_detected=False,
+        hurdle_go_active=False,
+        hurdle_go_started=False,
     )
     harness.logger = _Logger()
     harness.decision_count = 0
@@ -111,3 +115,81 @@ def test_callbacks_store_latest_flags_before_motion_is_ready():
     assert list(harness.line_buffer) == [1, 2, 2, 2, 3]
     assert list(harness.ball_buffer) == [99, 99, 12, 99, 12]
     assert list(harness.hurdle_buffer) == [99, 26, 99, 99, 26]
+
+
+def test_hurdle_detection_stays_latched_until_hurdle_go_finishes():
+    harness = _make_harness()
+    hurdle_msg = SimpleNamespace(
+        status=27,
+        angle=0.0,
+        hurdle_ready=False,
+    )
+
+    MainDecision.HurdleResultCallback(harness, hurdle_msg)
+
+    assert harness.hurdle_detected is True
+
+    harness.hurdle_go_active = True
+    MainDecision.MotionEndCallback(
+        harness,
+        SimpleNamespace(motion_ready=True, motion_end=False),
+    )
+    assert harness.hurdle_detected is True
+    assert harness.hurdle_go_started is True
+
+    MainDecision.MotionEndCallback(
+        harness,
+        SimpleNamespace(motion_ready=True, motion_end=True),
+    )
+    assert harness.hurdle_detected is False
+    assert harness.hurdle_go_active is False
+
+
+def test_latched_hurdle_mode_cannot_be_preempted_by_ball_detection():
+    harness = SimpleNamespace(
+        motion_ready=True,
+        line_data=True,
+        ball_data=True,
+        hurdle_data=True,
+        hurdle_detected=True,
+        hurdle_count=0,
+        hurdle_step=0,
+        hurdle_ready=False,
+        hurdle_status=27,
+        pick_done=False,
+        turn_after_pick=False,
+        turn_after_shoot=False,
+        ball_status=12,
+        lost_count=0,
+        lost_step=0,
+        lost_found_dir=0,
+        lost_body_turn_count=0,
+        line_status=1,
+    )
+    harness.logger = _Logger()
+    harness.get_logger = lambda: harness.logger
+    harness.selected_mode = None
+    harness.HurdleMode = lambda: setattr(
+        harness,
+        "selected_mode",
+        "hurdle",
+    )
+    harness.BallMode = lambda: setattr(
+        harness,
+        "selected_mode",
+        "ball",
+    )
+    harness.LostMode = lambda: setattr(
+        harness,
+        "selected_mode",
+        "lost",
+    )
+    harness.LineTracking = lambda: setattr(
+        harness,
+        "selected_mode",
+        "line",
+    )
+
+    MainDecision.Decision(harness)
+
+    assert harness.selected_mode == "hurdle"

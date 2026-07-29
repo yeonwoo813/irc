@@ -147,7 +147,6 @@ class VisionStatusMonitor(Node):
             hurdle_extra = (
                 f" src={self.hurdle_state.get('source', 'none')}"
                 f" cam={int(bool(self.hurdle_state.get('webcam_valid', False)))}"
-                f" cross={int(bool(self.hurdle_state.get('intersection_valid', False)))}"
                 f" signed={self.hurdle_state.get('signed_angle_deg', 0.0):+.1f}"
             )
 

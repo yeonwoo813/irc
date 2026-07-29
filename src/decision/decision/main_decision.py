@@ -9,16 +9,16 @@ from msgs.msg import LineResult, MotionCommand, MotionEnd, BallResult, HurdleRes
 class Motion:
     Initial_Pose = 0
     Forward_4step = 1
-    Left_Half_Forward = 2  #기본4스텝
+    Left_Half_Forward = 2  #기본3스텝
     Right_Half_Forward = 3
-    Left_Forward = 4
-    Right_Forward = 5
-    Left_Turn = 6
-    Right_Turn = 7
-    Forward_half = 8
-    Backward_half = 9
-    Left_Move = 10
-    Right_Move = 11
+    Left_Forward = 4 #no
+    Right_Forward = 5 #no
+    Left_Turn = 6  #line tracking
+    Right_Turn = 7 #line tracking
+    Forward_half = 8 #no
+    Backward_half = 9 
+    Left_Move = 10 
+    Right_Move = 11 
     Pick = 12
     Shoot = 13
     Neck_Up = 14
@@ -27,13 +27,14 @@ class Motion:
     Neck_Center = 17
     Neck_Down = 18
     Hurdle_Go = 19
-    Forward_3step = 20
-    Left_Half_Forward_3step = 21
-    Right_Half_Forward_3step = 22
-    Left_Turn_Ball = 23
-    Right_Turn_Ball = 24
-    Hurdle_1step = 25
-    Hurdle_Forward_20 = 26
+    Forward_3step = 20 #ball mode
+    Left_Half_Forward_3step = 21 #no
+    Right_Half_Forward_3step = 22 #no
+    Left_Turn_Mission = 23
+    Right_Turn_Mission = 24
+    Hurdle_1step = 25 #no
+    Hurdle_Forward_20 = 26 #hurdle mode
+    Back_To_Initial = 27
 
     Data_None = 99
     
@@ -132,6 +133,9 @@ class MainDecision(Node):
         self.hurdle_done = False
         self.hurdle_count = 0
         self.hurdle_ready = False
+        self.hurdle_detected = False
+        self.hurdle_go_active = False
+        self.hurdle_go_started = False
 
         # 최근 5개의 비전 상태를 저장합니다.
         self.line_buffer = deque(maxlen=5)
@@ -166,6 +170,18 @@ class MainDecision(Node):
         #최신 상태 갱신
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
+
+        if self.hurdle_go_active:
+            if not self.motion_end:
+                self.hurdle_go_started = True
+            elif self.hurdle_go_started:
+                self.hurdle_go_active = False
+                self.hurdle_go_started = False
+                self.hurdle_detected = False
+                self.get_logger().info(
+                    "Hurdle_Go 완료: hurdle_detected=false, "
+                    "라인 트래킹 복귀를 허용합니다."
+                )
 
         self.get_logger().info(
             f"motion_ready: {self.motion_ready}, motion_end: {self.motion_end}"
@@ -216,6 +232,20 @@ class MainDecision(Node):
 
         if not self.motion_ready:
             return
+
+        if (
+            not self.hurdle_detected
+            and self.hurdle_count < 2
+            and (
+                hurdle_msg.hurdle_ready
+                or hurdle_msg.status != Hurdle.Hurdle_None
+            )
+        ):
+            self.hurdle_detected = True
+            self.get_logger().info(
+                "허들 최초 검출: hurdle_detected=true, "
+                "Hurdle_Go 완료까지 허들 모드를 유지합니다."
+            )
 
         self.hurdle_buffer.append(hurdle_msg.status)
         if self.motion_end == True:
@@ -290,32 +320,36 @@ class MainDecision(Node):
         
         #모든 데이터가 준비된 경우에만 의사결정 로직 실행
         self.get_logger().info("3가지 데이터 모두 도착 완료! 판단을 시작합니다.")
-        
-        # BallMode 내부에서 Pick 확인, Pick 이후 회전까지 처리
-        #우선순위 1 : ball mode
-        if (
-            self.pick_done == True
-            or self.turn_after_pick == True
-            or self.turn_after_shoot == True
-            or (self.ball_status != Ball.Ball_None)
-        ):
-            self.BallMode()
 
-        #우선순위 2 : hurdle mode
-        elif (
-            self.hurdle_count < 2
+        if (
+            not self.hurdle_detected
+            and self.hurdle_count < 2
             and (
                 self.hurdle_step != 0
                 or self.hurdle_ready
                 or self.hurdle_status != Hurdle.Hurdle_None
             )
         ):
+            self.hurdle_detected = True
+
+        # 허들이 한 번 검출되면 Hurdle_Go가 끝날 때까지 다른 모드로 전환하지 않습니다.
+        if self.hurdle_detected:
             self.lost_count = 0
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
 
             self.HurdleMode()
+
+        # BallMode 내부에서 Pick 확인, Pick 이후 회전까지 처리
+        #우선순위 1 : ball mode
+        elif (
+            self.pick_done == True
+            or self.turn_after_pick == True
+            or self.turn_after_shoot == True
+            or (self.ball_status != Ball.Ball_None)
+        ):
+            self.BallMode()
 
         #lostmode 진행중이면 계속 lostmode
         elif self.lost_step != 0:
@@ -518,6 +552,8 @@ class MainDecision(Node):
             self.hurdle_count += 1
 
             self.status = Motion.Hurdle_Go
+            self.hurdle_go_active = True
+            self.hurdle_go_started = False
             self.MotionCommand()
             return
 
@@ -727,16 +763,19 @@ class MainDecision(Node):
             motion_msg.command = Motion.Right_Half_Forward_3step
             
         elif self.status == 23:
-            motion_msg.command = Motion.Left_Turn_Ball
+            motion_msg.command = Motion.Left_Turn_Mission
         
         elif self.status == 24:
-            motion_msg.command = Motion.Right_Turn_Ball
+            motion_msg.command = Motion.Right_Turn_Mission
 
         elif self.status == 25:
             motion_msg.command = Motion.Hurdle_1step
 
         elif self.status == 26:
             motion_msg.command = Motion.Hurdle_Forward_20
+
+        elif self.status == 27:
+            motion_msg.command = Motion.Back_To_Initial
         
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')
