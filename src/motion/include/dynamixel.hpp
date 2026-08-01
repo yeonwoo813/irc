@@ -57,6 +57,9 @@ public:
     int StreamWriteRaw(const RawArray& raw);
     void EndStreamWrite();
 
+    // 마지막으로 모터에 전송한 목표 위치를 다음 모션의 시작점으로 사용합니다.
+    RawArray GetLastGoalRaw() const;
+
     // Streamlit이 재생 종료 후 마지막 pose를 slider에 반영하는 동작과 같습니다.
     void SetFallbackRaw(const RawArray& raw);
 

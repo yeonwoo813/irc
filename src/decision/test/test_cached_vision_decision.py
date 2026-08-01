@@ -24,6 +24,7 @@ def _make_harness():
         line_buffer=deque([1, 2, 2, 2, 3], maxlen=5),
         ball_buffer=deque([99, 99, 12, 99, 12], maxlen=5),
         hurdle_buffer=deque([99, 26, 99, 99, 26], maxlen=5),
+        hurdle_detection_buffer=deque(maxlen=5),
         latest_line_angle=11.5,
         latest_line_follow_point=False,
         latest_ball_angle=-7.25,
@@ -115,18 +116,43 @@ def test_callbacks_store_latest_flags_before_motion_is_ready():
     assert list(harness.line_buffer) == [1, 2, 2, 2, 3]
     assert list(harness.ball_buffer) == [99, 99, 12, 99, 12]
     assert list(harness.hurdle_buffer) == [99, 26, 99, 99, 26]
+    assert list(harness.hurdle_detection_buffer) == []
 
 
-def test_hurdle_detection_stays_latched_until_hurdle_go_finishes():
+def test_hurdle_detection_uses_five_sample_majority_and_stays_latched():
     harness = _make_harness()
-    hurdle_msg = SimpleNamespace(
-        status=27,
-        angle=0.0,
-        hurdle_ready=False,
+
+    for detected in (True, False, True, False):
+        MainDecision.HurdleResultCallback(
+            harness,
+            SimpleNamespace(
+                status=27 if detected else 99,
+                angle=0.0,
+                hurdle_ready=False,
+            ),
+        )
+        assert harness.hurdle_detected is False
+
+    MainDecision.HurdleResultCallback(
+        harness,
+        SimpleNamespace(
+            status=27,
+            angle=0.0,
+            hurdle_ready=False,
+        ),
     )
+    assert harness.hurdle_detected is True
 
-    MainDecision.HurdleResultCallback(harness, hurdle_msg)
-
+    # True가 확정된 뒤에는 후속 5개가 모두 False여도 횡단 완료 전까지 유지합니다.
+    for _ in range(5):
+        MainDecision.HurdleResultCallback(
+            harness,
+            SimpleNamespace(
+                status=99,
+                angle=0.0,
+                hurdle_ready=False,
+            ),
+        )
     assert harness.hurdle_detected is True
 
     harness.hurdle_go_active = True
@@ -143,6 +169,30 @@ def test_hurdle_detection_stays_latched_until_hurdle_go_finishes():
     )
     assert harness.hurdle_detected is False
     assert harness.hurdle_go_active is False
+    assert list(harness.hurdle_detection_buffer) == []
+
+
+def test_hurdle_detection_stays_false_when_five_sample_majority_is_false():
+    harness = _make_harness()
+
+    for detected in (True, False, False, True, False):
+        MainDecision.HurdleResultCallback(
+            harness,
+            SimpleNamespace(
+                status=27 if detected else 99,
+                angle=0.0,
+                hurdle_ready=False,
+            ),
+        )
+
+    assert list(harness.hurdle_detection_buffer) == [
+        True,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert harness.hurdle_detected is False
 
 
 def test_latched_hurdle_mode_cannot_be_preempted_by_ball_detection():

@@ -141,6 +141,9 @@ class MainDecision(Node):
         self.line_buffer = deque(maxlen=5)
         self.ball_buffer = deque(maxlen=5)
         self.hurdle_buffer = deque(maxlen=5)
+        # 허들 검출 여부도 별도 5프레임 다수결로 확정합니다.
+        # 한 번 확정된 True는 Hurdle_Go 완료까지 유지합니다.
+        self.hurdle_detection_buffer = deque(maxlen=5)
         
         # subscribe
         self.line_result_sub = self.create_subscription(LineResult, 'line_result', self.LineResultCallback, 10)
@@ -178,9 +181,10 @@ class MainDecision(Node):
                 self.hurdle_go_active = False
                 self.hurdle_go_started = False
                 self.hurdle_detected = False
+                self.hurdle_detection_buffer.clear()
                 self.get_logger().info(
                     "Hurdle_Go 완료: hurdle_detected=false, "
-                    "라인 트래킹 복귀를 허용합니다."
+                    "검출 버퍼를 초기화하고 라인 트래킹 복귀를 허용합니다."
                 )
 
         self.get_logger().info(
@@ -233,17 +237,24 @@ class MainDecision(Node):
         if not self.motion_ready:
             return
 
+        current_hurdle_detected = bool(
+            hurdle_msg.hurdle_ready
+            or hurdle_msg.status != Hurdle.Hurdle_None
+        )
+        self.hurdle_detection_buffer.append(current_hurdle_detected)
+        detected_count = sum(self.hurdle_detection_buffer)
+
         if (
             not self.hurdle_detected
             and self.hurdle_count < 2
-            and (
-                hurdle_msg.hurdle_ready
-                or hurdle_msg.status != Hurdle.Hurdle_None
-            )
+            and len(self.hurdle_detection_buffer) == 5
+            and detected_count >= 3
         ):
             self.hurdle_detected = True
             self.get_logger().info(
-                "허들 최초 검출: hurdle_detected=true, "
+                "허들 5프레임 다수결 확정: "
+                f"true={detected_count}, false={5 - detected_count}, "
+                "hurdle_detected=true, "
                 "Hurdle_Go 완료까지 허들 모드를 유지합니다."
             )
 
@@ -320,17 +331,6 @@ class MainDecision(Node):
         
         #모든 데이터가 준비된 경우에만 의사결정 로직 실행
         self.get_logger().info("3가지 데이터 모두 도착 완료! 판단을 시작합니다.")
-
-        if (
-            not self.hurdle_detected
-            and self.hurdle_count < 2
-            and (
-                self.hurdle_step != 0
-                or self.hurdle_ready
-                or self.hurdle_status != Hurdle.Hurdle_None
-            )
-        ):
-            self.hurdle_detected = True
 
         # 허들이 한 번 검출되면 Hurdle_Go가 끝날 때까지 다른 모드로 전환하지 않습니다.
         if self.hurdle_detected:

@@ -288,6 +288,12 @@ void Dxl::EndStreamWrite()
 }
 
 
+Dxl::RawArray Dxl::GetLastGoalRaw() const
+{
+    return last_goal_raw_;
+}
+
+
 void Dxl::SetFallbackRaw(const RawArray& raw)
 {
     fallback_raw_ = raw;

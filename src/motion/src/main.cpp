@@ -136,19 +136,12 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
     JoinFinishedMotionThread();
 
     // 최초 모션에서만 실제 Torque ON 패킷을 보내며 이후에는 켠 상태를 유지합니다.
-    // 현재 위치는 모든 모터를 GroupSyncRead 한 번으로 읽습니다.
     dxl_port_->EnableTorqueAllStreamlitStyle();
 
-    Dxl::RawArray current_raw{};
-    if (!dxl_port_->ReadPresentRawStreamlitStyle(current_raw))
-    {
-        RCLCPP_ERROR(
-            this->get_logger(),
-            "Dynamixel 현재 위치를 읽을 수 없습니다.");
-        return false;
-    }
-
-    callback_->SetCurrentRaw(current_raw);
+    // 모션 사이의 GroupSyncRead 지연을 없애기 위해 직전 모션에서 실제로
+    // 전송한 마지막 목표 위치를 새 궤적의 시작점으로 이어서 사용합니다.
+    const Dxl::RawArray start_raw = dxl_port_->GetLastGoalRaw();
+    callback_->SetCurrentRaw(start_raw);
 
     if (!callback_->SelectMotion(motion_id) ||
         !callback_->IsMoving())
@@ -175,7 +168,7 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
             this,
             motion_id,
             initial_motion,
-            current_raw);
+            start_raw);
     }
     catch (const std::exception& error)
     {
