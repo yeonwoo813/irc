@@ -305,6 +305,7 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "cam_height": 480,
         "cam_fps": 30,
         "flip_vertical": False,
+        "robot_center_offset_x_px": 25.0,
 
         # ROI: YOLO line 중심점 중 이 영역 안에 있는 것만 주행용으로 사용
         "roi_top_ratio": 0.00,
@@ -363,6 +364,11 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "cam_height": gi("camera", "height", defaults["cam_height"]),
         "cam_fps": gi("camera", "fps", defaults["cam_fps"]),
         "flip_vertical": gb("camera", "flip_vertical", defaults["flip_vertical"]),
+        "robot_center_offset_x_px": gf(
+            "camera",
+            "robot_center_offset_x_px",
+            defaults["robot_center_offset_x_px"],
+        ),
 
         "roi_top_ratio": gf("detection", "roi_top_ratio", defaults["roi_top_ratio"]),
         "roi_bottom_ratio": gf("detection", "roi_bottom_ratio", defaults["roi_bottom_ratio"]),
@@ -676,11 +682,61 @@ def best_object_payload(dets: list[ObjectDetection], cfg: dict, class_key: str, 
     }
 
 
+def add_ball_geometry(
+    payload: dict,
+    frame_w: int,
+    frame_h: int,
+    robot_center_offset_x_px: float = 25.0,
+) -> dict:
+    """공 중심과 로봇 하단 기준점 사이의 화면상 기하 정보를 추가한다."""
+    robot_x = min(
+        max((float(frame_w) / 2.0) + float(robot_center_offset_x_px), 0.0),
+        max(0.0, float(frame_w - 1)),
+    )
+    robot_y = max(0.0, float(frame_h - 1))
+
+    payload["robot_center_x"] = robot_x
+    payload["robot_center_y"] = robot_y
+    payload["ball_x_offset_px"] = None
+    payload["ball_x_distance_px"] = None
+    payload["ball_y_distance_px"] = None
+    payload["ball_distance_px"] = None
+    payload["ball_angle_deg"] = None
+
+    if not bool(payload.get("ball_detected", False)):
+        return payload
+
+    try:
+        ball_x = float(payload["ball_x"])
+        ball_y = float(payload["ball_y"])
+    except (KeyError, TypeError, ValueError):
+        return payload
+
+    if not math.isfinite(ball_x) or not math.isfinite(ball_y):
+        return payload
+
+    # x는 오른쪽이 양수, y는 화면 하단 기준점에서 위쪽이 양수다.
+    dx = ball_x - robot_x
+    x_distance = abs(dx)
+    y_distance = abs(robot_y - ball_y)
+    payload["ball_x_offset_px"] = float(dx)
+    payload["ball_x_distance_px"] = float(x_distance)
+    payload["ball_y_distance_px"] = float(y_distance)
+    payload["ball_distance_px"] = float(math.hypot(x_distance, y_distance))
+    payload["ball_angle_deg"] = float(math.degrees(math.atan2(dx, y_distance)))
+    return payload
+
+
 def make_vision_payload(dets: list[ObjectDetection], line_points: list[tuple[float, float]], frame_w: int, frame_h: int, cfg: dict) -> dict:
     payload = make_line_payload(line_points, frame_w, frame_h)
     payload.update(best_object_payload(dets, cfg, "ball", frame_w, frame_h))
     payload.update(best_object_payload(dets, cfg, "hurdle", frame_w, frame_h))
-    return payload
+    return add_ball_geometry(
+        payload,
+        frame_w,
+        frame_h,
+        float(cfg.get("robot_center_offset_x_px", 25.0)),
+    )
 
 
 # ═══════════════════════════════════════════════════════
@@ -712,8 +768,14 @@ def visualize_yolo(
     ]
     display_line_points.sort(key=lambda point: -point[1])
 
+    robot_x = int(round(float(payload.get("robot_center_x", (w / 2.0) + 25.0))))
+    robot_y = int(round(float(payload.get("robot_center_y", h - 1))))
+    robot_x = min(max(robot_x, 0), max(0, w - 1))
+    robot_y = min(max(robot_y, 0), max(0, h - 1))
+    light_sky_blue = (250, 206, 135)  # OpenCV BGR
+
     cv2.rectangle(vis, (roi_left, roi_top), (roi_right, roi_bottom), (80, 80, 80), 2)
-    cv2.line(vis, (w // 2, h), (w // 2, roi_top), (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.line(vis, (robot_x, robot_y), (robot_x, roi_top), (200, 200, 200), 1, cv2.LINE_AA)
 
     # YOLO boxes
     for d in dets:
@@ -755,7 +817,35 @@ def visualize_yolo(
     if show_target_marker and payload["target_x"] >= 0 and payload["target_y"] >= 0:
         tx, ty = int(payload["target_x"]), int(payload["target_y"])
         cv2.drawMarker(vis, (tx, ty), (0, 0, 255), cv2.MARKER_CROSS, 24, 2)
-        cv2.line(vis, (w // 2, h), (tx, ty), (0, 0, 255), 1, cv2.LINE_AA)
+        cv2.line(vis, (robot_x, robot_y), (tx, ty), (0, 0, 255), 1, cv2.LINE_AA)
+
+    # 공 중심과 로봇 하단 기준점을 연결하고 수직 기준선 대비 각도를 표시한다.
+    if bool(payload.get("ball_detected", False)):
+        ball_x = int(round(float(payload.get("ball_x", -1.0))))
+        ball_y = int(round(float(payload.get("ball_y", -1.0))))
+        ball_angle = payload.get("ball_angle_deg")
+        if 0 <= ball_x < w and 0 <= ball_y < h and ball_angle is not None:
+            cv2.line(
+                vis,
+                (robot_x, robot_y),
+                (ball_x, ball_y),
+                light_sky_blue,
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.circle(vis, (ball_x, ball_y), 5, light_sky_blue, -1)
+            label_x = min(max((robot_x + ball_x) // 2 + 6, 0), max(0, w - 90))
+            label_y = min(max((robot_y + ball_y) // 2, 15), max(15, h - 5))
+            cv2.putText(
+                vis,
+                f"{float(ball_angle):+.1f}deg",
+                (label_x, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                light_sky_blue,
+                1,
+                cv2.LINE_AA,
+            )
 
     # 2~3개는 직선, 4개 이상은 이차곡선으로 표시한다. 두 경우 모두
     # 실제 검출점의 y 범위에서만 그려 데이터가 없는 영역으로 외삽하지 않는다.
@@ -839,28 +929,51 @@ def visualize_yolo(
                 font_thickness,
                 cv2.LINE_AA,
             )
+        return panel_bottom
 
-    # 허들 정보는 오른쪽 상단의 작은 전용 패널에만 표시한다.
+    # 공이 검출되면 기존 허들 패널과 같은 크기의 공 정보 패널을 우측 상단에 표시한다.
+    next_right_panel_y = 4
+    ball_detected = bool(payload.get("ball_detected", False))
+    if ball_detected:
+        ball_angle = payload.get("ball_angle_deg")
+        ball_dx = payload.get("ball_x_distance_px")
+        ball_dy = payload.get("ball_y_distance_px")
+        ball_lines = [
+            f"BALL:YES conf:{float(payload.get('ball_conf', 0.0)):.2f}",
+            (
+                f"ang:{float(ball_angle):+.1f} x:{float(ball_dx):.0f} y:{float(ball_dy):.0f}px"
+                if ball_angle is not None and ball_dx is not None and ball_dy is not None
+                else "ang:N/A x:N/A y:N/A"
+            ),
+        ]
+        panel_bottom = draw_text_panel(
+            ball_lines,
+            panel_y=next_right_panel_y,
+            font_scale=0.32,
+            border_color=light_sky_blue,
+            align="right",
+        )
+        next_right_panel_y = panel_bottom + 4
+
+    # 허들 정보는 실제 허들이 검출된 동안에만 표시한다.
     hurdle_detected = bool(payload.get("hurdle_detected", False))
-    hurdle_line_angle = payload.get("hurdle_line_angle_deg")
-    hurdle_lines = [
-        (
-            f"HURDLE:{'YES' if hurdle_detected else 'NO'} "
-            f"conf:{float(payload.get('hurdle_conf', 0.0)):.2f}"
-        ),
-        (
-            f"line angle:{float(hurdle_line_angle):+.1f}deg"
-            if hurdle_line_angle is not None
-            else "line angle:N/A"
-        ),
-    ]
-    draw_text_panel(
-        hurdle_lines,
-        panel_y=4,
-        font_scale=0.32,
-        border_color=(250, 206, 135),
-        align="right",
-    )
+    if hurdle_detected:
+        hurdle_line_angle = payload.get("hurdle_line_angle_deg")
+        hurdle_lines = [
+            f"HURDLE:YES conf:{float(payload.get('hurdle_conf', 0.0)):.2f}",
+            (
+                f"line angle:{float(hurdle_line_angle):+.1f}deg"
+                if hurdle_line_angle is not None
+                else "line angle:N/A"
+            ),
+        ]
+        draw_text_panel(
+            hurdle_lines,
+            panel_y=next_right_panel_y,
+            font_scale=0.32,
+            border_color=light_sky_blue,
+            align="right",
+        )
 
     # 왼쪽 상단에는 프레임 판단 status 대신 실제 motion 노드의 실행
     # 모션을 표시합니다. 나머지 라인 검출 진단값은 그대로 유지합니다.
@@ -974,8 +1087,8 @@ def main_ros2(ini_path: str = "settings.ini"):
             )
 
             # 공의 최종 BallStatus 판단은 별도 ball_vision_fusion.py가 담당한다.
-            # 이 노드는 /line_tracker/state에 ball_detected, ball_x, ball_y,
-            # ball_conf, ball_bbox만 담아 웹캠 Vision 결과를 전달한다.
+            # 이 노드는 /line_tracker/state에 공 검출값과 기준점 대비
+            # angle/x/y 픽셀 거리를 담아 웹캠 Vision 결과를 전달한다.
             self.get_logger().info(f"YoloVisionNode started cfg={ini_path}")
             self.get_logger().info(
                 "YOLO direct hurdle_result publish="

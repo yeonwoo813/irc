@@ -1,7 +1,7 @@
 from collections import deque
 from types import MethodType, SimpleNamespace
 
-from decision.main_decision import MainDecision
+from decision.main_decision import MainDecision, Motion
 
 
 class _Logger:
@@ -24,6 +24,7 @@ def _make_harness():
         line_buffer=deque([1, 2, 2, 2, 3], maxlen=5),
         ball_buffer=deque([99, 99, 12, 99, 12], maxlen=5),
         hurdle_buffer=deque([99, 26, 99, 99, 26], maxlen=5),
+        hurdle_ready_buffer=deque([False, True, False, True, True], maxlen=5),
         hurdle_detection_buffer=deque(maxlen=5),
         latest_line_angle=11.5,
         latest_line_follow_point=False,
@@ -116,6 +117,7 @@ def test_callbacks_store_latest_flags_before_motion_is_ready():
     assert list(harness.line_buffer) == [1, 2, 2, 2, 3]
     assert list(harness.ball_buffer) == [99, 99, 12, 99, 12]
     assert list(harness.hurdle_buffer) == [99, 26, 99, 99, 26]
+    assert list(harness.hurdle_ready_buffer) == [False, True, False, True, True]
     assert list(harness.hurdle_detection_buffer) == []
 
 
@@ -243,3 +245,106 @@ def test_latched_hurdle_mode_cannot_be_preempted_by_ball_detection():
     MainDecision.Decision(harness)
 
     assert harness.selected_mode == "hurdle"
+
+
+def test_hurdle_ready_uses_majority_instead_of_latest_frame():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.hurdle_ready_buffer = deque(
+        [True, True, True, True, False],
+        maxlen=5,
+    )
+
+    assert harness._try_decision_from_cached_results() is True
+    assert harness.hurdle_ready is True
+
+
+def test_hurdle_ready_rejects_single_true_frame_and_tie():
+    for ready_samples in (
+        [False, False, False, False, True],
+        [True, False, True, False],
+    ):
+        harness = _make_harness()
+        harness.motion_end = True
+        harness.hurdle_ready_buffer = deque(ready_samples, maxlen=5)
+
+        assert harness._try_decision_from_cached_results() is True
+        assert harness.hurdle_ready is False
+
+
+def test_hurdle_ready_requires_three_true_frames_with_partial_buffer():
+    for ready_samples, expected_ready in (
+        ([True, True, False], False),
+        ([True, True, True], True),
+        ([True, True, False, False], False),
+        ([True, True, True, False], True),
+    ):
+        harness = _make_harness()
+        harness.motion_end = True
+        harness.hurdle_ready_buffer = deque(ready_samples, maxlen=5)
+
+        assert harness._try_decision_from_cached_results() is True
+        assert harness.hurdle_ready is expected_ready
+
+
+def test_hurdle_ready_false_excludes_forward_20_from_status_vote():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.hurdle_buffer = deque([26, 26, 23, 24, 23], maxlen=5)
+    harness.hurdle_ready_buffer = deque(
+        [True, False, False, False, False],
+        maxlen=5,
+    )
+
+    assert harness._try_decision_from_cached_results() is True
+    assert harness.hurdle_ready is False
+    assert harness.hurdle_status == Motion.Left_Turn_Mission
+
+
+def test_hurdle_ready_false_waits_when_all_statuses_are_forward_20():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.hurdle_buffer = deque([26, 26, 26, 26, 26], maxlen=5)
+    harness.hurdle_ready_buffer = deque(
+        [False, False, False, False, False],
+        maxlen=5,
+    )
+
+    assert harness._try_decision_from_cached_results() is False
+    assert harness.decision_count == 0
+    assert harness.line_data is False
+    assert harness.ball_data is False
+    assert harness.hurdle_data is False
+    assert any(
+        "새 프레임을 기다립니다" in message
+        for message in harness.logger.messages
+    )
+
+
+def test_hurdle_mode_runs_forward_20_once_then_hurdle_go():
+    harness = SimpleNamespace(
+        hurdle_step=0,
+        hurdle_ready=True,
+        hurdle_status=Motion.Left_Turn_Mission,
+        hurdle_count=0,
+        hurdle_go_active=False,
+        hurdle_go_started=False,
+    )
+    harness.commands = []
+    harness.MotionCommand = lambda: harness.commands.append(harness.status)
+
+    MainDecision.HurdleMode(harness)
+
+    assert harness.commands == [Motion.Hurdle_Forward_20]
+    assert harness.hurdle_step == 1
+
+    # Forward 20 실행 중 ready가 false로 바뀌어도 다음은 허들 넘기입니다.
+    harness.hurdle_ready = False
+    harness.hurdle_status = Motion.Right_Turn_Mission
+    MainDecision.HurdleMode(harness)
+
+    assert harness.commands == [Motion.Hurdle_Forward_20, Motion.Hurdle_Go]
+    assert harness.hurdle_step == 0
+    assert harness.hurdle_count == 1
+    assert harness.hurdle_go_active is True
+    assert harness.hurdle_go_started is False

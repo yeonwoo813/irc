@@ -141,6 +141,7 @@ class MainDecision(Node):
         self.line_buffer = deque(maxlen=5)
         self.ball_buffer = deque(maxlen=5)
         self.hurdle_buffer = deque(maxlen=5)
+        self.hurdle_ready_buffer = deque(maxlen=5)
         # 허들 검출 여부도 별도 5프레임 다수결로 확정합니다.
         # 한 번 확정된 True는 Hurdle_Go 완료까지 유지합니다.
         self.hurdle_detection_buffer = deque(maxlen=5)
@@ -259,6 +260,7 @@ class MainDecision(Node):
             )
 
         self.hurdle_buffer.append(hurdle_msg.status)
+        self.hurdle_ready_buffer.append(bool(hurdle_msg.hurdle_ready))
         if self.motion_end == True:
             self._try_decision_from_cached_results()
         else:
@@ -292,17 +294,36 @@ class MainDecision(Node):
         self.ball_status = Counter(
             self.ball_buffer
         ).most_common(1)[0][0]
+        # ready도 최근 최대 5개 허들 프레임을 다수결합니다.
+        # 버퍼에 3~5개가 있어도 고정 기준인 true 3개 이상일 때만 ready입니다.
+        ready_count = sum(self.hurdle_ready_buffer)
+        self.hurdle_ready = ready_count >= 3
+
+        # ready가 false인 동안에는 Forward 20을 상태 투표에서 제외합니다.
+        hurdle_status_candidates = list(self.hurdle_buffer)
+        if not self.hurdle_ready:
+            hurdle_status_candidates = [
+                status
+                for status in hurdle_status_candidates
+                if status != Motion.Hurdle_Forward_20
+            ]
+            if not hurdle_status_candidates:
+                self.get_logger().info(
+                    "hurdle_ready=false이지만 허들 상태가 모두 "
+                    "Hurdle_Forward_20이어서 새 프레임을 기다립니다."
+                )
+                return False
+
         self.hurdle_status = Counter(
-            self.hurdle_buffer
+            hurdle_status_candidates
         ).most_common(1)[0][0]
 
-        # 연속값과 상태 플래그는 각 콜백에서 저장한 최신값을 사용합니다.
+        # 연속값과 나머지 상태 플래그는 콜백에서 저장한 최신값을 사용합니다.
         self.angle = self.latest_line_angle
         self.line_follow_point = self.latest_line_follow_point
         self.ball_angle = self.latest_ball_angle
         self.ball_in_hand = self.latest_ball_in_hand
         self.hurdle_angle = self.latest_hurdle_angle
-        self.hurdle_ready = self.latest_hurdle_ready
 
         self.line_data = True
         self.ball_data = True
@@ -792,6 +813,7 @@ class MainDecision(Node):
         self.line_buffer.clear()
         self.ball_buffer.clear()
         self.hurdle_buffer.clear()
+        self.hurdle_ready_buffer.clear()
         
         
 def main(args=None):

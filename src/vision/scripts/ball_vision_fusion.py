@@ -1382,12 +1382,42 @@ class BallVisionFusionNode(Node):
             self.latest_webcam_time = now
             return
 
-        dx = ball_x - self.webcam_robot_center_x
-        dy = ball_y - self.webcam_robot_center_y
-        distance_px = math.hypot(dx, dy)
+        def finite_payload_float(key: str) -> Optional[float]:
+            try:
+                value = float(payload.get(key))
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        robot_x = finite_payload_float("robot_center_x")
+        robot_y = finite_payload_float("robot_center_y")
+        x_offset = finite_payload_float("ball_x_offset_px")
+        x_distance = finite_payload_float("ball_x_distance_px")
+        y_distance = finite_payload_float("ball_y_distance_px")
+        distance_px = finite_payload_float("ball_distance_px")
+        payload_angle_deg = finite_payload_float("ball_angle_deg")
+
+        if x_offset is None:
+            x_offset = ball_x - (
+                robot_x
+                if robot_x is not None
+                else self.webcam_robot_center_x
+            )
+        if x_distance is None:
+            x_distance = abs(x_offset)
+        if y_distance is None:
+            y_distance = abs((
+                robot_y
+                if robot_y is not None
+                else self.webcam_robot_center_y
+            ) - ball_y)
+        if distance_px is None:
+            distance_px = math.hypot(x_distance, y_distance)
 
         angle_error_deg: Optional[float]
-        if (
+        if payload_angle_deg is not None:
+            angle_error_deg = payload_angle_deg
+        elif (
             0.0 < self.webcam_fov_x_deg < 180.0
             and self.webcam_frame_width > 0.0
         ):
@@ -1398,14 +1428,16 @@ class BallVisionFusionNode(Node):
                 )
             )
             angle_error_deg = float(
-                math.degrees(math.atan2(dx, focal_px))
+                math.degrees(math.atan2(x_offset, focal_px))
             )
         else:
             angle_error_deg = None
 
         self.latest_webcam = {
             "webcam_ball_detected": True,
-            "webcam_ball_x_distance": float(dx),
+            "webcam_ball_x_offset": float(x_offset),
+            "webcam_ball_x_distance": float(x_distance),
+            "webcam_ball_y_distance": float(y_distance),
             "webcam_ball_angle_error": angle_error_deg,
             "webcam_ball_distance_px": float(distance_px),
             "raw_ball_x": ball_x,
@@ -1418,7 +1450,9 @@ class BallVisionFusionNode(Node):
     def _empty_webcam_state(self) -> Dict[str, Any]:
         return {
             "webcam_ball_detected": False,
+            "webcam_ball_x_offset": None,
             "webcam_ball_x_distance": None,
+            "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
             "webcam_ball_distance_px": None,
             "raw_ball_x": None,
@@ -1475,7 +1509,9 @@ class BallVisionFusionNode(Node):
             "realsense_ball_distance_cm": None,
             "realsense_ball_angle_error": None,
             "webcam_ball_detected": False,
+            "webcam_ball_x_offset": None,
             "webcam_ball_x_distance": None,
+            "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
             "webcam_ball_distance_px": None,
             "ball_in_hand": bool(self.ball_in_hand),
@@ -1500,9 +1536,17 @@ class BallVisionFusionNode(Node):
             features.update(
                 {
                     "webcam_ball_detected": True,
+                    "webcam_ball_x_offset":
+                        self.latest_webcam[
+                            "webcam_ball_x_offset"
+                        ],
                     "webcam_ball_x_distance":
                         self.latest_webcam[
                             "webcam_ball_x_distance"
+                        ],
+                    "webcam_ball_y_distance":
+                        self.latest_webcam[
+                            "webcam_ball_y_distance"
                         ],
                     "webcam_ball_angle_error":
                         self.latest_webcam[
@@ -1610,7 +1654,9 @@ class BallVisionFusionNode(Node):
                 f"rs_dist={features['realsense_ball_distance_cm']} "
                 f"rs_ang={features['realsense_ball_angle_error']} "
                 f"webcam={features['webcam_ball_detected']} "
+                f"webcam_x_offset={features['webcam_ball_x_offset']} "
                 f"webcam_x={features['webcam_ball_x_distance']} "
+                f"webcam_y={features['webcam_ball_y_distance']} "
                 f"webcam_dist={features['webcam_ball_distance_px']} "
                 f"hand={features['ball_in_hand']} "
                 f"status={status} angle={angle:.2f}"

@@ -1594,7 +1594,7 @@ void SDK_Motion::define_motions()
         0.06,
         0.06,
         0.06,
-        0.4
+        0.6
     };
 
     const std::vector<double> pre_hurdle_step_cycle_durations =

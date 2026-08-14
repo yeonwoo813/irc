@@ -65,6 +65,9 @@ class VisionStatusMonitor(Node):
             "status": int(msg.status),
             "angle": float(msg.angle),
             "ball_in_hand": bool(getattr(msg, "ball_in_hand", False)),
+            "detected_angle": float(getattr(msg, "detected_angle", 0.0)),
+            "x_distance_px": float(getattr(msg, "x_distance_px", 0.0)),
+            "y_distance_px": float(getattr(msg, "y_distance_px", 0.0)),
         }
         self._stamp("ball_result")
 
