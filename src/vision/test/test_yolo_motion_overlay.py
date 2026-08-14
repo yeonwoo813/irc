@@ -127,7 +127,7 @@ class BallStatusPublisherTest(unittest.TestCase):
             webcam_ball_distance_px=187.259,
         )
 
-        self.assertEqual(status, BallStatus.Right_Move)
+        self.assertEqual(status, BallStatus.Right_Turn_Ball)
         self.assertAlmostEqual(angle, 17.08, places=2)
         self.assertAlmostEqual(node.publisher.last_message.detected_angle, 17.08)
         self.assertAlmostEqual(node.publisher.last_message.x_distance_px, 55.0)
@@ -159,7 +159,7 @@ class BallStatusPublisherTest(unittest.TestCase):
             webcam_ball_distance_px=payload["ball_distance_px"],
         )
 
-        self.assertEqual(status, BallStatus.Left_Move)
+        self.assertEqual(status, BallStatus.Left_Turn_Ball)
         self.assertEqual(node.publisher.last_message.x_distance_px, 45.0)
         self.assertEqual(node.publisher.last_message.y_distance_px, 179.0)
 
