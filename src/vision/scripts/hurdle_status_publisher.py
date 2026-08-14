@@ -8,8 +8,8 @@ from msgs.msg import HurdleResult, MotionCommand, MotionEnd
 
 class HurdleStatus:
     Hurdle_Go = 19
-    Left_Turn_Hurdle = 23
-    Right_Turn_Hurdle = 24
+    Left_Turn_10 = 23
+    Right_Turn_10 = 24
     Backward_half = 9
     Hurdle_Forward_20 = 26
     Back_To_Initial = 27
@@ -44,13 +44,13 @@ class HurdleDecision:
         self.right_angle_range = (0.0, 15.0)
         self.left_angle_range = (-15.0, 0.0)
 
-        self.search_turn = HurdleStatus.Left_Turn_Hurdle
+        self.search_turn = HurdleStatus.Left_Turn_10
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
 
     def reset_detection_cycle(self) -> None:
         """Forget the crossed hurdle so the next detection starts a new cycle."""
-        self.search_turn = HurdleStatus.Left_Turn_Hurdle
+        self.search_turn = HurdleStatus.Left_Turn_10
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
 
@@ -93,12 +93,12 @@ class HurdleDecision:
 
         # 6. 목표 각도보다 왼쪽이면 좌회전, 오른쪽이면 우회전
         if angle < min_angle:
-            self.search_turn = HurdleStatus.Left_Turn_Hurdle
-            return HurdleStatus.Left_Turn_Hurdle, angle, False
+            self.search_turn = HurdleStatus.Left_Turn_10
+            return HurdleStatus.Left_Turn_10, angle, False
 
         if angle > max_angle:
-            self.search_turn = HurdleStatus.Right_Turn_Hurdle
-            return HurdleStatus.Right_Turn_Hurdle, angle, False
+            self.search_turn = HurdleStatus.Right_Turn_10
+            return HurdleStatus.Right_Turn_10, angle, False
 
         # 7. 목표 각도 범위에 들어오면 Forward 20 실행 준비 완료
         return HurdleStatus.Hurdle_Forward_20, angle, True
@@ -110,9 +110,9 @@ class HurdleDecision:
         line_angle = float(line_angle_deg or 0.0)
 
         if line_angle < 0.0:
-            self.search_turn = HurdleStatus.Left_Turn_Hurdle
+            self.search_turn = HurdleStatus.Left_Turn_10
         elif line_angle > 0.0:
-            self.search_turn = HurdleStatus.Right_Turn_Hurdle
+            self.search_turn = HurdleStatus.Right_Turn_10
 
         return self.search_turn, line_angle, False
 

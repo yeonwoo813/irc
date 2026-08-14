@@ -22,8 +22,10 @@ class BallStatus:
     Shoot = 13
     Left_Half_Forward_3step = 21
     Right_Half_Forward_3step = 22
-    Left_Turn_Ball = 23
-    Right_Turn_Ball = 24
+    Left_Turn_10 = 23
+    Right_Turn_10 = 24
+    Left_Turn_5 = 28
+    Right_Turn_5 = 29
     Ball_In_Hand = 50
     Ball_Lost = 45
     Ball_None = 99
@@ -116,9 +118,9 @@ class BallDecision:
         # y 거리를 먼저 판단한다. 입력 y 거리는 항상 양수로 들어온다.
         if webcam_ball_y_distance > self.webcam_pick_y_max_px:
             if angle < -self.webcam_angle_center_tol:
-                return BallStatus.Left_Turn_Ball, angle
+                return BallStatus.Left_Turn_5, angle
             if angle > self.webcam_angle_center_tol:
-                return BallStatus.Right_Turn_Ball, angle
+                return BallStatus.Right_Turn_5, angle
             return BallStatus.Forward_half, 0.0
 
         # pick 거리 안에서는 signed x 거리로 좌우 정렬 여부를 판단한다.
@@ -140,8 +142,8 @@ class BallDecision:
         #5도 이상은 제자리회전
         if abs(angle) > self.angle_center_tol:
             if angle < 0:
-                return BallStatus.Left_Turn_Ball, angle
-            return BallStatus.Right_Turn_Ball, angle
+                return BallStatus.Left_Turn_10, angle
+            return BallStatus.Right_Turn_10, angle
 
     #webcam 각도 값이 없을 때 안전하게 처리, 값 있으면 그대로 반환
     def webcam_angle(self, angle: Optional[float]) -> float:

@@ -1,7 +1,7 @@
 from collections import deque
 from types import MethodType, SimpleNamespace
 
-from decision.main_decision import MainDecision, Motion
+from decision.main_decision import Ball, MainDecision, Motion
 
 
 class _Logger:
@@ -298,7 +298,7 @@ def test_hurdle_ready_false_excludes_forward_20_from_status_vote():
 
     assert harness._try_decision_from_cached_results() is True
     assert harness.hurdle_ready is False
-    assert harness.hurdle_status == Motion.Left_Turn_Mission
+    assert harness.hurdle_status == Motion.Left_Turn_Mission_10
 
 
 def test_hurdle_ready_false_waits_when_all_statuses_are_forward_20():
@@ -325,7 +325,7 @@ def test_hurdle_mode_runs_forward_20_once_then_hurdle_go():
     harness = SimpleNamespace(
         hurdle_step=0,
         hurdle_ready=True,
-        hurdle_status=Motion.Left_Turn_Mission,
+        hurdle_status=Motion.Left_Turn_Mission_10,
         hurdle_count=0,
         hurdle_go_active=False,
         hurdle_go_started=False,
@@ -340,7 +340,7 @@ def test_hurdle_mode_runs_forward_20_once_then_hurdle_go():
 
     # Forward 20 실행 중 ready가 false로 바뀌어도 다음은 허들 넘기입니다.
     harness.hurdle_ready = False
-    harness.hurdle_status = Motion.Right_Turn_Mission
+    harness.hurdle_status = Motion.Right_Turn_Mission_10
     MainDecision.HurdleMode(harness)
 
     assert harness.commands == [Motion.Hurdle_Forward_20, Motion.Hurdle_Go]
@@ -348,3 +348,166 @@ def test_hurdle_mode_runs_forward_20_once_then_hurdle_go():
     assert harness.hurdle_count == 1
     assert harness.hurdle_go_active is True
     assert harness.hurdle_go_started is False
+
+
+def _make_ball_grace_harness(now_seconds, ball_status=Ball.Ball_None):
+    harness = SimpleNamespace(
+        motion_ready=True,
+        motion_end=True,
+        line_data=True,
+        ball_data=True,
+        hurdle_data=True,
+        hurdle_detected=False,
+        has_ball=False,
+        pick_done=False,
+        turn_after_pick=False,
+        turn_after_shoot=False,
+        pick_try_count=0,
+        ball_status=ball_status,
+        line_status=Motion.Forward_4step,
+        lost_step=0,
+        ball_tracking_active=True,
+        ball_last_seen_time=10.0,
+        ball_loss_grace_waiting=False,
+        ball_lost_timeout_sec=0.5,
+        current_mode="BallMode",
+        line_buffer=deque([1, 1, 1], maxlen=5),
+        ball_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_ready_buffer=deque([False, False, False], maxlen=5),
+    )
+    harness.logger = _Logger()
+    harness.get_logger = lambda: harness.logger
+    harness._now_seconds = lambda: now_seconds
+    harness._ball_status_is_detected = MainDecision._ball_status_is_detected
+    harness._pre_pick_ball_grace_enabled = MethodType(
+        MainDecision._pre_pick_ball_grace_enabled,
+        harness,
+    )
+    harness._reset_pre_pick_ball_tracking = MethodType(
+        MainDecision._reset_pre_pick_ball_tracking,
+        harness,
+    )
+    harness._reset_vision_decision_cycle = MethodType(
+        MainDecision._reset_vision_decision_cycle,
+        harness,
+    )
+    harness._hold_pre_pick_ball_mode_for_grace_period = MethodType(
+        MainDecision._hold_pre_pick_ball_mode_for_grace_period,
+        harness,
+    )
+    return harness
+
+
+def test_pre_pick_ball_loss_under_half_second_holds_ball_mode():
+    harness = _make_ball_grace_harness(now_seconds=10.499)
+
+    held = harness._hold_pre_pick_ball_mode_for_grace_period()
+
+    assert held is True
+    assert harness.current_mode == "BallMode"
+    assert harness.ball_tracking_active is True
+    assert harness.ball_loss_grace_waiting is True
+    assert list(harness.line_buffer) == []
+    assert list(harness.ball_buffer) == []
+
+
+def test_decision_does_not_start_line_motion_during_ball_loss_grace():
+    harness = _make_ball_grace_harness(now_seconds=10.25)
+    harness.selected_mode = None
+    harness.HurdleMode = lambda: setattr(harness, "selected_mode", "hurdle")
+    harness.BallMode = lambda: setattr(harness, "selected_mode", "ball")
+    harness.LostMode = lambda: setattr(harness, "selected_mode", "lost")
+    harness.LineTracking = lambda: setattr(harness, "selected_mode", "line")
+
+    MainDecision.Decision(harness)
+
+    assert harness.selected_mode is None
+    assert harness.current_mode == "BallMode"
+    assert harness.ball_loss_grace_waiting is True
+
+
+def test_pre_pick_ball_loss_at_half_second_releases_ball_mode():
+    harness = _make_ball_grace_harness(now_seconds=10.5)
+
+    held = harness._hold_pre_pick_ball_mode_for_grace_period()
+
+    assert held is False
+    assert harness.ball_tracking_active is False
+    assert harness.ball_last_seen_time is None
+    assert harness.ball_loss_grace_waiting is False
+
+
+def test_ball_lost_status_is_also_treated_as_missing():
+    harness = _make_ball_grace_harness(
+        now_seconds=10.25,
+        ball_status=Ball.Ball_Lost,
+    )
+
+    assert harness._hold_pre_pick_ball_mode_for_grace_period() is True
+
+
+def test_timeout_timer_releases_grace_and_rechecks_cached_vision():
+    harness = _make_ball_grace_harness(now_seconds=10.5)
+    harness.ball_loss_grace_waiting = True
+    harness.recheck_count = 0
+
+    def record_recheck():
+        harness.recheck_count += 1
+
+    harness._try_decision_from_cached_results = record_recheck
+
+    MainDecision._check_pre_pick_ball_loss_timeout(harness)
+
+    assert harness.ball_tracking_active is False
+    assert harness.ball_loss_grace_waiting is False
+    assert harness.line_data is False
+    assert harness.ball_data is False
+    assert harness.hurdle_data is False
+    assert harness.recheck_count == 1
+
+
+def test_each_pick_resets_then_allows_a_new_pre_pick_grace_cycle():
+    harness = SimpleNamespace(
+        current_mode="BallMode",
+        pick_done=False,
+        turn_after_pick=False,
+        neck_down_pending=False,
+        turn_after_shoot=False,
+        has_ball=False,
+        ball_status=Ball.Pick_Ready,
+        pick_try_count=0,
+        ball_tracking_active=True,
+        ball_last_seen_time=20.0,
+        ball_loss_grace_waiting=True,
+    )
+    harness.logger = _Logger()
+    harness.get_logger = lambda: harness.logger
+    harness.commands = []
+    harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness._reset_pre_pick_ball_tracking = MethodType(
+        MainDecision._reset_pre_pick_ball_tracking,
+        harness,
+    )
+    harness._activate_pre_pick_ball_tracking = MethodType(
+        MainDecision._activate_pre_pick_ball_tracking,
+        harness,
+    )
+    harness._now_seconds = lambda: 30.0
+
+    MainDecision.BallMode(harness)
+
+    assert harness.commands == [Motion.Pick]
+    assert harness.ball_tracking_active is False
+    assert harness.ball_last_seen_time is None
+
+    # 첫 번째 공의 Pick 후 회전/슛 과정이 끝나 두 번째 공 접근이 시작된 상태.
+    harness.pick_done = False
+    harness.turn_after_pick = False
+    harness.turn_after_shoot = False
+    harness.pick_try_count = 0
+    harness.ball_last_seen_time = 30.0
+    harness._activate_pre_pick_ball_tracking()
+
+    assert harness.ball_tracking_active is True
+    assert harness.ball_last_seen_time == 30.0
