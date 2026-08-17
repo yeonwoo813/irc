@@ -27,6 +27,10 @@ if(BUILD_TESTING)
     test/test_ball_detector_core.py
   )
   ament_add_pytest_test(
+    test_ball_status_publisher
+    test/test_ball_status_publisher.py
+  )
+  ament_add_pytest_test(
     test_hurdle_status_publisher
     test/test_hurdle_status_publisher.py
   )

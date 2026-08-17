@@ -38,8 +38,7 @@ class BallFeatures:
     realsense_ball_angle_error: Optional[float] = None
 
     webcam_ball_detected: bool = False
-    # signed 오프셋은 좌우 판단용, 거리는 화면 표시/전송용 절댓값이다.
-    webcam_ball_x_offset: Optional[float] = None
+    # 로봇 중심선 기준 signed 거리: 왼쪽 음수, 오른쪽 양수.
     webcam_ball_x_distance: Optional[float] = None
     webcam_ball_y_distance: Optional[float] = None
     webcam_ball_angle_error: Optional[float] = None
@@ -50,16 +49,16 @@ class BallFeatures:
 
 class BallDecision:
     def __init__(self):
-        #100cm 이하이면 공 모드, 25cm 이하에서는 webcam에서 보이는 거리(임의)
-        self.ball_entry_distance_cm = 100.0
+        #100cm 이하이면 공 모드
+        self.ball_entry_distance_cm = 120.0
 
-        # Realsense 직진, 제자리회전 기준각 5도
+        # Realsense 직진, 회전 기준각 5도
         self.angle_center_tol = 5.0
 
         # Webcam 접근 및 pick 기준
-        self.webcam_angle_center_tol = 4.0
+        self.webcam_angle_center_tol = 5.0
         self.webcam_pick_y_max_px = 78.0
-        self.webcam_pick_x_min_px = -40.0
+        self.webcam_pick_x_min_px = -48.0
         self.webcam_pick_x_max_px = 35.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
@@ -101,14 +100,10 @@ class BallDecision:
 
     #Webcam 판단
     def _decide_from_webcam(self, features: BallFeatures) -> Tuple[int, float]:
-        # x_offset은 좌우 방향을 포함한 signed 거리이다.
-        webcam_ball_x_offset = features.webcam_ball_x_offset
-        if webcam_ball_x_offset is None:
-            # 구 호출부에서는 x_distance가 signed 오프셋이었다.
-            webcam_ball_x_offset = features.webcam_ball_x_distance
+        webcam_ball_x_distance = features.webcam_ball_x_distance
         webcam_ball_y_distance = features.webcam_ball_y_distance
         if (
-            webcam_ball_x_offset is None
+            webcam_ball_x_distance is None
             or webcam_ball_y_distance is None
         ):
             return BallStatus.Ball_None, 0.0
@@ -117,16 +112,20 @@ class BallDecision:
 
         # y 거리를 먼저 판단한다. 입력 y 거리는 항상 양수로 들어온다.
         if webcam_ball_y_distance > self.webcam_pick_y_max_px:
-            if angle < -self.webcam_angle_center_tol:
+            if angle < -10.0:
+                return BallStatus.Left_Turn_10, angle
+            if angle < -self.angle_center_tol:
                 return BallStatus.Left_Turn_5, angle
-            if angle > self.webcam_angle_center_tol:
+            if angle <= self.angle_center_tol:
+                return BallStatus.Forward_half, 0.0
+            if angle <= 10.0:
                 return BallStatus.Right_Turn_5, angle
-            return BallStatus.Forward_half, 0.0
+            return BallStatus.Right_Turn_10, angle
 
-        # pick 거리 안에서는 signed x 거리로 좌우 정렬 여부를 판단한다.
-        if webcam_ball_x_offset < self.webcam_pick_x_min_px:
+        # pick 거리 안에서는 x 거리로 좌우 정렬 여부를 판단한다.
+        if webcam_ball_x_distance < self.webcam_pick_x_min_px:
             return BallStatus.Left_Move, angle
-        if webcam_ball_x_offset > self.webcam_pick_x_max_px:
+        if webcam_ball_x_distance > self.webcam_pick_x_max_px:
             return BallStatus.Right_Move, angle
         return BallStatus.Pick_Ready, 0.0
 
@@ -135,15 +134,15 @@ class BallDecision:
         if angle is None:
             return BallStatus.Ball_None, 0.0
 
-        #5도 이하는 직진
-        if -self.angle_center_tol <= angle <= self.angle_center_tol:
-            return BallStatus.Forward_3step, 0.0
-
-        #5도 이상은 제자리회전
-        if abs(angle) > self.angle_center_tol:
-            if angle < 0:
-                return BallStatus.Left_Turn_10, angle
-            return BallStatus.Right_Turn_10, angle
+        if angle < -60.0:
+            return BallStatus.Left_Turn, angle
+        if angle < -self.angle_center_tol:
+            return BallStatus.Left_Half_Forward, angle
+        if angle <= self.angle_center_tol:
+            return BallStatus.Forward_4step, 0.0
+        if angle <= 60.0:
+            return BallStatus.Right_Half_Forward, angle
+        return BallStatus.Right_Turn, angle
 
     #webcam 각도 값이 없을 때 안전하게 처리, 값 있으면 그대로 반환
     def webcam_angle(self, angle: Optional[float]) -> float:
@@ -164,7 +163,6 @@ class BallStatusPublisher:
         realsense_ball_distance_cm: Optional[float] = None,
         realsense_ball_angle_error: Optional[float] = None,
         webcam_ball_detected: bool = False,
-        webcam_ball_x_offset: Optional[float] = None,
         webcam_ball_x_distance: Optional[float] = None,
         webcam_ball_y_distance: Optional[float] = None,
         webcam_ball_angle_error: Optional[float] = None,
@@ -176,7 +174,6 @@ class BallStatusPublisher:
             realsense_ball_distance_cm=realsense_ball_distance_cm,
             realsense_ball_angle_error=realsense_ball_angle_error,
             webcam_ball_detected=webcam_ball_detected,
-            webcam_ball_x_offset=webcam_ball_x_offset,
             webcam_ball_x_distance=webcam_ball_x_distance,
             webcam_ball_y_distance=webcam_ball_y_distance,
             webcam_ball_angle_error=webcam_ball_angle_error,

@@ -12,7 +12,7 @@
 
 using namespace Eigen;
 
-#define DEVICE_NAME          "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRLQ9-if00-port0"
+#define DEVICE_NAME "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRKII-if00-port0"
 #define BAUDRATE             2000000
 #define PROTOCOL_VERSION     2.0
 #define NUMBER_OF_DYNAMIXELS 22

@@ -29,8 +29,8 @@ class Motion:
     Neck_Down = 18
     Hurdle_Go = 19
     Forward_3step = 20 #ball mode
-    Left_Half_Forward_3step = 21 #no
-    Right_Half_Forward_3step = 22 #no
+    Left_Turn_Curve = 21 #line tracking 곡선구간 회전
+    Right_Turn_Curve = 22 #line tracking 곡선구간 회전
     Left_Turn_Mission_10 = 23
     Right_Turn_Mission_10 = 24
     Hurdle_1step = 25 #no
@@ -157,9 +157,6 @@ class MainDecision(Node):
         self.ball_buffer = deque(maxlen=5)
         self.hurdle_buffer = deque(maxlen=5)
         self.hurdle_ready_buffer = deque(maxlen=5)
-        # 허들 검출 여부도 별도 5프레임 다수결로 확정합니다.
-        # 한 번 확정된 True는 Hurdle_Go 완료까지 유지합니다.
-        self.hurdle_detection_buffer = deque(maxlen=5)
         
         # subscribe
         self.line_result_sub = self.create_subscription(LineResult, 'line_result', self.LineResultCallback, 10)
@@ -202,10 +199,9 @@ class MainDecision(Node):
                 self.hurdle_go_active = False
                 self.hurdle_go_started = False
                 self.hurdle_detected = False
-                self.hurdle_detection_buffer.clear()
                 self.get_logger().info(
                     "Hurdle_Go 완료: hurdle_detected=false, "
-                    "검출 버퍼를 초기화하고 라인 트래킹 복귀를 허용합니다."
+                    "허들 모드 잠금을 해제하고 라인 트래킹 복귀를 허용합니다."
                 )
 
         self.get_logger().info(
@@ -271,24 +267,18 @@ class MainDecision(Node):
         if not self.motion_ready:
             return
 
-        current_hurdle_detected = bool(
+        confirmed_hurdle_detected = bool(
             hurdle_msg.hurdle_ready
             or hurdle_msg.status != Hurdle.Hurdle_None
         )
-        self.hurdle_detection_buffer.append(current_hurdle_detected)
-        detected_count = sum(self.hurdle_detection_buffer)
-
         if (
             not self.hurdle_detected
             and self.hurdle_count < 2
-            and len(self.hurdle_detection_buffer) == 5
-            and detected_count >= 3
+            and confirmed_hurdle_detected
         ):
             self.hurdle_detected = True
             self.get_logger().info(
-                "허들 5프레임 다수결 확정: "
-                f"true={detected_count}, false={5 - detected_count}, "
-                "hurdle_detected=true, "
+                "허들 비전 다수결 확정 수신: hurdle_detected=true, "
                 "Hurdle_Go 완료까지 허들 모드를 유지합니다."
             )
 
@@ -324,9 +314,25 @@ class MainDecision(Node):
         self.line_status = Counter(
             self.line_buffer
         ).most_common(1)[0][0]
-        self.ball_status = Counter(
-            self.ball_buffer
-        ).most_common(1)[0][0]
+
+        if self.current_mode == "BallMode":
+            ball_votes = list(self.ball_buffer)[-3:]
+            voted_status, vote_count = Counter(
+                ball_votes
+            ).most_common(1)[0]
+
+            # 최근 3개 상태가 모두 다르면 가장 최근 상태를 선택합니다.
+            self.ball_status = (
+                ball_votes[-1]
+                if vote_count == 1
+                else voted_status
+            )
+        else:
+            # BallMode가 아니면 기존 다수결 방식을 유지합니다.
+            ball_votes = list(self.ball_buffer)
+            self.ball_status = Counter(
+                self.ball_buffer
+            ).most_common(1)[0][0]
         # ready도 최근 최대 5개 허들 프레임을 다수결합니다.
         # 버퍼에 3~5개가 있어도 고정 기준인 true 3개 이상일 때만 ready입니다.
         ready_count = sum(self.hurdle_ready_buffer)
@@ -334,6 +340,19 @@ class MainDecision(Node):
 
         # ready가 false인 동안에는 Forward 20을 상태 투표에서 제외합니다.
         hurdle_status_candidates = list(self.hurdle_buffer)
+        # 허들 확정 전에 쌓인 None은 확정 후의 동작 선택에 사용하지 않습니다.
+        if self.hurdle_detected:
+            hurdle_status_candidates = [
+                status
+                for status in hurdle_status_candidates
+                if status != Hurdle.Hurdle_None
+            ]
+            if not hurdle_status_candidates:
+                self.get_logger().info(
+                    "허들모드에 유효한 허들 상태가 없어 새 프레임을 기다립니다."
+                )
+                return False
+
         if not self.hurdle_ready:
             hurdle_status_candidates = [
                 status
@@ -365,6 +384,7 @@ class MainDecision(Node):
         self.get_logger().info(
             "[CachedVision] "
             f"line={self.line_status}, "
+            f"ball_votes={ball_votes}, "
             f"ball={self.ball_status}, "
             f"ball_in_hand={self.ball_in_hand}, "
             f"hurdle={self.hurdle_status}, "
@@ -603,6 +623,12 @@ class MainDecision(Node):
         #step 0: Ready 전 접근명령
         if self.hurdle_step == 0:
             if not self.hurdle_ready:
+                if self.hurdle_status == Hurdle.Hurdle_None:
+                    self.get_logger().info(
+                        "HurdleMode에서 status=99는 모션으로 발행하지 않습니다."
+                    )
+                    self._reset_vision_decision_cycle()
+                    return
                 self.status = self.hurdle_status
                 self.MotionCommand()
                 return
@@ -931,10 +957,10 @@ class MainDecision(Node):
             motion_msg.command = Motion.Forward_3step
             
         elif self.status == 21:
-            motion_msg.command = Motion.Left_Half_Forward_3step
+            motion_msg.command = Motion.Left_Turn_Curve
         
         elif self.status == 22:
-            motion_msg.command = Motion.Right_Half_Forward_3step
+            motion_msg.command = Motion.Right_Turn_Curve
             
         elif self.status == 23:
             motion_msg.command = Motion.Left_Turn_Mission_10

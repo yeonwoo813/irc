@@ -697,7 +697,6 @@ def add_ball_geometry(
 
     payload["robot_center_x"] = robot_x
     payload["robot_center_y"] = robot_y
-    payload["ball_x_offset_px"] = None
     payload["ball_x_distance_px"] = None
     payload["ball_y_distance_px"] = None
     payload["ball_distance_px"] = None
@@ -715,15 +714,15 @@ def add_ball_geometry(
     if not math.isfinite(ball_x) or not math.isfinite(ball_y):
         return payload
 
-    # x는 오른쪽이 양수, y는 화면 하단 기준점에서 위쪽이 양수다.
-    dx = ball_x - robot_x
-    x_distance = abs(dx)
+    # x_distance는 로봇 중심선을 기준으로 왼쪽이 음수, 오른쪽이 양수다.
+    x_distance = ball_x - robot_x
     y_distance = abs(robot_y - ball_y)
-    payload["ball_x_offset_px"] = float(dx)
     payload["ball_x_distance_px"] = float(x_distance)
     payload["ball_y_distance_px"] = float(y_distance)
     payload["ball_distance_px"] = float(math.hypot(x_distance, y_distance))
-    payload["ball_angle_deg"] = float(math.degrees(math.atan2(dx, y_distance)))
+    payload["ball_angle_deg"] = float(
+        math.degrees(math.atan2(x_distance, y_distance))
+    )
     return payload
 
 
@@ -941,7 +940,7 @@ def visualize_yolo(
         ball_lines = [
             f"BALL:YES conf:{float(payload.get('ball_conf', 0.0)):.2f}",
             (
-                f"ang:{float(ball_angle):+.1f} x:{float(ball_dx):.0f} y:{float(ball_dy):.0f}px"
+                f"ang:{float(ball_angle):+.1f} x:{float(ball_dx):+.0f} y:{float(ball_dy):.0f}px"
                 if ball_angle is not None and ball_dx is not None and ball_dy is not None
                 else "ang:N/A x:N/A y:N/A"
             ),

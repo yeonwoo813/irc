@@ -1,3 +1,4 @@
+from collections import deque
 from dataclasses import dataclass
 import time
 from typing import Callable, Optional, Tuple
@@ -136,8 +137,9 @@ class HurdleStatusPublisher:
         self._crossing_started = False
         self._cooldown_until = 0.0
         self._latest_motion_end: Optional[bool] = None
-        # 최초 검출부터 Hurdle_Go 종료까지 허들 모드를 유지합니다.
-        # True인 동안에는 이후의 원본 허들 검출값을 사용하지 않습니다.
+        # 원본 검출 5개 중 3개 이상일 때만 허들을 확정합니다.
+        # 확정 후에는 Hurdle_Go 종료까지 원본 검출값을 무시하고 유지합니다.
+        self.hurdle_detection_buffer = deque(maxlen=5)
         self.hurdle_detected = False
         self.hurdle_pub = self.node.create_publisher(
             HurdleResult,
@@ -207,6 +209,7 @@ class HurdleStatusPublisher:
         self._crossing_active = False
         self._crossing_started = False
         self.hurdle_detected = False
+        self.hurdle_detection_buffer.clear()
         self.hurdle_decision.reset_detection_cycle()
         self._cooldown_until = (
             self._clock() + self.post_crossing_cooldown_sec
@@ -245,12 +248,20 @@ class HurdleStatusPublisher:
                 False,
             )
         else:
-            if not self.hurdle_detected and hurdle_detected:
-                self.hurdle_detected = True
-                self._log_info(
-                    "Hurdle detected; hurdle_detected=true until "
-                    "Hurdle_Go completes."
-                )
+            if not self.hurdle_detected:
+                self.hurdle_detection_buffer.append(bool(hurdle_detected))
+                detected_count = sum(self.hurdle_detection_buffer)
+                if (
+                    len(self.hurdle_detection_buffer) == 5
+                    and detected_count >= 3
+                ):
+                    self.hurdle_detected = True
+                    self._log_info(
+                        "Hurdle confirmed by 5-frame majority: "
+                        f"true={detected_count}, "
+                        f"false={5 - detected_count}; "
+                        "hurdle_detected=true until Hurdle_Go completes."
+                    )
 
             features = HurdleFeatures(
                 hurdle_detected=self.hurdle_detected,

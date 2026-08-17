@@ -79,7 +79,6 @@ class BallGeometryTest(unittest.TestCase):
 
         self.assertEqual(payload["robot_center_x"], 345.0)
         self.assertEqual(payload["robot_center_y"], 479.0)
-        self.assertEqual(payload["ball_x_offset_px"], 55.0)
         self.assertEqual(payload["ball_x_distance_px"], 55.0)
         self.assertEqual(payload["ball_y_distance_px"], 179.0)
         self.assertAlmostEqual(payload["ball_distance_px"], 187.259, places=3)
@@ -120,20 +119,19 @@ class BallStatusPublisherTest(unittest.TestCase):
 
         status, angle = publisher.publish_ball_status(
             webcam_ball_detected=True,
-            webcam_ball_x_offset=55.0,
             webcam_ball_x_distance=55.0,
             webcam_ball_y_distance=179.0,
             webcam_ball_angle_error=17.08,
             webcam_ball_distance_px=187.259,
         )
 
-        self.assertEqual(status, BallStatus.Right_Turn_Ball)
+        self.assertEqual(status, BallStatus.Right_Turn_5)
         self.assertAlmostEqual(angle, 17.08, places=2)
         self.assertAlmostEqual(node.publisher.last_message.detected_angle, 17.08)
         self.assertAlmostEqual(node.publisher.last_message.x_distance_px, 55.0)
         self.assertAlmostEqual(node.publisher.last_message.y_distance_px, 179.0)
 
-    def test_x_distance_is_absolute_but_offset_keeps_left_direction(self) -> None:
+    def test_x_distance_keeps_left_direction(self) -> None:
         payload = add_ball_geometry(
             {
                 "ball_detected": True,
@@ -144,23 +142,21 @@ class BallStatusPublisherTest(unittest.TestCase):
             frame_h=480,
         )
 
-        self.assertEqual(payload["ball_x_offset_px"], -45.0)
-        self.assertEqual(payload["ball_x_distance_px"], 45.0)
+        self.assertEqual(payload["ball_x_distance_px"], -45.0)
         self.assertEqual(payload["ball_y_distance_px"], 179.0)
 
         node = _FakeNode()
         publisher = BallStatusPublisher(node)
         status, _angle = publisher.publish_ball_status(
             webcam_ball_detected=True,
-            webcam_ball_x_offset=payload["ball_x_offset_px"],
             webcam_ball_x_distance=payload["ball_x_distance_px"],
             webcam_ball_y_distance=payload["ball_y_distance_px"],
             webcam_ball_angle_error=payload["ball_angle_deg"],
             webcam_ball_distance_px=payload["ball_distance_px"],
         )
 
-        self.assertEqual(status, BallStatus.Left_Turn_Ball)
-        self.assertEqual(node.publisher.last_message.x_distance_px, 45.0)
+        self.assertEqual(status, BallStatus.Left_Turn_5)
+        self.assertEqual(node.publisher.last_message.x_distance_px, -45.0)
         self.assertEqual(node.publisher.last_message.y_distance_px, 179.0)
 
 

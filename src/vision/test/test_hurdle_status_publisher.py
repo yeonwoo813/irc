@@ -237,6 +237,18 @@ class HurdlePublisherTest(unittest.TestCase):
         node = FakeNode()
         publisher = HurdleStatusPublisher(node)
 
+        before_confirmation = []
+        for detected in (True, False, True, False):
+            before_confirmation.append(
+                publisher.publish_hurdle_status(
+                    hurdle_detected=detected,
+                    line_point_count=2,
+                    line_follow_angle_deg=0.0,
+                    line_second_point_distance_px=0.0,
+                    line_angle_deg=0.0,
+                )
+            )
+
         back_to_initial = publisher.publish_hurdle_status(
             hurdle_detected=True,
             line_point_count=2,
@@ -270,6 +282,10 @@ class HurdlePublisherTest(unittest.TestCase):
         )
 
         self.assertEqual(
+            before_confirmation,
+            [(HurdleStatus.Hurdle_None, 0.0, False)] * 4,
+        )
+        self.assertEqual(
             back_to_initial,
             (HurdleStatus.Back_To_Initial, 0.0, False),
         )
@@ -278,21 +294,20 @@ class HurdlePublisherTest(unittest.TestCase):
             result,
             (HurdleStatus.Hurdle_Forward_20, 0.0, True),
         )
-        self.assertEqual(len(node.recorder.messages), 3)
         self.assertEqual(
-            node.recorder.messages[0].status,
-            HurdleStatus.Back_To_Initial,
+            [msg.status for msg in node.recorder.messages],
+            [
+                HurdleStatus.Hurdle_None,
+                HurdleStatus.Hurdle_None,
+                HurdleStatus.Hurdle_None,
+                HurdleStatus.Hurdle_None,
+                HurdleStatus.Back_To_Initial,
+                HurdleStatus.Back_To_Initial,
+                HurdleStatus.Hurdle_Forward_20,
+            ],
         )
-        self.assertEqual(
-            node.recorder.messages[1].status,
-            HurdleStatus.Back_To_Initial,
-        )
-        self.assertEqual(
-            node.recorder.messages[2].status,
-            HurdleStatus.Hurdle_Forward_20,
-        )
-        self.assertEqual(node.recorder.messages[2].angle, 0.0)
-        self.assertTrue(node.recorder.messages[2].hurdle_ready)
+        self.assertEqual(node.recorder.messages[-1].angle, 0.0)
+        self.assertTrue(node.recorder.messages[-1].hurdle_ready)
 
     def test_hurdle_go_suppresses_detection_until_two_seconds_after_end(
         self,
@@ -346,10 +361,11 @@ class HurdlePublisherTest(unittest.TestCase):
             monotonic_clock=clock,
         )
 
-        publisher.publish_hurdle_status(
-            hurdle_detected=True,
-            line_point_count=2,
-        )
+        for detected in (True, False, True, False, True):
+            publisher.publish_hurdle_status(
+                hurdle_detected=detected,
+                line_point_count=2,
+            )
         self.assertTrue(publisher.hurdle_detected)
         node.callbacks["motion_command"](
             FakeMotionCommand(HurdleStatus.Back_To_Initial)
@@ -390,6 +406,15 @@ class HurdlePublisherTest(unittest.TestCase):
             hurdle_detected=True,
             line_point_count=2,
         )
+        for detected in (False, True, False):
+            publisher.publish_hurdle_status(
+                hurdle_detected=detected,
+                line_point_count=2,
+            )
+        after_reconfirmation = publisher.publish_hurdle_status(
+            hurdle_detected=True,
+            line_point_count=2,
+        )
 
         suppressed = (HurdleStatus.Hurdle_None, 0.0, False)
         self.assertEqual(during_crossing, suppressed)
@@ -398,19 +423,20 @@ class HurdlePublisherTest(unittest.TestCase):
         self.assertEqual(during_cooldown, suppressed)
         self.assertEqual(
             after_cooldown,
-            (HurdleStatus.Back_To_Initial, 0.0, False),
+            suppressed,
         )
         self.assertEqual(
-            [msg.status for msg in node.recorder.messages],
-            [
-                HurdleStatus.Back_To_Initial,
-                HurdleStatus.Hurdle_None,
-                HurdleStatus.Hurdle_None,
-                HurdleStatus.Hurdle_None,
-                HurdleStatus.Hurdle_None,
-                HurdleStatus.Back_To_Initial,
-            ],
+            after_reconfirmation,
+            (HurdleStatus.Back_To_Initial, 0.0, False),
         )
+        statuses = [msg.status for msg in node.recorder.messages]
+        self.assertEqual(
+            statuses[:5],
+            [HurdleStatus.Hurdle_None] * 4
+            + [HurdleStatus.Back_To_Initial],
+        )
+        self.assertEqual(statuses[5:13], [HurdleStatus.Hurdle_None] * 8)
+        self.assertEqual(statuses[13], HurdleStatus.Back_To_Initial)
 
     def test_motion_start_arriving_before_hurdle_go_is_not_missed(
         self,
