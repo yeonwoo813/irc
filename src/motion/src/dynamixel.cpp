@@ -137,6 +137,43 @@ void Dxl::EnableTorqueAllStreamlitStyle()
     torque_enabled_ = true;
 }
 
+// Neck motor torque enable
+bool Dxl::EnableNeckTorque()
+{
+    if (virtual_mode_)
+    {
+        neck_torque_enabled_ = true;
+        return true;
+    }
+
+    if (!ready_ || !port_open_)
+    {
+        return false;
+    }
+
+    if (neck_torque_enabled_)
+    {
+        return true;
+    }
+
+    uint8_t dxl_error = 0;
+
+    const int comm_result =
+        packetHandler_->write1ByteTxRx(
+            portHandler_,
+            NECK_DXL_ID,
+            DxlReg_TorqueEnable,
+            1,
+            &dxl_error);
+
+    if (comm_result != COMM_SUCCESS || dxl_error != 0)
+    {
+        return false;
+    }
+
+    neck_torque_enabled_ = true;
+    return true;
+}
 
 void Dxl::DisableTorqueAll()
 {
@@ -157,6 +194,21 @@ void Dxl::DisableTorqueAll()
     }
 
     torque_enabled_ = false;
+
+    // Neck motor torque disable
+    if (neck_torque_enabled_)
+    {
+        uint8_t dxl_error = 0;
+
+        packetHandler_->write1ByteTxRx(
+            portHandler_,
+            NECK_DXL_ID,
+            DxlReg_TorqueEnable,
+            0,
+            &dxl_error);
+
+        neck_torque_enabled_ = false;
+    }
 }
 
 
@@ -208,6 +260,40 @@ bool Dxl::ReadPresentRawStreamlitStyle(RawArray& raw)
     return true;
 }
 
+// Read the neck motor's present position.
+bool Dxl::ReadNeckPresentRaw(int32_t& raw)
+{
+    if (virtual_mode_)
+    {
+        raw = neck_last_goal_raw_;
+        return true;
+    }
+
+    if (!ready_ || !port_open_)
+    {
+        return false;
+    }
+
+    uint8_t dxl_error = 0;
+    uint32_t raw_unsigned = 0;
+
+    const int comm_result =
+        packetHandler_->read4ByteTxRx(
+            portHandler_,
+            NECK_DXL_ID,
+            DxlReg_PresentPosition,
+            &raw_unsigned,
+            &dxl_error);
+
+    if (comm_result != COMM_SUCCESS || dxl_error != 0)
+    {
+        return false;
+    }
+
+    raw = static_cast<int32_t>(raw_unsigned);
+    neck_last_goal_raw_ = raw;
+    return true;
+}
 
 bool Dxl::BeginStreamWrite()
 {
@@ -277,6 +363,42 @@ int Dxl::StreamWriteRaw(const RawArray& raw)
     return comm_result;
 }
 
+// Write only the neck motor's goal position through GroupSyncWrite.
+int Dxl::StreamWriteNeckRaw(int32_t raw)
+{
+    if (virtual_mode_)
+    {
+        neck_last_goal_raw_ = raw;
+        return COMM_SUCCESS;
+    }
+
+    if (!motion_sync_write_)
+    {
+        return COMM_TX_FAIL;
+    }
+
+    uint8_t parameter[4] = {0, 0, 0, 0};
+    getParam(raw, parameter);
+
+    const bool added =
+        motion_sync_write_->addParam(
+            NECK_DXL_ID,
+            parameter);
+
+    if (!added)
+    {
+        motion_sync_write_->clearParam();
+        return COMM_TX_FAIL;
+    }
+
+    const int comm_result =
+        motion_sync_write_->txPacket();
+
+    motion_sync_write_->clearParam();
+    neck_last_goal_raw_ = raw;
+
+    return comm_result;
+}
 
 void Dxl::EndStreamWrite()
 {

@@ -65,6 +65,16 @@ private:
         int motion_id,
         bool initial_motion,
         Dxl::RawArray start_raw);
+
+    // Neck motion runs independently from the 22-joint body trajectory.
+    bool StartNeckMotion(int motion_id);
+
+    void RunNeckMotion(
+        int motion_id,
+        int32_t start_raw,
+        int32_t goal_raw,
+        double duration_seconds);
+
     void HandleMotionCompletion();
     void JoinFinishedMotionThread();
 

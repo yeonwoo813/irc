@@ -1,6 +1,7 @@
 #include "main.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <functional>
 #include <utility>
@@ -11,6 +12,17 @@ static_assert(
     NUMBER_OF_JOINTS == NUMBER_OF_DYNAMIXELS,
     "SDK 관절 수와 Dynamixel 개수가 다릅니다.");
 
+namespace
+{
+constexpr int kNeckUpMotionId = 14;
+constexpr int kNeckDownMotionId = 18;
+
+// 실제 측정한 값으로 반드시 변경
+constexpr int32_t kNeckUpRaw = 2500;
+constexpr int32_t kNeckDownRaw = 2048;
+
+constexpr double kNeckMotionDuration = 0.5;
+}
 
 MainNode::MainNode()
 : Node("motion_main_node")
@@ -124,6 +136,13 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
         return false;
     }
 
+    // Neck motions bypass the existing 22-joint body trajectory.
+    if (motion_id == kNeckUpMotionId ||
+        motion_id == kNeckDownMotionId)
+    {
+        return StartNeckMotion(motion_id);
+    }
+
     if (!callback_->HasMotion(motion_id))
     {
         RCLCPP_ERROR(
@@ -191,6 +210,90 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
     return true;
 }
 
+// Prepare the neck target and start its dedicated motion thread.
+bool MainNode::StartNeckMotion(int motion_id)
+{
+    const int32_t goal_raw =
+        motion_id == kNeckUpMotionId
+            ? kNeckUpRaw
+            : kNeckDownRaw;
+
+    JoinFinishedMotionThread();
+
+    int32_t start_raw = 0;
+
+    if (!dxl_port_->ReadNeckPresentRaw(start_raw))
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "23번 목 모터 현재 위치 읽기 실패");
+        return false;
+    }
+
+    // Torque를 처음 켤 때 기존 Goal Position으로 튀지 않도록
+    // 현재 위치를 먼저 Goal Position에 기록합니다.
+    if (!dxl_port_->BeginStreamWrite())
+    {
+        return false;
+    }
+
+    const int initial_write_result =
+        dxl_port_->StreamWriteNeckRaw(start_raw);
+
+    dxl_port_->EndStreamWrite();
+
+    if (initial_write_result != COMM_SUCCESS)
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "23번 목 모터 초기 목표값 전송 실패");
+        return false;
+    }
+
+    if (!dxl_port_->EnableNeckTorque())
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "23번 목 모터 Torque Enable 실패");
+        return false;
+    }
+
+    current_motion_id_.store(motion_id);
+    motion_running_.store(true);
+    PublishMotionState(false, true);
+
+    try
+    {
+        motion_thread_ = std::thread(
+            &MainNode::RunNeckMotion,
+            this,
+            motion_id,
+            start_raw,
+            goal_raw,
+            kNeckMotionDuration);
+    }
+    catch (const std::exception& error)
+    {
+        motion_running_.store(false);
+        current_motion_id_.store(-1);
+
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "목 모션 스레드 생성 실패: %s",
+            error.what());
+
+        return false;
+    }
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "목 모션 %d 시작: ID=23, start=%d, goal=%d",
+        motion_id,
+        start_raw,
+        goal_raw);
+
+    return true;
+}
 
 void MainNode::RunMotionStreamlitStyle(
     int motion_id,
@@ -296,6 +399,119 @@ void MainNode::RunMotionStreamlitStyle(
     }
 }
 
+// Interpolate and stream only motor ID 23 at the body motion's 200 Hz rate.
+void MainNode::RunNeckMotion(
+    int motion_id,
+    int32_t start_raw,
+    int32_t goal_raw,
+    double duration_seconds)
+{
+    MotionCompletion result;
+    result.motion_id = motion_id;
+    result.initial_motion = false;
+
+    const auto motion_start =
+        std::chrono::steady_clock::now();
+
+    int total_ticks =
+        static_cast<int>(duration_seconds * HZ);
+
+    if (total_ticks < 1)
+    {
+        total_ticks = 1;
+    }
+
+    if (!dxl_port_->BeginStreamWrite())
+    {
+        result.stopped = true;
+    }
+    else
+    {
+        // 몸 모션과 동일한 200Hz 주기
+        const std::chrono::duration<double> dt_seconds(
+            1.0 / HZ);
+
+        for (int tick = 0;
+             tick < total_ticks &&
+             !stop_requested_.load();
+             ++tick)
+        {
+            const auto loop_start =
+                std::chrono::steady_clock::now();
+
+            const double ratio =
+                static_cast<double>(tick + 1) /
+                static_cast<double>(total_ticks);
+
+            // 시작과 끝에서 속도와 가속도가 0이 되는 5차 보간
+            const double ratio2 = ratio * ratio;
+            const double ratio3 = ratio2 * ratio;
+            const double ratio4 = ratio3 * ratio;
+            const double ratio5 = ratio4 * ratio;
+
+            const double blend =
+                10.0 * ratio3
+                - 15.0 * ratio4
+                + 6.0 * ratio5;
+
+            const int32_t target_raw =
+                static_cast<int32_t>(
+                    std::lround(
+                        static_cast<double>(start_raw) +
+                        static_cast<double>(
+                            goal_raw - start_raw) * blend));
+
+            const int comm_result =
+                dxl_port_->StreamWriteNeckRaw(target_raw);
+
+            if (comm_result != COMM_SUCCESS)
+            {
+                ++result.tx_failure_count;
+            }
+
+            ++result.tick_count;
+
+            // 마지막 목표값은 이미 전송했으므로 바로 종료
+            if (tick + 1 >= total_ticks)
+            {
+                break;
+            }
+
+            // 기존 몸 모션과 동일하게 통신에 사용한 시간을 제외하고 대기
+            const auto elapsed =
+                std::chrono::steady_clock::now()
+                - loop_start;
+
+            const auto remaining =
+                dt_seconds - elapsed;
+
+            if (remaining.count() > 0.0)
+            {
+                std::this_thread::sleep_for(remaining);
+            }
+        }
+
+        dxl_port_->EndStreamWrite();
+    }
+
+    if (stop_requested_.load())
+    {
+        result.stopped = true;
+    }
+
+    result.elapsed_seconds =
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now()
+            - motion_start)
+            .count();
+
+    {
+        std::lock_guard<std::mutex> lock(
+            completion_mutex_);
+
+        completion_ = result;
+    }
+}
 
 void MainNode::HandleMotionCompletion()
 {

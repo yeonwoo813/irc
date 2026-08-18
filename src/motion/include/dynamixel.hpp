@@ -31,6 +31,9 @@ using namespace Eigen;
 
 #define RAD_TO_VALUE (4096.0 / (2.0 * M_PI))
 
+// Neck motor ID
+static constexpr uint8_t NECK_DXL_ID = 23;
+
 class Dxl
 {
 public:
@@ -56,6 +59,11 @@ public:
     bool BeginStreamWrite();
     int StreamWriteRaw(const RawArray& raw);
     void EndStreamWrite();
+
+    // Neck motor control
+    bool EnableNeckTorque();
+    bool ReadNeckPresentRaw(int32_t& raw);
+    int StreamWriteNeckRaw(int32_t raw);
 
     // 마지막으로 모터에 전송한 목표 위치를 다음 모션의 시작점으로 사용합니다.
     RawArray GetLastGoalRaw() const;
@@ -115,6 +123,10 @@ private:
     bool ready_{false};
     bool port_open_{false};
     bool torque_enabled_{false};
+
+    // Neck motor state
+    bool neck_torque_enabled_{false};
+    int32_t neck_last_goal_raw_{2048};
 
     static constexpr double kPi = 3.14159265358979323846;
 };
