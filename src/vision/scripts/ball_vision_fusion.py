@@ -191,7 +191,8 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("edge_max_aspect_ratio", 2.20)
         self.declare_parameter("morph_kernel_size", 5)
         self.declare_parameter("depth_patch_radius", 1)
-        self.declare_parameter("realsense_hold_frames", 3)
+        # 15 FPS 기준 약 0.5초 동안 직전 공 검출을 유지한다.
+        self.declare_parameter("realsense_hold_frames", 8)
 
         # CameraInfo를 아직 받지 못했을 때 사용할 선배 코드의 기본 내부 파라미터
         self.declare_parameter("fallback_fx", 607.0)

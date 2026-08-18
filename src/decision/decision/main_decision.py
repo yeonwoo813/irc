@@ -33,7 +33,7 @@ class Motion:
     Right_Turn_Curve = 22 #line tracking 곡선구간 회전
     Left_Turn_Mission_10 = 23
     Right_Turn_Mission_10 = 24
-    Hurdle_1step = 25 #no
+    Back_To_Walk = 25 
     Hurdle_Forward_20 = 26 #hurdle 전 미세걷기
     Back_To_Initial = 27
     Left_Turn_Mission_5 = 28
@@ -83,7 +83,7 @@ class MainDecision(Node):
 
         #test_mode 파라미터 선언 및 초기화
         self.declare_parameter('test_mode', False)
-        self.declare_parameter('ball_lost_timeout_sec', 0.5)
+        self.declare_parameter('ball_lost_timeout_sec', 0.8)
         test_mode_param = self.get_parameter('test_mode').value
         if isinstance(test_mode_param, str):
             self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
@@ -130,8 +130,9 @@ class MainDecision(Node):
         #pick이후 회전
         self.ball_count = 0
         self.turn_after_pick = False
+        self.backward_before_turn_after_pick_pending = False
+        self.back_to_walk_after_pick_pending = False
         self.turn_count = 0
-        self.turn_pick = Motion.Right_Turn
         #lost
         self.lost_count = 0
         self.lost_step = 0
@@ -173,7 +174,7 @@ class MainDecision(Node):
         )
         #publish
         self.motion_pub = self.create_publisher(MotionCommand, 'motion_command', 10)
-        # 비전 콜백이 잠시 끊겨도 0.5초 유예 만료를 확인할 수 있게 한다.
+        # 비전 콜백이 잠시 끊겨도 0.8초 유예 만료를 확인할 수 있게 한다.
         self.ball_loss_grace_timer = self.create_timer(
             0.05,
             self._check_pre_pick_ball_loss_timeout,
@@ -250,7 +251,8 @@ class MainDecision(Node):
             if self.ball_loss_grace_waiting:
                 self.ball_loss_grace_waiting = False
                 self.get_logger().info(
-                    "0.5초 유예 중 공 재검출: 공 모드를 계속 유지합니다."
+                    f"{self.ball_lost_timeout_sec:.1f}초 유예 중 공 재검출: "
+                    "공 모드를 계속 유지합니다."
                 )
 
         self.ball_buffer.append(ball_msg.status)
@@ -415,7 +417,7 @@ class MainDecision(Node):
 
             self.HurdleMode()
 
-        # Pick 전 공 접근 중에는 0.5초 미만의 일시 미검출만으로
+        # Pick 전 공 접근 중에는 0.8초 미만의 일시 미검출만으로
         # 라인트래킹에 복귀하지 않는다. 모션이 끝난 상태에서 새 비전 샘플을
         # 다시 모아 공 재검출 또는 timeout을 확인한다.
         elif self._hold_pre_pick_ball_mode_for_grace_period():
@@ -426,6 +428,7 @@ class MainDecision(Node):
         elif (
             self.pick_done == True
             or self.turn_after_pick == True
+            or getattr(self, 'back_to_walk_after_pick_pending', False)
             or self.turn_after_shoot == True
             or self._ball_status_is_detected(self.ball_status)
         ):
@@ -470,6 +473,7 @@ class MainDecision(Node):
                 self.turn_pick = Motion.Left_Turn_Afterpick
             else:
                 self.turn_after_pick = False
+                self.backward_before_turn_after_pick_pending = False
                 self.LineTracking()
                 return
 
@@ -478,14 +482,19 @@ class MainDecision(Node):
         # 최소 한 번 회전한 뒤, 라인이 보이면 회전 종료
         if self.turn_count > 0 and self.line_status != Line.Line_None:
             self.turn_after_pick = False
+            self.backward_before_turn_after_pick_pending = False
             self.turn_count = 0
             self.pick_try_count = 0
-            self.LineTracking()
+            self.back_to_walk_after_pick_pending = True
+            self.status = Motion.Back_To_Walk
+            self.MotionCommand()
             return
         
-        # 라인이 안 보이면 최대 5번까지만 회전
-        if self.turn_count >= 5:
+        # 라인이 안 보이면 최대 10번까지만 회전
+        if self.turn_count >= 10:
             self.turn_after_pick = False
+            self.backward_before_turn_after_pick_pending = False
+            self.back_to_walk_after_pick_pending = False
             self.turn_count = 0
             self.pick_try_count = 0
             self.LostMode()
@@ -531,23 +540,36 @@ class MainDecision(Node):
     def BallMode(self):
         self.current_mode = "BallMode"
 
+        # TurnAfterPick 종료 후 실행한 Back_To_Walk가 완료되면,
+        # 해당 모션 중 쌓인 비전값을 버리고 새 라인 데이터로 복귀 판단한다.
+        if getattr(self, 'back_to_walk_after_pick_pending', False):
+            self.back_to_walk_after_pick_pending = False
+            self.current_mode = "LineTrackingMode"
+            self._reset_vision_decision_cycle()
+            return
+
         #Pick 이후 공 확인, 성공했을 때만 Neck Up 실행
         if self.pick_done == True:
             pick_succeeded = self.CheckBall()
             self.turn_after_pick = True
-            self.turn_count = 0
+            self.backward_before_turn_after_pick_pending = True
 
             if pick_succeeded:
                 self.status = Motion.Neck_Up
                 self.MotionCommand()
                 return
 
-            #Pick 실패 시 Neck Up을 건너뛰고 기존 회전 처리
-            self.TurnAfterPick()
-            return
-        
-        #pick 회전루프
+            # Pick 실패 시 Neck Up을 건너뛰고 아래의 후진 단계로 진행
+
+        # Pick 실패 확인 직후 또는 Pick 성공 시 Neck Up 완료 후,
+        # 통합 회전 모션 전에 Backward_half를 한 번만 실행
         if self.turn_after_pick == True:
+            if self.backward_before_turn_after_pick_pending:
+                self.backward_before_turn_after_pick_pending = False
+                self.status = Motion.Backward_half
+                self.MotionCommand()
+                return
+
             self.TurnAfterPick()
             return
 
@@ -605,6 +627,8 @@ class MainDecision(Node):
         if self.ball_status == Ball.Pick_Ready:
             self._reset_pre_pick_ball_tracking()
             self.pick_try_count += 1
+            self.backward_before_turn_after_pick_pending = False
+            self.back_to_walk_after_pick_pending = False
             self.status = Motion.Pick
             self.pick_done = True
             self.MotionCommand()
@@ -791,6 +815,7 @@ class MainDecision(Node):
             not getattr(self, 'has_ball', False)
             and not getattr(self, 'pick_done', False)
             and not getattr(self, 'turn_after_pick', False)
+            and not getattr(self, 'back_to_walk_after_pick_pending', False)
             and not getattr(self, 'turn_after_shoot', False)
             and getattr(self, 'pick_try_count', 0) == 0
         )
@@ -798,7 +823,8 @@ class MainDecision(Node):
     def _activate_pre_pick_ball_tracking(self):
         if not self.ball_tracking_active:
             self.get_logger().info(
-                "BallMode 진입: Pick 전 0.5초 미검출 유예를 활성화합니다."
+                f"BallMode 진입: Pick 전 {self.ball_lost_timeout_sec:.1f}초 "
+                "미검출 유예를 활성화합니다."
             )
         self.ball_tracking_active = True
         self.ball_loss_grace_waiting = False
@@ -832,7 +858,7 @@ class MainDecision(Node):
             return False
 
         elapsed = max(0.0, self._now_seconds() - self.ball_last_seen_time)
-        timeout = getattr(self, 'ball_lost_timeout_sec', 0.5)
+        timeout = getattr(self, 'ball_lost_timeout_sec', 0.8)
         if elapsed >= timeout:
             self.get_logger().info(
                 f"공 미검출 {elapsed:.2f}초: 공 모드를 해제하고 "
@@ -863,7 +889,7 @@ class MainDecision(Node):
         if self.ball_last_seen_time is None:
             return
 
-        timeout = getattr(self, 'ball_lost_timeout_sec', 0.5)
+        timeout = getattr(self, 'ball_lost_timeout_sec', 0.8)
         elapsed = max(0.0, self._now_seconds() - self.ball_last_seen_time)
         if elapsed < timeout:
             return
@@ -969,7 +995,7 @@ class MainDecision(Node):
             motion_msg.command = Motion.Right_Turn_Mission_10
 
         elif self.status == 25:
-            motion_msg.command = Motion.Hurdle_1step
+            motion_msg.command = Motion.Back_To_Walk
 
         elif self.status == 26:
             motion_msg.command = Motion.Hurdle_Forward_20

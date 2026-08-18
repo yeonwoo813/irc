@@ -209,9 +209,11 @@ class BallStatusPublisher:
 
         # MainDecision은 Pick 모션이 끝난 뒤 CheckBall()을 실행한
         # 다음,
-        # 성공이면 Neck_Up, 실패이면 Afterpick 회전을 발행한다.
+        # 성공이면 Neck_Up, 실패이면 Backward_half를 발행한다.
+        # 두 경우 모두 이후 Backward_half를 거쳐 Afterpick 회전으로 진행한다.
         if self.pick_command_seen and command in (
             BallStatus.Neck_Up,
+            BallStatus.Backward_half,
             BallStatus.Left_Turn_Afterpick,
             BallStatus.Right_Turn_Afterpick,
         ):

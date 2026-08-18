@@ -6,9 +6,8 @@ on ``/line_tracker/state``.  This node validates that state and applies the
 distance/angle decision from ``hurdle_status_publisher`` before publishing
 ``hurdle_result``.
 
-RealSense hurdle detection is intentionally not used.  The no-op
-``/hurdle/recalibrate`` service remains for compatibility with the motion
-startup sequence; webcam YOLO needs no floor/depth calibration.
+RealSense hurdle detection is intentionally not used; hurdle detection uses
+webcam YOLO only.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from typing import Any, Dict, Optional
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
 from hurdle_status_publisher import HurdleStatusPublisher
 
@@ -33,7 +31,6 @@ class WebcamHurdlePublisherNode(Node):
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
         self.declare_parameter("vision_state_topic", "/hurdle/vision_state")
         self.declare_parameter("hurdle_result_topic", "hurdle_result")
-        self.declare_parameter("recalibrate_service", "/hurdle/recalibrate")
         self.declare_parameter("webcam_timeout_sec", 0.6)
         self.declare_parameter("webcam_min_conf", 0.0)
         self.declare_parameter("publish_hz", 15.0)
@@ -48,9 +45,6 @@ class WebcamHurdlePublisherNode(Node):
         )
         self.hurdle_result_topic = str(
             self.get_parameter("hurdle_result_topic").value
-        )
-        self.recalibrate_service_name = str(
-            self.get_parameter("recalibrate_service").value
         )
         self.webcam_timeout_sec = max(
             0.05,
@@ -96,11 +90,6 @@ class WebcamHurdlePublisherNode(Node):
             String,
             self.vision_state_topic,
             10,
-        )
-        self.create_service(
-            Trigger,
-            self.recalibrate_service_name,
-            self.cb_recalibrate,
         )
         self.create_timer(1.0 / self.publish_hz, self.publish_hurdle_features)
 
@@ -189,19 +178,6 @@ class WebcamHurdlePublisherNode(Node):
             ),
         }
         self.latest_webcam_time = time.monotonic()
-
-    def cb_recalibrate(
-        self,
-        _request: Trigger.Request,
-        response: Trigger.Response,
-    ) -> Trigger.Response:
-        response.success = True
-        response.message = (
-            "Webcam-only hurdle vision: "
-            "RealSense floor calibration is not required."
-        )
-        self.get_logger().info(response.message)
-        return response
 
     def publish_hurdle_features(self) -> None:
         now = time.monotonic()

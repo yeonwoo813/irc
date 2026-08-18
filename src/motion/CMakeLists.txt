@@ -10,7 +10,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(msgs REQUIRED)
-find_package(std_srvs REQUIRED)
 find_package(dynamixel_sdk REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Threads REQUIRED)
@@ -38,7 +37,6 @@ endif()
 ament_target_dependencies(main
   rclcpp
   msgs
-  std_srvs
   dynamixel_sdk
 )
 

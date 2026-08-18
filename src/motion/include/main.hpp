@@ -11,7 +11,6 @@
 
 #include "msgs/msg/motion_command.hpp"
 #include "msgs/msg/motion_end.hpp"
-#include "std_srvs/srv/trigger.hpp"
 #include "callback.hpp"
 #include "dynamixel.hpp"
 
@@ -39,13 +38,9 @@ private:
         motion_command_sub_;
     rclcpp::Publisher<msgs::msg::MotionEnd>::SharedPtr
         motion_end_pub_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr
-        hurdle_recalibrate_client_;
 
     rclcpp::TimerBase::SharedPtr startup_timer_;
     rclcpp::TimerBase::SharedPtr completion_timer_;
-    rclcpp::TimerBase::SharedPtr calibration_timer_;
-    rclcpp::TimerBase::SharedPtr ready_timer_;
 
     std::thread motion_thread_;
     std::atomic<bool> motion_running_{false};
@@ -56,8 +51,8 @@ private:
     std::optional<MotionCompletion> completion_;
 
     bool initial_pose_done_{false};
+    bool startup_neck_down_started_{false};
     bool initialization_ready_{false};
-    bool hurdle_calibration_started_{false};
 
     void StartInitialPose();
     bool StartMotion(int motion_id, bool initial_motion);
@@ -67,10 +62,11 @@ private:
         Dxl::RawArray start_raw);
 
     // Neck motion runs independently from the 22-joint body trajectory.
-    bool StartNeckMotion(int motion_id);
+    bool StartNeckMotion(int motion_id, bool initial_motion);
 
     void RunNeckMotion(
         int motion_id,
+        bool initial_motion,
         int32_t start_raw,
         int32_t goal_raw,
         double duration_seconds);
@@ -80,10 +76,6 @@ private:
 
     void MotionCallback(
         const msgs::msg::MotionCommand::SharedPtr msg);
-
-    void SchedulePostInitialPoseSequence();
-    void RequestHurdleRecalibration();
-    void FinishInitialization();
 
     void PublishMotionState(bool motion_end, bool motion_ready);
 };

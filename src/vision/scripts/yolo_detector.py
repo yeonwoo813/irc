@@ -212,7 +212,9 @@ def apply_line_status(
         "line_distance": payload.get("line_distance"),
         "target_x": payload.get("target_x"),
         "target_y": payload.get("target_y"),
-        "robot_center_x": frame_w / 2.0,
+        "robot_center_x": float(
+            payload.get("robot_center_x", frame_w / 2.0)
+        ),
         "robot_center_y": float(frame_h),
         "follow_angle": payload.get("follow_angle"),
         "follow_distance": payload.get("follow_distance"),
@@ -508,7 +510,23 @@ def get_yolo_line_points(dets: list[ObjectDetection], frame_w: int, frame_h: int
 #  알고리즘 쪽으로 보낼 값 계산
 # ═══════════════════════════════════════════════════════
 
-def make_line_payload(line_points: list[tuple[float, float]], frame_w: int, frame_h: int) -> dict:
+def robot_center_x(
+    frame_w: int,
+    robot_center_offset_x_px: float = 25.0,
+) -> float:
+    """Return the calibrated robot center X clamped to the image bounds."""
+    return min(
+        max((float(frame_w) / 2.0) + float(robot_center_offset_x_px), 0.0),
+        max(0.0, float(frame_w - 1)),
+    )
+
+
+def make_line_payload(
+    line_points: list[tuple[float, float]],
+    frame_w: int,
+    frame_h: int,
+    robot_center_offset_x_px: float = 25.0,
+) -> dict:
     """
     알고리즘 패키지로 넘길 line 값 계산.
     point_count <= 1이면 알고리즘 쪽에서는 LOST로 보면 됨.
@@ -532,7 +550,7 @@ def make_line_payload(line_points: list[tuple[float, float]], frame_w: int, fram
     if point_count == 0:
         return payload
 
-    robot_x = frame_w / 2.0
+    robot_x = robot_center_x(frame_w, robot_center_offset_x_px)
     robot_y = float(frame_h)
 
     # 가장 가까운 점 기준. 음수면 라인이 왼쪽, 양수면 오른쪽.
@@ -689,10 +707,7 @@ def add_ball_geometry(
     robot_center_offset_x_px: float = 25.0,
 ) -> dict:
     """공 중심과 로봇 하단 기준점 사이의 화면상 기하 정보를 추가한다."""
-    robot_x = min(
-        max((float(frame_w) / 2.0) + float(robot_center_offset_x_px), 0.0),
-        max(0.0, float(frame_w - 1)),
-    )
+    robot_x = robot_center_x(frame_w, robot_center_offset_x_px)
     robot_y = max(0.0, float(frame_h - 1))
 
     payload["robot_center_x"] = robot_x
@@ -727,14 +742,20 @@ def add_ball_geometry(
 
 
 def make_vision_payload(dets: list[ObjectDetection], line_points: list[tuple[float, float]], frame_w: int, frame_h: int, cfg: dict) -> dict:
-    payload = make_line_payload(line_points, frame_w, frame_h)
+    center_offset_x = float(cfg.get("robot_center_offset_x_px", 25.0))
+    payload = make_line_payload(
+        line_points,
+        frame_w,
+        frame_h,
+        center_offset_x,
+    )
     payload.update(best_object_payload(dets, cfg, "ball", frame_w, frame_h))
     payload.update(best_object_payload(dets, cfg, "hurdle", frame_w, frame_h))
     return add_ball_geometry(
         payload,
         frame_w,
         frame_h,
-        float(cfg.get("robot_center_offset_x_px", 25.0)),
+        center_offset_x,
     )
 
 

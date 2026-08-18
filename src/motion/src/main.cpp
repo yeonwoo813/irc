@@ -18,8 +18,8 @@ constexpr int kNeckUpMotionId = 14;
 constexpr int kNeckDownMotionId = 18;
 
 // 실제 측정한 값으로 반드시 변경
-constexpr int32_t kNeckUpRaw = 2500;
-constexpr int32_t kNeckDownRaw = 2048;
+constexpr int32_t kNeckUpRaw = 3200;
+constexpr int32_t kNeckDownRaw = 2735;
 
 constexpr double kNeckMotionDuration = 0.5;
 }
@@ -40,10 +40,6 @@ MainNode::MainNode()
         this->create_publisher<msgs::msg::MotionEnd>(
             "motion_end",
             motion_state_qos);
-
-    hurdle_recalibrate_client_ =
-        this->create_client<std_srvs::srv::Trigger>(
-            "/hurdle/recalibrate");
 
     motion_command_sub_ =
         this->create_subscription<msgs::msg::MotionCommand>(
@@ -96,14 +92,6 @@ MainNode::~MainNode()
     {
         completion_timer_->cancel();
     }
-    if (calibration_timer_)
-    {
-        calibration_timer_->cancel();
-    }
-    if (ready_timer_)
-    {
-        ready_timer_->cancel();
-    }
 
     if (motion_thread_.joinable())
     {
@@ -140,7 +128,7 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
     if (motion_id == kNeckUpMotionId ||
         motion_id == kNeckDownMotionId)
     {
-        return StartNeckMotion(motion_id);
+        return StartNeckMotion(motion_id, initial_motion);
     }
 
     if (!callback_->HasMotion(motion_id))
@@ -211,7 +199,9 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
 }
 
 // Prepare the neck target and start its dedicated motion thread.
-bool MainNode::StartNeckMotion(int motion_id)
+bool MainNode::StartNeckMotion(
+    int motion_id,
+    bool initial_motion)
 {
     const int32_t goal_raw =
         motion_id == kNeckUpMotionId
@@ -260,7 +250,7 @@ bool MainNode::StartNeckMotion(int motion_id)
 
     current_motion_id_.store(motion_id);
     motion_running_.store(true);
-    PublishMotionState(false, true);
+    PublishMotionState(false, !initial_motion);
 
     try
     {
@@ -268,6 +258,7 @@ bool MainNode::StartNeckMotion(int motion_id)
             &MainNode::RunNeckMotion,
             this,
             motion_id,
+            initial_motion,
             start_raw,
             goal_raw,
             kNeckMotionDuration);
@@ -402,13 +393,14 @@ void MainNode::RunMotionStreamlitStyle(
 // Interpolate and stream only motor ID 23 at the body motion's 200 Hz rate.
 void MainNode::RunNeckMotion(
     int motion_id,
+    bool initial_motion,
     int32_t start_raw,
     int32_t goal_raw,
     double duration_seconds)
 {
     MotionCompletion result;
     result.motion_id = motion_id;
-    result.initial_motion = false;
+    result.initial_motion = initial_motion;
 
     const auto motion_start =
         std::chrono::steady_clock::now();
@@ -568,15 +560,34 @@ void MainNode::HandleMotionCompletion()
 
     if (result->initial_motion && !initial_pose_done_)
     {
+        if (!startup_neck_down_started_)
+        {
+            startup_neck_down_started_ = true;
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "1~22번 초기자세 완료: 23번 Neck Down을 시작합니다.");
+
+            if (!StartMotion(kNeckDownMotionId, true))
+            {
+                PublishMotionState(false, false);
+                RCLCPP_ERROR(
+                    this->get_logger(),
+                    "23번 Neck Down 초기화를 시작하지 못했습니다. "
+                    "motion_ready=false를 유지합니다.");
+            }
+            return;
+        }
+
         initial_pose_done_ = true;
-        PublishMotionState(false, false);
+        initialization_ready_ = true;
+        PublishMotionState(true, true);
 
         RCLCPP_INFO(
             this->get_logger(),
-            "초기자세 완료: 5초 뒤 hurdle 캘리브레이션, "
-            "10초 뒤 motion_ready=true");
+            "1~22번 초기자세 및 23번 Neck Down 완료: "
+            "motion_ready=true, motion_end=true");
 
-        SchedulePostInitialPoseSequence();
         return;
     }
 
@@ -607,7 +618,7 @@ void MainNode::MotionCallback(
     {
         RCLCPP_WARN(
             this->get_logger(),
-            "초기자세 후 대기/캘리브레이션 완료 전, 모션 명령 무시");
+            "초기자세 완료 전, 모션 명령 무시");
         return;
     }
 
@@ -629,88 +640,6 @@ void MainNode::MotionCallback(
             command);
         PublishMotionState(true, true);
     }
-}
-
-
-void MainNode::SchedulePostInitialPoseSequence()
-{
-    calibration_timer_ = this->create_wall_timer(
-        5s,
-        std::bind(
-            &MainNode::RequestHurdleRecalibration,
-            this));
-
-    ready_timer_ = this->create_wall_timer(
-        10s,
-        std::bind(
-            &MainNode::FinishInitialization,
-            this));
-}
-
-
-void MainNode::RequestHurdleRecalibration()
-{
-    calibration_timer_->cancel();
-
-    if (!hurdle_recalibrate_client_->service_is_ready())
-    {
-        RCLCPP_ERROR(
-            this->get_logger(),
-            "/hurdle/recalibrate 서비스를 찾지 못했습니다. "
-            "캘리브레이션을 시작할 수 없습니다.");
-        return;
-    }
-
-    auto request =
-        std::make_shared<std_srvs::srv::Trigger::Request>();
-
-    hurdle_recalibrate_client_->async_send_request(
-        request,
-        [this](
-            rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
-        {
-            const auto response = future.get();
-
-            if (response->success)
-            {
-                hurdle_calibration_started_ = true;
-                RCLCPP_INFO(
-                    this->get_logger(),
-                    "Hurdle 캘리브레이션 시작: "
-                    "약 3초 동안 초기자세를 유지합니다.");
-            }
-            else
-            {
-                RCLCPP_ERROR(
-                    this->get_logger(),
-                    "Hurdle 캘리브레이션 요청 실패: %s",
-                    response->message.c_str());
-            }
-        });
-}
-
-
-void MainNode::FinishInitialization()
-{
-    ready_timer_->cancel();
-
-    if (!hurdle_calibration_started_)
-    {
-        PublishMotionState(false, false);
-        RCLCPP_ERROR(
-            this->get_logger(),
-            "Hurdle 캘리브레이션 시작이 확인되지 않아 "
-            "motion_ready=false를 유지합니다.");
-        return;
-    }
-
-    initialization_ready_ = true;
-    PublishMotionState(true, true);
-
-    RCLCPP_INFO(
-        this->get_logger(),
-        "초기자세 후 10초 대기 완료: "
-        "motion_ready=true, motion_end=true");
 }
 
 
