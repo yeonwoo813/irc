@@ -17,6 +17,7 @@ from ball_status_publisher import (  # noqa: E402
     BallDecision,
     BallFeatures,
     BallStatus,
+    BallStatusPublisher,
 )
 from ball_vision_fusion import BallVisionFusionNode  # noqa: E402
 
@@ -132,6 +133,153 @@ class BallVisionFusionWebcamTest(unittest.TestCase):
 
         self.assertEqual(harness.latest_webcam["webcam_ball_x_distance"], -40.0)
         self.assertEqual(harness.latest_webcam["webcam_ball_y_distance"], 78.0)
+
+
+class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
+    class Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, msg):
+            self.messages.append(msg)
+
+    class Logger:
+        def __init__(self):
+            self.messages = []
+
+        def info(self, message):
+            self.messages.append(message)
+
+    class FakeNode:
+        def __init__(self):
+            self.recorder = BallStatusPublisherWebcamMajorityTest.Recorder()
+            self.logger = BallStatusPublisherWebcamMajorityTest.Logger()
+            self.callbacks = {}
+
+        def create_publisher(self, _msg_type, _topic_name, _depth):
+            return self.recorder
+
+        def create_subscription(
+            self,
+            _msg_type,
+            topic_name,
+            callback,
+            _depth,
+        ):
+            self.callbacks[topic_name] = callback
+            return object()
+
+        def get_logger(self):
+            return self.logger
+
+    def setUp(self) -> None:
+        self.node = self.FakeNode()
+        self.publisher = BallStatusPublisher(self.node)
+
+    def _publish(self, detected, ball_in_hand=False):
+        return self.publisher.publish_ball_status(
+            webcam_ball_detected=detected,
+            webcam_ball_x_distance=0.0,
+            webcam_ball_y_distance=100.0,
+            webcam_ball_angle_error=0.0,
+            ball_in_hand=ball_in_hand,
+        )
+
+    def _send_motion(self, command):
+        self.node.callbacks["motion_command"](
+            SimpleNamespace(command=command)
+        )
+
+    def _confirm_webcam_ball(self):
+        return [
+            self._publish(detected)
+            for detected in (True, False, True, False, True)
+        ]
+
+    def test_three_of_five_webcam_detections_request_initial_pose(self):
+        results = self._confirm_webcam_ball()
+
+        self.assertEqual(
+            results[:4],
+            [(BallStatus.Ball_None, 0.0)] * 4,
+        )
+        self.assertEqual(
+            results[4],
+            (BallStatus.Back_To_Initial, 0.0),
+        )
+        self.assertTrue(self.publisher.webcam_ball_confirmed)
+        self.assertTrue(self.publisher.back_to_initial_waiting)
+
+    def test_two_of_five_webcam_detections_do_not_request_initial_pose(self):
+        results = [
+            self._publish(detected)
+            for detected in (True, False, True, False, False)
+        ]
+
+        self.assertEqual(results, [(BallStatus.Ball_None, 0.0)] * 5)
+        self.assertFalse(self.publisher.webcam_ball_confirmed)
+        self.assertFalse(self.publisher.back_to_initial_waiting)
+
+    def test_initial_pose_is_locked_after_motion_command_confirmation(self):
+        self._confirm_webcam_ball()
+        self.assertEqual(
+            self._publish(False),
+            (BallStatus.Back_To_Initial, 0.0),
+        )
+
+        self._send_motion(BallStatus.Back_To_Initial)
+
+        self.assertTrue(self.publisher.back_to_initial_done)
+        self.assertFalse(self.publisher.back_to_initial_waiting)
+        self.assertEqual(
+            self._publish(True),
+            (BallStatus.Forward_half, 0.0),
+        )
+
+    def test_lock_is_released_only_after_pick_result_check_command(self):
+        self._confirm_webcam_ball()
+        self._send_motion(BallStatus.Back_To_Initial)
+        self._send_motion(BallStatus.Pick_Ready)
+
+        self.assertTrue(self.publisher.pick_command_seen)
+        self.assertTrue(self.publisher.back_to_initial_done)
+
+        self._send_motion(BallStatus.Forward_half)
+        self.assertTrue(self.publisher.back_to_initial_done)
+
+        self._send_motion(BallStatus.Neck_Up)
+        self.assertFalse(self.publisher.pick_command_seen)
+        self.assertFalse(self.publisher.back_to_initial_done)
+        self.assertFalse(self.publisher.webcam_ball_confirmed)
+        self.assertEqual(list(self.publisher.webcam_detection_buffer), [])
+
+    def test_failed_pick_turn_also_releases_lock(self):
+        self._confirm_webcam_ball()
+        self._send_motion(BallStatus.Back_To_Initial)
+        self._send_motion(BallStatus.Pick_Ready)
+
+        self._send_motion(BallStatus.Right_Turn_Afterpick)
+
+        self.assertFalse(self.publisher.pick_command_seen)
+        self.assertFalse(self.publisher.back_to_initial_done)
+
+    def test_ball_in_hand_is_not_counted_as_next_webcam_detection(self):
+        self._confirm_webcam_ball()
+        self._send_motion(BallStatus.Back_To_Initial)
+        self._send_motion(BallStatus.Pick_Ready)
+        self._send_motion(BallStatus.Neck_Up)
+
+        results = [
+            self._publish(True, ball_in_hand=True)
+            for _ in range(5)
+        ]
+
+        self.assertEqual(results, [(BallStatus.Ball_None, 0.0)] * 5)
+        self.assertFalse(self.publisher.webcam_ball_confirmed)
+        self.assertEqual(
+            list(self.publisher.webcam_detection_buffer),
+            [False] * 5,
+        )
 
 
 if __name__ == "__main__":

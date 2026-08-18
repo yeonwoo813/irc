@@ -1,8 +1,9 @@
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from rclpy.node import Node
-from msgs.msg import BallResult
+from msgs.msg import BallResult, MotionCommand
 
 
 class BallStatus:
@@ -26,6 +27,10 @@ class BallStatus:
     Right_Turn_10 = 24
     Left_Turn_5 = 28
     Right_Turn_5 = 29
+    Left_Turn_Afterpick = 30
+    Right_Turn_Afterpick = 31
+    Neck_Up = 14
+    Back_To_Initial = 27
     Ball_In_Hand = 50
     Ball_Lost = 45
     Ball_None = 99
@@ -155,7 +160,67 @@ class BallStatusPublisher:
     def __init__(self, node: Node, topic_name: str = 'ball_result'):
         self.node = node
         self.ball_decision = BallDecision()
+        # 웹캠 원본 검출 5개 중 3개 이상일 때 최초 공 검출을
+        # 확정한다.
+        self.webcam_detection_buffer = deque(maxlen=5)
+        self.webcam_ball_confirmed = False
+        # 27번이 실제 motion_command로 발행될 때까지 결과를 유지하고,
+        # 실행 확인 후에는 Pick 결과 확인이 끝날 때까지 다시
+        # 발행하지 않는다.
+        self.back_to_initial_waiting = False
+        self.back_to_initial_done = False
+        self.pick_command_seen = False
         self.ball_pub = self.node.create_publisher(BallResult, topic_name, 10)
+        self.motion_command_sub = self.node.create_subscription(
+            MotionCommand,
+            'motion_command',
+            self._motion_command_callback,
+            10,
+        )
+
+    def _log_info(self, message: str) -> None:
+        get_logger = getattr(self.node, 'get_logger', None)
+        if callable(get_logger):
+            get_logger().info(message)
+
+    def _reset_webcam_detection_cycle(self) -> None:
+        self.webcam_detection_buffer.clear()
+        self.webcam_ball_confirmed = False
+        self.back_to_initial_waiting = False
+        self.back_to_initial_done = False
+
+    def _motion_command_callback(self, msg: MotionCommand) -> None:
+        command = int(msg.command)
+
+        if (
+            self.back_to_initial_waiting
+            and command == BallStatus.Back_To_Initial
+        ):
+            self.back_to_initial_waiting = False
+            self.back_to_initial_done = True
+            self._log_info(
+                "Ball Back_To_Initial execution confirmed; "
+                "initial-pose trigger locked until Pick result check."
+            )
+
+        if command == BallStatus.Pick_Ready:
+            self.pick_command_seen = True
+            return
+
+        # MainDecision은 Pick 모션이 끝난 뒤 CheckBall()을 실행한
+        # 다음,
+        # 성공이면 Neck_Up, 실패이면 Afterpick 회전을 발행한다.
+        if self.pick_command_seen and command in (
+            BallStatus.Neck_Up,
+            BallStatus.Left_Turn_Afterpick,
+            BallStatus.Right_Turn_Afterpick,
+        ):
+            self.pick_command_seen = False
+            self._reset_webcam_detection_cycle()
+            self._log_info(
+                "Pick result check completed; webcam ball detection "
+                "lock released."
+            )
 
     def publish_ball_status(
         self,
@@ -169,11 +234,33 @@ class BallStatusPublisher:
         webcam_ball_distance_px: Optional[float] = None,
         ball_in_hand: bool = False,
     ) -> Tuple[int, float]:
+        if not self.back_to_initial_done and not self.webcam_ball_confirmed:
+            # 손에 든 공은 다음 공의 최초 웹캠 검출로 집계하지
+            # 않는다.
+            detected_for_vote = bool(webcam_ball_detected and not ball_in_hand)
+            self.webcam_detection_buffer.append(detected_for_vote)
+            detected_count = sum(self.webcam_detection_buffer)
+            if (
+                len(self.webcam_detection_buffer) == 5
+                and detected_count >= 3
+            ):
+                self.webcam_ball_confirmed = True
+                self._log_info(
+                    "Webcam ball confirmed by 5-frame majority: "
+                    f"true={detected_count}, false={5 - detected_count}."
+                )
+
+        # 최초 웹캠 검출이 확정되기 전에는 webcam 기반 접근 명령을
+        # 막는다. 확정 후에는 27번 모션의 실제 발행을 확인할 때까지
+        # 27을 유지한다.
+        webcam_enabled = bool(
+            webcam_ball_detected and self.back_to_initial_done
+        )
         features = BallFeatures(
             realsense_ball_detected=realsense_ball_detected,
             realsense_ball_distance_cm=realsense_ball_distance_cm,
             realsense_ball_angle_error=realsense_ball_angle_error,
-            webcam_ball_detected=webcam_ball_detected,
+            webcam_ball_detected=webcam_enabled,
             webcam_ball_x_distance=webcam_ball_x_distance,
             webcam_ball_y_distance=webcam_ball_y_distance,
             webcam_ball_angle_error=webcam_ball_angle_error,
@@ -182,6 +269,11 @@ class BallStatusPublisher:
         )
 
         status, angle = self.ball_decision.decide(features)
+
+        if self.webcam_ball_confirmed and not self.back_to_initial_done:
+            self.back_to_initial_waiting = True
+            status = BallStatus.Back_To_Initial
+            angle = 0.0
 
         msg = BallResult()
         msg.status = int(status)

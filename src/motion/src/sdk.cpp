@@ -99,48 +99,12 @@ void SDK_Motion::define_motions()
 
 
     // ----------------------------------------------------------
-    // 모션 1번: 직진 3걸음
+    // 모션 1번: 직진 2걸음
     // ----------------------------------------------------------
-    MotionSequence motion_forward_3;
+    MotionSequence motion_forward_2;
 
-    motion_forward_3.poses =
+    motion_forward_2.poses =
     {
-        {
-            R(2042), R(1331), R(2309), R(2286), R(2031), R(2027),
-            R(2908), R(1779), R(1647), R(2001), R(2069), R(2123),
-            R(2073), R(1655), R(1076), R(1978), R(2124), R(2428),
-            R(3042), R(2142), R(1972), R(1961)
-        },
-        {
-            R(2051), R(1336), R(2304), R(2276), R(2040), R(2041),
-            R(2915), R(1334), R(1260), R(1994), R(2069), R(2117),
-            R(2033), R(1654), R(1070), R(1978), R(2122), R(2429),
-            R(3046), R(2143), R(1975), R(1960)
-        },
-        {
-            R(2048), R(1255), R(2315), R(2154), R(2040), R(2043),
-            R(2739), R(1642), R(1413), R(2005), R(2084), R(2117),
-            R(2076), R(1655), R(1078), R(1979), R(2124), R(2429),
-            R(3042), R(2142), R(1972), R(1960)
-        },
-        {
-            R(2044), R(1207), R(2218), R(2040), R(2039), R(2044),
-            R(2812), R(1693), R(1515), R(2008), R(2082), R(2117),
-            R(2076), R(1655), R(1083), R(1981), R(2127), R(2429),
-            R(3036), R(2141), R(1970), R(1961)
-        },
-        {
-            R(2044), R(1176), R(2573), R(2367), R(2040), R(2040),
-            R(2807), R(1682), R(1520), R(2009), R(2082), R(2117),
-            R(2077), R(1655), R(1085), R(1982), R(2127), R(2429),
-            R(3034), R(2140), R(1969), R(1960)
-        },
-        {
-            R(2021), R(1374), R(2435), R(2390), R(2032), R(2045),
-            R(2932), R(1565), R(1544), R(2016), R(2078), R(2118),
-            R(2079), R(1656), R(1112), R(1986), R(2144), R(2427),
-            R(3011), R(2135), R(1962), R(1961)
-        },
         {
             R(2042), R(1331), R(2309), R(2286), R(2031), R(2027),
             R(2908), R(1779), R(1647), R(2001), R(2069), R(2123),
@@ -215,14 +179,8 @@ void SDK_Motion::define_motions()
         }
     };
 
-    motion_forward_3.durations =
+    motion_forward_2.durations =
     {
-        0.07,
-        0.07,
-        0.07,
-        0.075,
-        0.075,
-        0.075,
         0.07,
         0.07,
         0.07,
@@ -237,14 +195,8 @@ void SDK_Motion::define_motions()
         0.075
     };
 
-    motion_forward_3.blends =
+    motion_forward_2.blends =
     {
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
@@ -259,51 +211,15 @@ void SDK_Motion::define_motions()
         BlendType::Smooth
     };
 
-    motion_library_[1] = motion_forward_3;
+    motion_library_[1] = motion_forward_2;
 
     // ----------------------------------------------------------
-    // 모션 2번: 미세좌회전 3걸음
+    // 모션 2번: 미세좌회전 2걸음
     // ----------------------------------------------------------
-    MotionSequence motion_fine_left_3;
+    MotionSequence motion_fine_left_2;
 
-    motion_fine_left_3.poses =
+    motion_fine_left_2.poses =
     {
-        {
-            R(2022), R(1325), R(2331), R(2290), R(2028), R(2034),
-            R(2922), R(1746), R(1656), R(2012), R(2030), R(2112),
-            R(2072), R(1658), R(1089), R(1981), R(2128), R(2427),
-            R(3029), R(2138), R(1968), R(1961)
-        },
-        {
-            R(2051), R(1336), R(2304), R(2276), R(2040), R(2041),
-            R(2915), R(1334), R(1260), R(1994), R(2069), R(2117),
-            R(2033), R(1654), R(1070), R(1978), R(2122), R(2429),
-            R(3046), R(2143), R(1975), R(1960)
-        },
-        {
-            R(2048), R(1255), R(2315), R(2154), R(2040), R(2043),
-            R(2739), R(1642), R(1413), R(2005), R(2084), R(2117),
-            R(2076), R(1655), R(1078), R(1979), R(2124), R(2429),
-            R(3042), R(2142), R(1972), R(1960)
-        },
-        {
-            R(2044), R(1207), R(2218), R(2040), R(2039), R(2044),
-            R(2812), R(1693), R(1515), R(2008), R(2082), R(2117),
-            R(2076), R(1655), R(1083), R(1981), R(2127), R(2429),
-            R(3036), R(2141), R(1970), R(1961)
-        },
-        {
-            R(2044), R(1176), R(2573), R(2367), R(2040), R(2040),
-            R(2807), R(1682), R(1520), R(2009), R(2082), R(2117),
-            R(2077), R(1655), R(1085), R(1982), R(2127), R(2429),
-            R(3034), R(2140), R(1969), R(1960)
-        },
-        {
-            R(2020), R(1338), R(2389), R(2290), R(2035), R(2021),
-            R(2872), R(1614), R(1537), R(2014), R(2025), R(2098),
-            R(2090), R(1664), R(1147), R(1991), R(2162), R(2425),
-            R(2983), R(2123), R(1940), R(1962)
-        },
         {
             R(2022), R(1325), R(2331), R(2290), R(2028), R(2034),
             R(2922), R(1746), R(1656), R(2012), R(2030), R(2112),
@@ -378,14 +294,8 @@ void SDK_Motion::define_motions()
         }
     };
 
-    motion_fine_left_3.durations =
+    motion_fine_left_2.durations =
     {
-        0.07,
-        0.07,
-        0.07,
-        0.08,
-        0.08,
-        0.08,
         0.07,
         0.07,
         0.07,
@@ -400,14 +310,8 @@ void SDK_Motion::define_motions()
         0.08
     };
 
-    motion_fine_left_3.blends =
+    motion_fine_left_2.blends =
     {
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
@@ -422,52 +326,16 @@ void SDK_Motion::define_motions()
         BlendType::Smooth
     };
 
-    motion_library_[2] = motion_fine_left_3;
+    motion_library_[2] = motion_fine_left_2;
 
 
     // ----------------------------------------------------------
-    // 모션 3번: 미세우회전 3걸음
+    // 모션 3번: 미세우회전 2걸음
     // ----------------------------------------------------------
-    MotionSequence motion_fine_right_3;
+    MotionSequence motion_fine_right_2;
 
-    motion_fine_right_3.poses =
+    motion_fine_right_2.poses =
     {
-        {
-            R(2049), R(1336), R(2302), R(2281), R(2045), R(2040),
-            R(2883), R(1694), R(1566), R(1976), R(2069), R(2117),
-            R(2051), R(1653), R(1068), R(1977), R(2122), R(2429),
-            R(3049), R(2143), R(1974), R(1960)
-        },
-        {
-            R(2051), R(1336), R(2304), R(2276), R(2040), R(2041),
-            R(2915), R(1334), R(1260), R(1994), R(2069), R(2117),
-            R(2033), R(1654), R(1070), R(1978), R(2122), R(2429),
-            R(3046), R(2143), R(1975), R(1960)
-        },
-        {
-            R(2048), R(1255), R(2315), R(2154), R(2040), R(2043),
-            R(2739), R(1642), R(1413), R(2005), R(2084), R(2117),
-            R(2076), R(1655), R(1078), R(1979), R(2124), R(2429),
-            R(3042), R(2142), R(1972), R(1960)
-        },
-        {
-            R(2044), R(1207), R(2218), R(2040), R(2039), R(2044),
-            R(2812), R(1693), R(1515), R(2008), R(2082), R(2117),
-            R(2076), R(1655), R(1083), R(1981), R(2127), R(2429),
-            R(3036), R(2141), R(1970), R(1961)
-        },
-        {
-            R(2044), R(1176), R(2573), R(2367), R(2040), R(2040),
-            R(2807), R(1682), R(1520), R(2009), R(2082), R(2117),
-            R(2077), R(1655), R(1085), R(1982), R(2127), R(2429),
-            R(3034), R(2140), R(1969), R(1960)
-        },
-        {
-            R(2000), R(1377), R(2449), R(2408), R(2019), R(2028),
-            R(2937), R(1532), R(1520), R(2014), R(2104), R(2107),
-            R(2084), R(1657), R(1130), R(1986), R(2150), R(2427),
-            R(2998), R(2130), R(1953), R(1964)
-        },
         {
             R(2049), R(1336), R(2302), R(2281), R(2045), R(2040),
             R(2883), R(1694), R(1566), R(1976), R(2069), R(2117),
@@ -542,14 +410,8 @@ void SDK_Motion::define_motions()
         }
     };
 
-    motion_fine_right_3.durations =
+    motion_fine_right_2.durations =
     {
-        0.07,
-        0.07,
-        0.07,
-        0.08,
-        0.08,
-        0.075,
         0.07,
         0.07,
         0.07,
@@ -564,14 +426,8 @@ void SDK_Motion::define_motions()
         0.075
     };
 
-    motion_fine_right_3.blends =
+    motion_fine_right_2.blends =
     {
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
@@ -586,7 +442,7 @@ void SDK_Motion::define_motions()
         BlendType::Smooth
     };
 
-    motion_library_[3] = motion_fine_right_3;
+    motion_library_[3] = motion_fine_right_2;
 
 
     // ----------------------------------------------------------
@@ -924,7 +780,6 @@ void SDK_Motion::define_motions()
     // ----------------------------------------------------------
     // 모션 12번: 공줍기
     // ----------------------------------------------------------
-
     MotionSequence motion_pickup_ball;
 
     motion_pickup_ball.poses =
@@ -958,32 +813,78 @@ void SDK_Motion::define_motions()
         {2062,586,3114,2309,2042,2084,3546,820,1381,2035,2074,2110,2069,1583,1229,1940,1952,2436,3068,2479,1979,1969},
         {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
         {2065,1366,2267,2212,2045,2083,2746,1673,1459,2037,2050,2112,2062,1520,895,1958,2097,2436,3072,2144,1984,1966},
-        {2065,1366,2267,2212,2045,2083,2746,1673,1459,2037,2050,2112,2062,1520,895,1958,2097,2436,3072,2144,1984,1966},
+        {2064,1370,2286,2208,2043,2085,2741,1656,1466,2046,2048,2117,2064,1393,900,1960,2101,2436,3069,2144,1983,1965},
         {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965}
     };
 
     motion_pickup_ball.durations =
     {
-        0.5, 0.07,
-        0.06, 0.06, 0.06, 0.06,
-        0.07, 0.07, 0.07, 0.07,
-        0.06, 0.06, 0.06, 0.06,
-        0.07, 0.07, 0.07, 0.2,
-        0.04, 0.04, 0.04, 0.5,
-        0.75, 0.75, 0.5, 0.3,
-        0.75, 0.7, 0.3, 0.3, 0.3
+        0.1,
+        0.07,
+        0.06,
+        0.06,
+        0.06,
+        0.06,
+        0.07,
+        0.07,
+        0.07,
+        0.07,
+        0.06,
+        0.06,
+        0.06,
+        0.06,
+        0.07,
+        0.07,
+        0.07,
+        0.2,
+        0.04,
+        0.04,
+        0.04,
+        0.5,
+        0.75,
+        0.75,
+        0.5,
+        0.3,
+        0.75,
+        0.7,
+        0.25,
+        0.4,
+        0.3
     };
 
     motion_pickup_ball.blends =
     {
-        BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth, BlendType::Stop,
-        BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Stop, BlendType::Stop, BlendType::Smooth, BlendType::Smooth, BlendType::Smooth
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Smooth,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Smooth,
+        BlendType::Stop,
+        BlendType::Smooth
     };
 
     motion_library_[12] = motion_pickup_ball;

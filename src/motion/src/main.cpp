@@ -245,6 +245,13 @@ void MainNode::RunMotionStreamlitStyle(
             last_raw = target_raw;
             ++result.tick_count;
 
+            // 마지막 tick의 목표 위치는 이미 전송했으므로 다음 5ms 주기는
+            // 기다리지 않고 즉시 모션 완료 처리로 넘어갑니다.
+            if (!callback_->IsMoving())
+            {
+                break;
+            }
+
             // getpose.py:
             // elapsed = time.time() - loop_start
             // time.sleep(max(0.0, dt - elapsed))

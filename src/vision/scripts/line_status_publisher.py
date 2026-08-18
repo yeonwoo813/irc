@@ -62,7 +62,7 @@ class LineDecision:
         self.curve_a = 1e-4
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
-        self.move_distance = 100.0
+        self.move_distance = 90.0
 
 
     def decide(self, features: LineFeatures) -> Tuple[int, float]:

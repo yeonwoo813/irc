@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 
@@ -107,22 +108,45 @@ class _FakePublisher:
 class _FakeNode:
     def __init__(self) -> None:
         self.publisher = _FakePublisher()
+        self.callbacks = {}
 
     def create_publisher(self, *_args, **_kwargs):
         return self.publisher
 
+    def create_subscription(
+        self,
+        _msg_type,
+        topic_name,
+        callback,
+        _depth,
+    ):
+        self.callbacks[topic_name] = callback
+        return object()
+
 
 class BallStatusPublisherTest(unittest.TestCase):
+    @staticmethod
+    def _confirm_initial_pose(publisher, node, **ball_kwargs) -> None:
+        for _ in range(5):
+            publisher.publish_ball_status(**ball_kwargs)
+        node.callbacks["motion_command"](
+            SimpleNamespace(command=BallStatus.Back_To_Initial)
+        )
+
     def test_publishes_measured_angle_and_xy_distances(self) -> None:
         node = _FakeNode()
         publisher = BallStatusPublisher(node)
 
+        ball_kwargs = {
+            "webcam_ball_detected": True,
+            "webcam_ball_x_distance": 55.0,
+            "webcam_ball_y_distance": 179.0,
+            "webcam_ball_angle_error": 17.08,
+            "webcam_ball_distance_px": 187.259,
+        }
+        self._confirm_initial_pose(publisher, node, **ball_kwargs)
         status, angle = publisher.publish_ball_status(
-            webcam_ball_detected=True,
-            webcam_ball_x_distance=55.0,
-            webcam_ball_y_distance=179.0,
-            webcam_ball_angle_error=17.08,
-            webcam_ball_distance_px=187.259,
+            **ball_kwargs,
         )
 
         self.assertEqual(status, BallStatus.Right_Turn_5)
@@ -147,12 +171,16 @@ class BallStatusPublisherTest(unittest.TestCase):
 
         node = _FakeNode()
         publisher = BallStatusPublisher(node)
+        ball_kwargs = {
+            "webcam_ball_detected": True,
+            "webcam_ball_x_distance": payload["ball_x_distance_px"],
+            "webcam_ball_y_distance": payload["ball_y_distance_px"],
+            "webcam_ball_angle_error": payload["ball_angle_deg"],
+            "webcam_ball_distance_px": payload["ball_distance_px"],
+        }
+        self._confirm_initial_pose(publisher, node, **ball_kwargs)
         status, _angle = publisher.publish_ball_status(
-            webcam_ball_detected=True,
-            webcam_ball_x_distance=payload["ball_x_distance_px"],
-            webcam_ball_y_distance=payload["ball_y_distance_px"],
-            webcam_ball_angle_error=payload["ball_angle_deg"],
-            webcam_ball_distance_px=payload["ball_distance_px"],
+            **ball_kwargs,
         )
 
         self.assertEqual(status, BallStatus.Left_Turn_5)
