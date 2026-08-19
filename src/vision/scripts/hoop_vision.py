@@ -103,6 +103,15 @@ class HoopVisionNode(Node):
         self.declare_parameter("red_ratio_min", 0.55)
         self.declare_parameter("white_inner_ratio_min", 0.50)
 
+        # 일부가 가려져 빨간 테두리가 끊겨도 작은 간격은 후보 생성 단계에서
+        # 다시 연결한다. 최종 색 비율은 연결 전 원본 마스크로 검사하므로,
+        # 이 값이 곧바로 빨간 픽셀 증거를 부풀리지는 않는다.
+        self.declare_parameter("occlusion_merge_gap_px", 41)
+        # 위/왼쪽/오른쪽 테두리 중 하나가 가려져도 나머지 두 구간과 전체
+        # 빨간 비율이 충분하면 백보드로 인정한다.
+        self.declare_parameter("min_visible_red_bands", 2)
+        self.declare_parameter("red_band_average_min", 0.40)
+
         # =========================================================
         # Depth 조건
         # 16UC1 depth가 mm인 환경을 기준으로 한다.
@@ -190,6 +199,17 @@ class HoopVisionNode(Node):
         self.red_ratio_min = float(self.get_parameter("red_ratio_min").value)
         self.white_inner_ratio_min = float(
             self.get_parameter("white_inner_ratio_min").value
+        )
+        self.occlusion_merge_gap_px = max(
+            0,
+            int(self.get_parameter("occlusion_merge_gap_px").value),
+        )
+        self.min_visible_red_bands = max(
+            1,
+            min(3, int(self.get_parameter("min_visible_red_bands").value)),
+        )
+        self.red_band_average_min = float(
+            self.get_parameter("red_band_average_min").value
         )
 
         self.depth_scale = float(self.get_parameter("depth_scale").value)
@@ -305,6 +325,8 @@ class HoopVisionNode(Node):
             "min_valid_depth_pixels",
             "center_depth_patch_radius",
             "min_valid_center_depth_pixels",
+            "occlusion_merge_gap_px",
+            "min_visible_red_bands",
             "smoothing_window",
             "print_every_n_frames",
         }
@@ -320,6 +342,7 @@ class HoopVisionNode(Node):
             "side_band_ratio",
             "side_vertical_end_ratio",
             "red_ratio_min",
+            "red_band_average_min",
             "white_inner_ratio_min",
             "depth_scale",
             "depth_min_m",
@@ -377,6 +400,20 @@ class HoopVisionNode(Node):
             1,
             int(self.min_valid_center_depth_pixels),
         )
+        self.occlusion_merge_gap_px = max(
+            0,
+            int(self.occlusion_merge_gap_px),
+        )
+        self.min_visible_red_bands = max(
+            1,
+            min(3, int(self.min_visible_red_bands)),
+        )
+
+        if not (0.0 <= self.red_band_average_min <= 1.0):
+            return SetParametersResult(
+                successful=False,
+                reason="red_band_average_min must be between 0 and 1",
+            )
 
         # smoothing_window 변경 시 deque 크기도 갱신한다.
         new_window = max(1, int(self.smoothing_window))
@@ -713,6 +750,57 @@ class HoopVisionNode(Node):
         y_m = (center_y - self.cy_intr) * depth_m / self.fy
         return math.sqrt(x_m * x_m + y_m * y_m + depth_m * depth_m)
 
+    @staticmethod
+    def _build_occlusion_tolerant_candidate_mask(
+        red_mask: np.ndarray,
+        merge_gap_px: int,
+    ) -> np.ndarray:
+        """가림으로 끊긴 수평/수직 테두리 조각을 후보 생성용으로 연결한다."""
+        gap = max(0, int(merge_gap_px))
+        if gap <= 1:
+            return red_mask.copy()
+        if gap % 2 == 0:
+            gap += 1
+
+        horizontal_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (gap, 1),
+        )
+        vertical_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (1, gap),
+        )
+        horizontal = cv2.morphologyEx(
+            red_mask,
+            cv2.MORPH_CLOSE,
+            horizontal_kernel,
+        )
+        vertical = cv2.morphologyEx(
+            red_mask,
+            cv2.MORPH_CLOSE,
+            vertical_kernel,
+        )
+        return cv2.bitwise_or(red_mask, cv2.bitwise_or(horizontal, vertical))
+
+    @staticmethod
+    def _red_band_evidence_passes(
+        band_ratios: Tuple[float, float, float],
+        red_ratio_min: float,
+        min_visible_red_bands: int,
+        red_band_average_min: float,
+    ) -> Tuple[bool, int, float]:
+        """부분 가림을 허용하면서 충분한 빨간 테두리 증거가 있는지 검사한다."""
+        visible_count = sum(
+            ratio >= red_ratio_min for ratio in band_ratios
+        )
+        average_ratio = float(sum(band_ratios)) / float(len(band_ratios))
+        required_count = max(1, min(len(band_ratios), min_visible_red_bands))
+        passed = (
+            visible_count >= required_count
+            and average_ratio >= red_band_average_min
+        )
+        return passed, visible_count, average_ratio
+
     def _find_best_hoop(
         self,
         red_mask: np.ndarray,
@@ -723,8 +811,12 @@ class HoopVisionNode(Node):
         frame_width: int,
         frame_height: int,
     ) -> Optional[Dict[str, Any]]:
+        candidate_mask = self._build_occlusion_tolerant_candidate_mask(
+            red_mask,
+            self.occlusion_merge_gap_px,
+        )
         contours, _ = cv2.findContours(
-            red_mask.copy(),
+            candidate_mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE,
         )
@@ -831,12 +923,19 @@ class HoopVisionNode(Node):
             right_red_ratio = self._masked_ratio(red_mask, right_mask)
             white_inner_ratio = self._masked_ratio(white_mask, inner_mask)
 
-            if (
-                top_red_ratio < self.red_ratio_min
-                or left_red_ratio < self.red_ratio_min
-                or right_red_ratio < self.red_ratio_min
-                or white_inner_ratio < self.white_inner_ratio_min
-            ):
+            red_bands_pass, visible_red_bands, red_band_ratio = (
+                self._red_band_evidence_passes(
+                    (
+                        top_red_ratio,
+                        left_red_ratio,
+                        right_red_ratio,
+                    ),
+                    self.red_ratio_min,
+                    self.min_visible_red_bands,
+                    self.red_band_average_min,
+                )
+            )
+            if not red_bands_pass or white_inner_ratio < self.white_inner_ratio_min:
                 continue
 
             inner_depth = roi_depth_m[inner_mask.astype(bool)]
@@ -885,9 +984,6 @@ class HoopVisionNode(Node):
                 robot_y,
             )
 
-            red_band_ratio = (
-                top_red_ratio + left_red_ratio + right_red_ratio
-            ) / 3.0
             score = red_band_ratio + 0.5 * white_inner_ratio
 
             if score <= best_score:
@@ -916,6 +1012,8 @@ class HoopVisionNode(Node):
                 "right_red_ratio": right_red_ratio,
                 "white_inner_ratio": white_inner_ratio,
                 "red_band_ratio": red_band_ratio,
+                "visible_red_bands": visible_red_bands,
+                "occlusion_tolerant": visible_red_bands < 3,
                 "contour_area": contour_area,
                 "aspect_ratio": aspect_ratio,
                 "score": score,
@@ -982,6 +1080,8 @@ class HoopVisionNode(Node):
                 "right_red_ratio": None,
                 "white_inner_ratio": None,
                 "red_band_ratio": None,
+                "visible_red_bands": 0,
+                "occlusion_tolerant": False,
                 "score": None,
             }
         else:
@@ -1100,6 +1200,10 @@ class HoopVisionNode(Node):
                 f"realsense_goal_angle:{detection['realsense_goal_angle']:+.1f}deg",
                 f"goal_center_dx_px:{detection['goal_center_dx_px']:+.1f}",
                 f"goal_center_dy_px:{detection['goal_center_dy_px']:.1f}",
+                (
+                    "red_bands_visible:"
+                    f"{int(detection.get('visible_red_bands', 3))}/3"
+                ),
             ]
         else:
             panel_lines = [
@@ -1108,6 +1212,7 @@ class HoopVisionNode(Node):
                 "realsense_goal_angle:N/A",
                 "goal_center_dx_px:N/A",
                 "goal_center_dy_px:N/A",
+                "red_bands_visible:0/3",
             ]
 
         # 라인/공 화면과 같은 형태로 정보를 왼쪽 위의 작은 패널에 모은다.

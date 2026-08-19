@@ -68,14 +68,14 @@ class BallDecision:
 
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
-        self.goal_shoot_max_distance_cm = 60.0
-        self.goal_normal_shoot_min_distance_cm = 50.0
-        self.goal_too_close_distance_cm = 40.0
+        self.goal_shoot_max_distance_cm = 70.0
+        self.goal_normal_shoot_min_distance_cm = 60.0
+        self.goal_too_close_distance_cm = 50.0
 
         self.goal_approach_center_tol = 5.0
         self.goal_approach_large_angle = 60.0
-        self.goal_shoot_center_tol = 5.0
-        self.goal_shoot_large_angle = 10.0
+        self.goal_shoot_center_tol = 10.0
+        self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0

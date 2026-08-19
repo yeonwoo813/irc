@@ -1461,7 +1461,6 @@ class BallVisionFusionNode(Node):
 
         self.latest_webcam = {
             "webcam_ball_detected": True,
-            "webcam_ball_x_offset": float(x_offset),
             "webcam_ball_x_distance": float(x_distance),
             "webcam_ball_y_distance": float(y_distance),
             "webcam_ball_angle_error": angle_error_deg,
@@ -1476,7 +1475,6 @@ class BallVisionFusionNode(Node):
     def _empty_webcam_state(self) -> Dict[str, Any]:
         return {
             "webcam_ball_detected": False,
-            "webcam_ball_x_offset": None,
             "webcam_ball_x_distance": None,
             "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
@@ -1595,7 +1593,6 @@ class BallVisionFusionNode(Node):
             "realsense_ball_distance_cm": None,
             "realsense_ball_angle_error": None,
             "webcam_ball_detected": False,
-            "webcam_ball_x_offset": None,
             "webcam_ball_x_distance": None,
             "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
@@ -1624,10 +1621,6 @@ class BallVisionFusionNode(Node):
             features.update(
                 {
                     "webcam_ball_detected": True,
-                    "webcam_ball_x_offset":
-                        self.latest_webcam[
-                            "webcam_ball_x_offset"
-                        ],
                     "webcam_ball_x_distance":
                         self.latest_webcam[
                             "webcam_ball_x_distance"
@@ -1758,7 +1751,6 @@ class BallVisionFusionNode(Node):
                 f"rs_dist={features['realsense_ball_distance_cm']} "
                 f"rs_ang={features['realsense_ball_angle_error']} "
                 f"webcam={features['webcam_ball_detected']} "
-                f"webcam_x_offset={features['webcam_ball_x_offset']} "
                 f"webcam_x={features['webcam_ball_x_distance']} "
                 f"webcam_y={features['webcam_ball_y_distance']} "
                 f"webcam_dist={features['webcam_ball_distance_px']} "
