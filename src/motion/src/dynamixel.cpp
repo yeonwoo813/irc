@@ -137,7 +137,7 @@ void Dxl::EnableTorqueAllStreamlitStyle()
     torque_enabled_ = true;
 }
 
-// Neck motor torque enable
+//Neck 토크 켜기
 bool Dxl::EnableNeckTorque()
 {
     if (virtual_mode_)
@@ -195,19 +195,19 @@ void Dxl::DisableTorqueAll()
 
     torque_enabled_ = false;
 
-    // Neck motor torque disable
+    //Neck 모터 토크 끄기
     if (neck_torque_enabled_)
     {
-        uint8_t dxl_error = 0;
+    uint8_t dxl_error = 0;
 
-        packetHandler_->write1ByteTxRx(
-            portHandler_,
-            NECK_DXL_ID,
-            DxlReg_TorqueEnable,
-            0,
-            &dxl_error);
+    packetHandler_->write1ByteTxRx(
+        portHandler_,
+        NECK_DXL_ID,
+        DxlReg_TorqueEnable,
+        0,
+        &dxl_error);
 
-        neck_torque_enabled_ = false;
+    neck_torque_enabled_ = false;
     }
 }
 
@@ -260,7 +260,7 @@ bool Dxl::ReadPresentRawStreamlitStyle(RawArray& raw)
     return true;
 }
 
-// Read the neck motor's present position.
+//Neck 모터 현재 위치 읽기
 bool Dxl::ReadNeckPresentRaw(int32_t& raw)
 {
     if (virtual_mode_)
@@ -363,7 +363,7 @@ int Dxl::StreamWriteRaw(const RawArray& raw)
     return comm_result;
 }
 
-// Write only the neck motor's goal position through GroupSyncWrite.
+//Neck 모터 목표 위치 쓰기
 int Dxl::StreamWriteNeckRaw(int32_t raw)
 {
     if (virtual_mode_)

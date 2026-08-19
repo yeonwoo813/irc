@@ -1,3 +1,4 @@
+import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -21,16 +22,18 @@ class BallStatus:
     Right_Move = 11
     Pick_Ready = 12
     Shoot = 13
+    Neck_Up = 14
+    Neck_Down = 18
     Left_Half_Forward_3step = 21
     Right_Half_Forward_3step = 22
     Left_Turn_10 = 23
     Right_Turn_10 = 24
+    Back_To_Initial = 27
     Left_Turn_5 = 28
     Right_Turn_5 = 29
     Left_Turn_Afterpick = 30
     Right_Turn_Afterpick = 31
-    Neck_Up = 14
-    Back_To_Initial = 27
+    Shoot_Close = 32
     Ball_In_Hand = 50
     Ball_Lost = 45
     Ball_None = 99
@@ -42,8 +45,11 @@ class BallFeatures:
     realsense_ball_distance_cm: Optional[float] = None
     realsense_ball_angle_error: Optional[float] = None
 
+    realsense_goal_distance_cm: Optional[float] = None
+    realsense_goal_angle: Optional[float] = None
+
     webcam_ball_detected: bool = False
-    # 로봇 중심선 기준 signed 거리: 왼쪽 음수, 오른쪽 양수.
+    # 로봇 중심선 기준 거리: 왼쪽 음수, 오른쪽 양수.
     webcam_ball_x_distance: Optional[float] = None
     webcam_ball_y_distance: Optional[float] = None
     webcam_ball_angle_error: Optional[float] = None
@@ -54,11 +60,22 @@ class BallFeatures:
 
 class BallDecision:
     def __init__(self):
-        #100cm 이하이면 공 모드
+        # 120cm 이하이면 공 모드
         self.ball_entry_distance_cm = 120.0
 
         # Realsense 직진, 회전 기준각 5도
         self.angle_center_tol = 5.0
+
+        # 공을 잡은 뒤 Realsense 골대 기준
+        self.goal_entry_distance_cm = 120.0
+        self.goal_shoot_max_distance_cm = 60.0
+        self.goal_normal_shoot_min_distance_cm = 50.0
+        self.goal_too_close_distance_cm = 40.0
+
+        self.goal_approach_center_tol = 5.0
+        self.goal_approach_large_angle = 60.0
+        self.goal_shoot_center_tol = 5.0
+        self.goal_shoot_large_angle = 10.0
 
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
@@ -67,8 +84,14 @@ class BallDecision:
         self.webcam_pick_x_max_px = 35.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
-        #공을 잡고 있으면 접근 명령을 보내지 않음
+        # 공을 잡고 있고 골대가 120cm 이내이면 골대 기준으로 판단한다.
         if features.ball_in_hand:
+            goal_distance = features.realsense_goal_distance_cm
+            if (
+                goal_distance is not None
+                and goal_distance <= self.goal_entry_distance_cm
+            ):
+                return self._decide_from_goal(features)
             return BallStatus.Ball_None, 0.0
 
         if not self.Ball_mission_ready(features):
@@ -85,7 +108,9 @@ class BallDecision:
             and distance is not None
             and distance <= self.ball_entry_distance_cm
         ):
-            return self._status_from_angle(features.realsense_ball_angle_error)
+            return self._decide_from_realsense(
+                features.realsense_ball_angle_error
+            )
 
         return BallStatus.Ball_None, 0.0
 
@@ -135,7 +160,7 @@ class BallDecision:
         return BallStatus.Pick_Ready, 0.0
 
     #realsense 기준으로 판단하는 각도
-    def _status_from_angle(self, angle: Optional[float]) -> Tuple[int, float]:
+    def _decide_from_realsense(self, angle: Optional[float]) -> Tuple[int, float]:
         if angle is None:
             return BallStatus.Ball_None, 0.0
 
@@ -148,6 +173,55 @@ class BallDecision:
         if angle <= 60.0:
             return BallStatus.Right_Half_Forward, angle
         return BallStatus.Right_Turn, angle
+
+    #골 넣을 때 거리에 따라 shoot 선택, 각도 판단
+    def _decide_from_goal(self, features: BallFeatures) -> Tuple[int, float]:
+        distance = features.realsense_goal_distance_cm
+        angle = features.realsense_goal_angle
+
+        if distance is None or angle is None:
+            return BallStatus.Ball_None, 0.0
+
+        if distance <= self.goal_too_close_distance_cm:
+            return BallStatus.Backward_half, 0.0
+
+        if distance <= self.goal_shoot_max_distance_cm:
+            shoot_status = (
+                BallStatus.Shoot
+                if distance >= self.goal_normal_shoot_min_distance_cm
+                else BallStatus.Shoot_Close
+            )
+            return self._shoot_status_from_goal_angle(angle, shoot_status)
+
+        return self._goal_status_from_angle(angle)
+
+    #골대에 접근하는 로직
+    def _goal_status_from_angle(self, angle: float) -> Tuple[int, float]:
+        if angle < -self.goal_approach_large_angle:
+            return BallStatus.Left_Turn, angle
+        if angle < -self.goal_approach_center_tol:
+            return BallStatus.Left_Half_Forward, angle
+        if angle <= self.goal_approach_center_tol:
+            return BallStatus.Forward_4step, 0.0
+        if angle <= self.goal_approach_large_angle:
+            return BallStatus.Right_Half_Forward, angle
+        return BallStatus.Right_Turn, angle
+
+    #슛 직전 각도에 따라 좌우 회전 판단
+    def _shoot_status_from_goal_angle(
+        self,
+        angle: float,
+        shoot_status: int,
+    ) -> Tuple[int, float]:
+        if angle < -self.goal_shoot_large_angle:
+            return BallStatus.Left_Turn_10, angle
+        if angle < -self.goal_shoot_center_tol:
+            return BallStatus.Left_Turn_5, angle
+        if angle <= self.goal_shoot_center_tol:
+            return shoot_status, 0.0
+        if angle <= self.goal_shoot_large_angle:
+            return BallStatus.Right_Turn_5, angle
+        return BallStatus.Right_Turn_10, angle
 
     #webcam 각도 값이 없을 때 안전하게 처리, 값 있으면 그대로 반환
     def webcam_angle(self, angle: Optional[float]) -> float:
@@ -170,6 +244,10 @@ class BallStatusPublisher:
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
         self.pick_command_seen = False
+        # 슛 가능 거리 진입 시 기본자세는 한 번만 실행한다.
+        self.shoot_initial_waiting = False
+        self.shoot_initial_done = False
+        self.shoot_command_seen = False
         self.ball_pub = self.node.create_publisher(BallResult, topic_name, 10)
         self.motion_command_sub = self.node.create_subscription(
             MotionCommand,
@@ -189,6 +267,11 @@ class BallStatusPublisher:
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
 
+    def _reset_shoot_cycle(self) -> None:
+        self.shoot_initial_waiting = False
+        self.shoot_initial_done = False
+        self.shoot_command_seen = False
+
     def _motion_command_callback(self, msg: MotionCommand) -> None:
         command = int(msg.command)
 
@@ -201,6 +284,29 @@ class BallStatusPublisher:
             self._log_info(
                 "Ball Back_To_Initial execution confirmed; "
                 "initial-pose trigger locked until Pick result check."
+            )
+
+        if (
+            self.shoot_initial_waiting
+            and command == BallStatus.Back_To_Initial
+        ):
+            self.shoot_initial_waiting = False
+            self.shoot_initial_done = True
+            self._log_info(
+                "Shoot Back_To_Initial execution confirmed; "
+                "shoot initial-pose trigger locked."
+            )
+
+        if command in (BallStatus.Shoot, BallStatus.Shoot_Close):
+            self.shoot_command_seen = True
+
+        if (
+            self.shoot_command_seen
+            and command == BallStatus.Neck_Down
+        ):
+            self._reset_shoot_cycle()
+            self._log_info(
+                "Shoot completed; shoot initial-pose lock released."
             )
 
         if command == BallStatus.Pick_Ready:
@@ -229,6 +335,8 @@ class BallStatusPublisher:
         realsense_ball_detected: bool = False,
         realsense_ball_distance_cm: Optional[float] = None,
         realsense_ball_angle_error: Optional[float] = None,
+        realsense_goal_distance_cm: Optional[float] = None,
+        realsense_goal_angle: Optional[float] = None,
         webcam_ball_detected: bool = False,
         webcam_ball_x_distance: Optional[float] = None,
         webcam_ball_y_distance: Optional[float] = None,
@@ -236,6 +344,9 @@ class BallStatusPublisher:
         webcam_ball_distance_px: Optional[float] = None,
         ball_in_hand: bool = False,
     ) -> Tuple[int, float]:
+        if not ball_in_hand:
+            self._reset_shoot_cycle()
+
         if not self.back_to_initial_done and not self.webcam_ball_confirmed:
             # 손에 든 공은 다음 공의 최초 웹캠 검출로 집계하지
             # 않는다.
@@ -262,6 +373,8 @@ class BallStatusPublisher:
             realsense_ball_detected=realsense_ball_detected,
             realsense_ball_distance_cm=realsense_ball_distance_cm,
             realsense_ball_angle_error=realsense_ball_angle_error,
+            realsense_goal_distance_cm=realsense_goal_distance_cm,
+            realsense_goal_angle=realsense_goal_angle,
             webcam_ball_detected=webcam_enabled,
             webcam_ball_x_distance=webcam_ball_x_distance,
             webcam_ball_y_distance=webcam_ball_y_distance,
@@ -277,16 +390,37 @@ class BallStatusPublisher:
             status = BallStatus.Back_To_Initial
             angle = 0.0
 
+        goal_in_shoot_zone = bool(
+            ball_in_hand
+            and realsense_goal_distance_cm is not None
+            and math.isfinite(realsense_goal_distance_cm)
+            and self.ball_decision.goal_too_close_distance_cm
+            < realsense_goal_distance_cm
+            <= self.ball_decision.goal_shoot_max_distance_cm
+        )
+        if self.shoot_command_seen:
+            status = BallStatus.Ball_None
+            angle = 0.0
+        elif self.shoot_initial_waiting or (
+            goal_in_shoot_zone and not self.shoot_initial_done
+        ):
+            self.shoot_initial_waiting = True
+            status = BallStatus.Back_To_Initial
+            angle = 0.0
+
         msg = BallResult()
         msg.status = int(status)
         msg.angle = float(angle)
         if hasattr(msg, 'ball_in_hand'):
             msg.ball_in_hand = bool(ball_in_hand)
-        measured_angle = (
-            webcam_ball_angle_error
-            if webcam_ball_angle_error is not None
-            else realsense_ball_angle_error
-        )
+        if ball_in_hand and realsense_goal_angle is not None:
+            measured_angle = realsense_goal_angle
+        else:
+            measured_angle = (
+                webcam_ball_angle_error
+                if webcam_ball_angle_error is not None
+                else realsense_ball_angle_error
+            )
         if hasattr(msg, 'detected_angle'):
             msg.detected_angle = float(measured_angle or 0.0)
         if hasattr(msg, 'x_distance_px'):

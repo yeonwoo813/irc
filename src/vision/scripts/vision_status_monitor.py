@@ -65,9 +65,6 @@ class VisionStatusMonitor(Node):
             "status": int(msg.status),
             "angle": float(msg.angle),
             "ball_in_hand": bool(getattr(msg, "ball_in_hand", False)),
-            "detected_angle": float(getattr(msg, "detected_angle", 0.0)),
-            "x_distance_px": float(getattr(msg, "x_distance_px", 0.0)),
-            "y_distance_px": float(getattr(msg, "y_distance_px", 0.0)),
         }
         self._stamp("ball_result")
 
@@ -150,6 +147,7 @@ class VisionStatusMonitor(Node):
             hurdle_extra = (
                 f" src={self.hurdle_state.get('source', 'none')}"
                 f" cam={int(bool(self.hurdle_state.get('webcam_valid', False)))}"
+                f" cross={int(bool(self.hurdle_state.get('intersection_valid', False)))}"
                 f" signed={self.hurdle_state.get('signed_angle_deg', 0.0):+.1f}"
             )
 
@@ -158,19 +156,17 @@ class VisionStatusMonitor(Node):
             if not self._fresh("hoop_state"):
                 hoop_text = "STALE"
             elif bool(self.hoop_state.get("detected", False)):
-                distance = self.hoop_state.get("distance_cm")
-                angle = self.hoop_state.get("center_angle_deg")
-                yaw = self.hoop_state.get("yaw_deg")
+                distance = self.hoop_state.get("realsense_goal_distance_cm")
+                angle = self.hoop_state.get("realsense_goal_angle")
                 distance_text = (
                     f"{float(distance):.1f}cm" if distance is not None else "N/A"
                 )
                 angle_text = (
                     f"{float(angle):+.1f}" if angle is not None else "N/A"
                 )
-                yaw_text = f"{float(yaw):+.1f}" if yaw is not None else "N/A"
                 hoop_text = (
                     f"det=1 dist={distance_text} "
-                    f"angle={angle_text} yaw={yaw_text}"
+                    f"angle={angle_text}"
                 )
             else:
                 hoop_text = "det=0"

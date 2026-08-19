@@ -7,14 +7,16 @@ Ball Vision Fusion Node.
 1. RealSense color + aligned depth 영상에서 OpenCV로 주황색 공을 직접 검출한다.
 2. 검출된 공 중심 픽셀과 depth를 이용해 공의 3차원 위치, 거리, 좌우 각도를 계산한다.
 3. 웹캠 YOLO가 /line_tracker/state로 보내는 공 중심 좌표를 구독한다.
-4. RealSense + 웹캠 값을 BallStatusPublisher에 전달한다.
-5. 디버깅용으로 /ball/vision_state와 /ball/realsense_debug_image를 발행한다.
+4. 후프 상태에서 백보드 중심 거리와 각도를 받는다.
+5. RealSense + 웹캠 + 후프 값을 BallStatusPublisher에 전달한다.
+6. 디버깅용으로 /ball/vision_state와 /ball/realsense_debug_image를 발행한다.
 
 입력
 - /camera/color/image_raw
 - /camera/aligned_depth_to_color/image_raw
 - /camera/color/camera_info
 - /line_tracker/state
+- /hoop/vision_state
 - /ball/in_hand
 
 출력
@@ -89,6 +91,7 @@ class BallVisionFusionNode(Node):
             "/camera/color/camera_info",
         )
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
+        self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
         self.declare_parameter("ball_in_hand_topic", "/ball/in_hand")
         self.declare_parameter("vision_state_topic", "/ball/vision_state")
         self.declare_parameter(
@@ -191,8 +194,7 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("edge_max_aspect_ratio", 2.20)
         self.declare_parameter("morph_kernel_size", 5)
         self.declare_parameter("depth_patch_radius", 1)
-        # 15 FPS 기준 약 0.5초 동안 직전 공 검출을 유지한다.
-        self.declare_parameter("realsense_hold_frames", 8)
+        self.declare_parameter("realsense_hold_frames", 3)
 
         # CameraInfo를 아직 받지 못했을 때 사용할 선배 코드의 기본 내부 파라미터
         self.declare_parameter("fallback_fx", 607.0)
@@ -219,6 +221,7 @@ class BallVisionFusionNode(Node):
         # =========================================================
         self.declare_parameter("realsense_timeout_sec", 0.5)
         self.declare_parameter("webcam_timeout_sec", 0.5)
+        self.declare_parameter("hoop_timeout_sec", 0.5)
         self.declare_parameter("publish_hz", 15.0)
         self.declare_parameter("print_every_n_frames", 10)
         self.declare_parameter("realsense_use_euclidean_distance", False)
@@ -237,6 +240,9 @@ class BallVisionFusionNode(Node):
         )
         self.webcam_state_topic = str(
             self.get_parameter("webcam_state_topic").value
+        )
+        self.hoop_state_topic = str(
+            self.get_parameter("hoop_state_topic").value
         )
         self.ball_in_hand_topic = str(
             self.get_parameter("ball_in_hand_topic").value
@@ -428,6 +434,9 @@ class BallVisionFusionNode(Node):
         self.webcam_timeout_sec = float(
             self.get_parameter("webcam_timeout_sec").value
         )
+        self.hoop_timeout_sec = float(
+            self.get_parameter("hoop_timeout_sec").value
+        )
         self.publish_hz = float(self.get_parameter("publish_hz").value)
         self.print_every_n_frames = max(
             1,
@@ -452,6 +461,8 @@ class BallVisionFusionNode(Node):
 
         self.latest_webcam: Optional[Dict[str, Any]] = None
         self.latest_webcam_time = 0.0
+        self.latest_hoop: Optional[Dict[str, Any]] = None
+        self.latest_hoop_time = 0.0
 
         self.ball_in_hand = False
         self.frame_count = 0
@@ -488,6 +499,12 @@ class BallVisionFusionNode(Node):
             String,
             self.webcam_state_topic,
             self.cb_webcam_state,
+            10,
+        )
+        self.sub_hoop_state = self.create_subscription(
+            String,
+            self.hoop_state_topic,
+            self.cb_hoop_state,
             10,
         )
         self.sub_ball_in_hand = self.create_subscription(
@@ -528,6 +545,9 @@ class BallVisionFusionNode(Node):
         )
         self.get_logger().info(
             f"Webcam YOLO input: {self.webcam_state_topic}"
+        )
+        self.get_logger().info(
+            f"Hoop input: {self.hoop_state_topic}"
         )
         self.get_logger().info(
             f"BallResult output: {self.ball_result_topic}"
@@ -1392,17 +1412,25 @@ class BallVisionFusionNode(Node):
 
         robot_x = finite_payload_float("robot_center_x")
         robot_y = finite_payload_float("robot_center_y")
+        x_offset = finite_payload_float("ball_x_offset_px")
         x_distance = finite_payload_float("ball_x_distance_px")
         y_distance = finite_payload_float("ball_y_distance_px")
         distance_px = finite_payload_float("ball_distance_px")
         payload_angle_deg = finite_payload_float("ball_angle_deg")
 
-        if x_distance is None:
-            x_distance = ball_x - (
+        if x_offset is None:
+            x_offset = ball_x - (
                 robot_x
                 if robot_x is not None
                 else self.webcam_robot_center_x
             )
+        if x_distance is None:
+            x_distance = x_offset
+        elif x_offset == 0.0:
+            x_distance = 0.0
+        else:
+            # 구 버전 payload가 절댓값을 보내더라도 로봇 중심선 기준 부호를 복원한다.
+            x_distance = math.copysign(abs(x_distance), x_offset)
         if y_distance is None:
             y_distance = abs((
                 robot_y
@@ -1426,13 +1454,14 @@ class BallVisionFusionNode(Node):
                 )
             )
             angle_error_deg = float(
-                math.degrees(math.atan2(x_distance, focal_px))
+                math.degrees(math.atan2(x_offset, focal_px))
             )
         else:
             angle_error_deg = None
 
         self.latest_webcam = {
             "webcam_ball_detected": True,
+            "webcam_ball_x_offset": float(x_offset),
             "webcam_ball_x_distance": float(x_distance),
             "webcam_ball_y_distance": float(y_distance),
             "webcam_ball_angle_error": angle_error_deg,
@@ -1447,6 +1476,7 @@ class BallVisionFusionNode(Node):
     def _empty_webcam_state(self) -> Dict[str, Any]:
         return {
             "webcam_ball_detected": False,
+            "webcam_ball_x_offset": None,
             "webcam_ball_x_distance": None,
             "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
@@ -1455,6 +1485,55 @@ class BallVisionFusionNode(Node):
             "raw_ball_y": None,
             "raw_ball_conf": 0.0,
             "raw_ball_bbox": [],
+        }
+
+    def cb_hoop_state(self, msg: String) -> None:
+        """후프 JSON에서 BallResult로 전달할 거리와 각도를 보관한다."""
+        now = time.monotonic()
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            self.get_logger().warn("Failed to parse /hoop/vision_state JSON")
+            return
+
+        if (
+            not isinstance(payload, dict)
+            or not bool(payload.get("detected", False))
+        ):
+            self.latest_hoop = self._empty_hoop_state()
+            self.latest_hoop_time = now
+            return
+
+        try:
+            distance_cm = float(payload.get("realsense_goal_distance_cm"))
+            angle_deg = float(payload.get("realsense_goal_angle"))
+        except (TypeError, ValueError):
+            self.latest_hoop = self._empty_hoop_state()
+            self.latest_hoop_time = now
+            return
+
+        if (
+            not math.isfinite(distance_cm)
+            or distance_cm <= 0.0
+            or not math.isfinite(angle_deg)
+        ):
+            self.latest_hoop = self._empty_hoop_state()
+            self.latest_hoop_time = now
+            return
+
+        self.latest_hoop = {
+            "hoop_detected": True,
+            "realsense_goal_distance_cm": distance_cm,
+            "realsense_goal_angle": angle_deg,
+        }
+        self.latest_hoop_time = now
+
+    @staticmethod
+    def _empty_hoop_state() -> Dict[str, Any]:
+        return {
+            "hoop_detected": False,
+            "realsense_goal_distance_cm": None,
+            "realsense_goal_angle": None,
         }
 
     # =============================================================
@@ -1479,6 +1558,11 @@ class BallVisionFusionNode(Node):
             if self.latest_webcam is not None
             else None
         )
+        hoop_age = (
+            now - self.latest_hoop_time
+            if self.latest_hoop is not None
+            else None
+        )
 
         realsense_valid = bool(
             self.latest_realsense is not None
@@ -1499,17 +1583,26 @@ class BallVisionFusionNode(Node):
                 False,
             )
         )
+        hoop_valid = bool(
+            self.latest_hoop is not None
+            and hoop_age is not None
+            and hoop_age <= self.hoop_timeout_sec
+            and self.latest_hoop.get("hoop_detected", False)
+        )
 
         features: Dict[str, Any] = {
             "realsense_ball_detected": False,
             "realsense_ball_distance_cm": None,
             "realsense_ball_angle_error": None,
             "webcam_ball_detected": False,
+            "webcam_ball_x_offset": None,
             "webcam_ball_x_distance": None,
             "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
             "webcam_ball_distance_px": None,
             "ball_in_hand": bool(self.ball_in_hand),
+            "realsense_goal_distance_cm": None,
+            "realsense_goal_angle": None,
         }
 
         if realsense_valid and self.latest_realsense is not None:
@@ -1531,6 +1624,10 @@ class BallVisionFusionNode(Node):
             features.update(
                 {
                     "webcam_ball_detected": True,
+                    "webcam_ball_x_offset":
+                        self.latest_webcam[
+                            "webcam_ball_x_offset"
+                        ],
                     "webcam_ball_x_distance":
                         self.latest_webcam[
                             "webcam_ball_x_distance"
@@ -1546,6 +1643,20 @@ class BallVisionFusionNode(Node):
                     "webcam_ball_distance_px":
                         self.latest_webcam[
                             "webcam_ball_distance_px"
+                        ],
+                }
+            )
+
+        if hoop_valid and self.latest_hoop is not None:
+            features.update(
+                {
+                    "realsense_goal_distance_cm":
+                        self.latest_hoop[
+                            "realsense_goal_distance_cm"
+                        ],
+                    "realsense_goal_angle":
+                        self.latest_hoop[
+                            "realsense_goal_angle"
                         ],
                 }
             )
@@ -1570,6 +1681,8 @@ class BallVisionFusionNode(Node):
                 "realsense_detection_method": "opencv_hsv_depth",
                 "realsense_age_sec": realsense_age,
                 "webcam_age_sec": webcam_age,
+                "hoop_age_sec": hoop_age,
+                "hoop_detected": hoop_valid,
                 "ball_status": int(status),
                 "ball_status_angle": float(angle),
                 "camera_info_received": self.camera_info_received,
@@ -1645,6 +1758,7 @@ class BallVisionFusionNode(Node):
                 f"rs_dist={features['realsense_ball_distance_cm']} "
                 f"rs_ang={features['realsense_ball_angle_error']} "
                 f"webcam={features['webcam_ball_detected']} "
+                f"webcam_x_offset={features['webcam_ball_x_offset']} "
                 f"webcam_x={features['webcam_ball_x_distance']} "
                 f"webcam_y={features['webcam_ball_y_distance']} "
                 f"webcam_dist={features['webcam_ball_distance_px']} "
