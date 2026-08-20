@@ -263,23 +263,57 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         self.assertFalse(self.publisher.pick_command_seen)
         self.assertFalse(self.publisher.back_to_initial_done)
 
+    def test_failed_pick_backward_also_releases_lock(self):
+        self._confirm_webcam_ball()
+        self._send_motion(BallStatus.Back_To_Initial)
+        self._send_motion(BallStatus.Pick_Ready)
+
+        self._send_motion(BallStatus.Backward_half)
+
+        self.assertFalse(self.publisher.pick_command_seen)
+        self.assertFalse(self.publisher.back_to_initial_done)
+
     def test_ball_in_hand_is_not_counted_as_next_webcam_detection(self):
         self._confirm_webcam_ball()
         self._send_motion(BallStatus.Back_To_Initial)
         self._send_motion(BallStatus.Pick_Ready)
+
+        # Pick 이후 true를 한 번 확인하면 공 소유 상태를 고정한다.
+        self._publish(True, ball_in_hand=True)
         self._send_motion(BallStatus.Neck_Up)
 
         results = [
-            self._publish(True, ball_in_hand=True)
+            self._publish(True, ball_in_hand=False)
             for _ in range(5)
         ]
 
         self.assertEqual(results, [(BallStatus.Ball_None, 0.0)] * 5)
+        self.assertTrue(self.publisher.ball_in_hand)
+        self.assertTrue(self.node.recorder.messages[-1].ball_in_hand)
         self.assertFalse(self.publisher.webcam_ball_confirmed)
         self.assertEqual(
             list(self.publisher.webcam_detection_buffer),
             [False] * 5,
         )
+
+    def test_ball_in_hand_is_released_after_shoot_completes(self):
+        self._confirm_webcam_ball()
+        self._send_motion(BallStatus.Back_To_Initial)
+        self._send_motion(BallStatus.Pick_Ready)
+        self._publish(False, ball_in_hand=True)
+        self._send_motion(BallStatus.Neck_Up)
+
+        self._publish(False, ball_in_hand=False)
+        self.assertTrue(self.publisher.ball_in_hand)
+        self.assertTrue(self.node.recorder.messages[-1].ball_in_hand)
+
+        self._send_motion(BallStatus.Shoot)
+        self.assertTrue(self.publisher.ball_in_hand)
+        self._send_motion(BallStatus.Neck_Down)
+
+        self.assertFalse(self.publisher.ball_in_hand)
+        self._publish(False, ball_in_hand=False)
+        self.assertFalse(self.node.recorder.messages[-1].ball_in_hand)
 
 
 if __name__ == "__main__":

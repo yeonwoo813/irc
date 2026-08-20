@@ -37,6 +37,10 @@ if(BUILD_TESTING)
     test_yolo_motion_overlay
     test/test_yolo_motion_overlay.py
   )
+  ament_add_pytest_test(
+    test_detector_activation
+    test/test_detector_activation.py
+  )
 endif()
 
 install(PROGRAMS

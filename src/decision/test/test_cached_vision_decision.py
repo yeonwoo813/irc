@@ -549,3 +549,86 @@ def test_each_pick_resets_then_allows_a_new_pre_pick_grace_cycle():
 
     assert harness.ball_tracking_active is True
     assert harness.ball_last_seen_time == 30.0
+
+
+def _make_post_pick_harness(ball_in_hand):
+    harness = SimpleNamespace(
+        current_mode="BallMode",
+        pick_done=True,
+        turn_after_pick=False,
+        backward_after_pick=False,
+        ball_in_hand=ball_in_hand,
+        has_ball=False,
+    )
+    harness.logger = _Logger()
+    harness.get_logger = lambda: harness.logger
+    harness.commands = []
+    harness.turn_after_pick_calls = 0
+    harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness.CheckBall = MethodType(MainDecision.CheckBall, harness)
+
+    def record_turn_after_pick():
+        harness.turn_after_pick_calls += 1
+
+    harness.TurnAfterPick = record_turn_after_pick
+    return harness
+
+
+def test_successful_pick_runs_neck_up_then_backward_then_turn():
+    harness = _make_post_pick_harness(ball_in_hand=True)
+
+    MainDecision.BallMode(harness)
+    assert harness.commands == [Motion.Neck_Up]
+    assert harness.backward_after_pick is True
+
+    MainDecision.BallMode(harness)
+    assert harness.commands == [Motion.Neck_Up, Motion.Backward_half]
+    assert harness.backward_after_pick is False
+
+    MainDecision.BallMode(harness)
+    assert harness.turn_after_pick_calls == 1
+
+
+def test_failed_pick_runs_backward_then_turn_without_neck_up():
+    harness = _make_post_pick_harness(ball_in_hand=False)
+
+    MainDecision.BallMode(harness)
+    assert harness.commands == [Motion.Backward_half]
+    assert harness.backward_after_pick is False
+
+    MainDecision.BallMode(harness)
+    assert harness.turn_after_pick_calls == 1
+
+
+def test_confirmed_ball_is_not_checked_again_before_shoot():
+    harness = SimpleNamespace(
+        current_mode="BallMode",
+        pick_done=False,
+        turn_after_pick=False,
+        back_to_walk_after_pick=False,
+        neck_down_pending=False,
+        turn_after_shoot=False,
+        has_ball=True,
+        # 후속 비전 값이 false여도 이미 확정한 has_ball은 유지한다.
+        ball_in_hand=False,
+        ball_status=Ball.Shoot,
+        turn_count=3,
+    )
+    harness.commands = []
+    harness.check_ball_calls = 0
+    harness.MotionCommand = lambda: harness.commands.append(harness.status)
+
+    def record_check_ball():
+        harness.check_ball_calls += 1
+        return False
+
+    harness.CheckBall = record_check_ball
+
+    MainDecision.BallMode(harness)
+
+    assert harness.check_ball_calls == 0
+    assert harness.commands == [Motion.Shoot]
+    assert harness.has_ball is False
+    assert harness.neck_down_pending is True
+    assert harness.turn_after_shoot is True
+    assert harness.turn_count == 0

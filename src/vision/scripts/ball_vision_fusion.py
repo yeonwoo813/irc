@@ -17,7 +17,7 @@ Ball Vision Fusion Node.
 - /camera/color/camera_info
 - /line_tracker/state
 - /hoop/vision_state
-- /ball/in_hand
+- /raw_ball_in_hand
 
 출력
 - ball_result
@@ -43,6 +43,7 @@ from cv_bridge import CvBridge
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 
@@ -92,7 +93,12 @@ class BallVisionFusionNode(Node):
         )
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
         self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
-        self.declare_parameter("ball_in_hand_topic", "/ball/in_hand")
+        self.declare_parameter("active_topic", "/vision/ball_active")
+        self.declare_parameter("active_on_start", True)
+        self.declare_parameter(
+            "raw_ball_in_hand_topic",
+            "/raw_ball_in_hand",
+        )
         self.declare_parameter("vision_state_topic", "/ball/vision_state")
         self.declare_parameter(
             "realsense_debug_image_topic",
@@ -244,8 +250,9 @@ class BallVisionFusionNode(Node):
         self.hoop_state_topic = str(
             self.get_parameter("hoop_state_topic").value
         )
-        self.ball_in_hand_topic = str(
-            self.get_parameter("ball_in_hand_topic").value
+        self.active_topic = str(self.get_parameter("active_topic").value)
+        self.raw_ball_in_hand_topic = str(
+            self.get_parameter("raw_ball_in_hand_topic").value
         )
         self.vision_state_topic = str(
             self.get_parameter("vision_state_topic").value
@@ -467,27 +474,30 @@ class BallVisionFusionNode(Node):
         self.ball_in_hand = False
         self.frame_count = 0
         self.realsense_frame_count = 0
+        self.ball_detection_active = bool(
+            self.get_parameter("active_on_start").value
+        )
 
         # =========================================================
         # ROS I/O
         # =========================================================
-        # RealSense color/depth를 시간 동기화해 직접 OpenCV 처리한다.
-        self.rs_color_sub = Subscriber(
-            self,
-            Image,
-            self.realsense_color_topic,
+        # inactive일 때 대용량 영상이 Python 프로세스로 전달되지 않도록
+        # RealSense 구독 자체를 경기 단계에 맞춰 생성/해제한다.
+        self.rs_color_sub = None
+        self.rs_depth_sub = None
+        self.rs_sync = None
+
+        active_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.rs_depth_sub = Subscriber(
-            self,
-            Image,
-            self.realsense_depth_topic,
+        self.sub_active = self.create_subscription(
+            Bool,
+            self.active_topic,
+            self.cb_ball_active,
+            active_qos,
         )
-        self.rs_sync = ApproximateTimeSynchronizer(
-            [self.rs_color_sub, self.rs_depth_sub],
-            queue_size=2,
-            slop=0.1,
-        )
-        self.rs_sync.registerCallback(self.cb_realsense_images)
 
         self.sub_camera_info = self.create_subscription(
             CameraInfo,
@@ -507,10 +517,10 @@ class BallVisionFusionNode(Node):
             self.cb_hoop_state,
             10,
         )
-        self.sub_ball_in_hand = self.create_subscription(
+        self.sub_raw_ball_in_hand = self.create_subscription(
             Bool,
-            self.ball_in_hand_topic,
-            self.cb_ball_in_hand,
+            self.raw_ball_in_hand_topic,
+            self.cb_raw_ball_in_hand,
             10,
         )
 
@@ -536,6 +546,9 @@ class BallVisionFusionNode(Node):
             self.publish_ball_features,
         )
 
+        if self.ball_detection_active:
+            self._start_ball_image_subscriptions()
+
         self.get_logger().info("BallVisionFusionNode started.")
         self.get_logger().info(
             f"RealSense color: {self.realsense_color_topic}"
@@ -551,6 +564,10 @@ class BallVisionFusionNode(Node):
         )
         self.get_logger().info(
             f"BallResult output: {self.ball_result_topic}"
+        )
+        self.get_logger().info(
+            "Ball image detection: "
+            f"{'ON' if self.ball_detection_active else 'OFF'}"
         )
 
     def _load_hsv_defaults(self, path: Path) -> Dict[str, Any]:
@@ -776,6 +793,67 @@ class BallVisionFusionNode(Node):
         return SetParametersResult(successful=True)
 
     # =============================================================
+    # 경기 단계별 공 영상 구독
+    # =============================================================
+    def _start_ball_image_subscriptions(self) -> None:
+        if self.rs_color_sub is not None or self.rs_depth_sub is not None:
+            return
+
+        self.rs_color_sub = Subscriber(
+            self,
+            Image,
+            self.realsense_color_topic,
+        )
+        self.rs_depth_sub = Subscriber(
+            self,
+            Image,
+            self.realsense_depth_topic,
+        )
+        self.rs_sync = ApproximateTimeSynchronizer(
+            [self.rs_color_sub, self.rs_depth_sub],
+            queue_size=2,
+            slop=0.1,
+        )
+        self.rs_sync.registerCallback(self.cb_realsense_images)
+
+    def _stop_ball_image_subscriptions(self) -> None:
+        for subscriber in (self.rs_color_sub, self.rs_depth_sub):
+            ros_subscription = getattr(subscriber, "sub", None)
+            if ros_subscription is not None:
+                self.destroy_subscription(ros_subscription)
+
+        self.rs_sync = None
+        self.rs_color_sub = None
+        self.rs_depth_sub = None
+
+    def _clear_ball_detection_state(self) -> None:
+        self.latest_realsense = None
+        self.latest_realsense_time = 0.0
+        self.last_realsense_detection = None
+        self.realsense_lost_frames = self.realsense_hold_frames
+        self.latest_webcam = None
+        self.latest_webcam_time = 0.0
+
+    def cb_ball_active(self, msg: Bool) -> None:
+        requested = bool(msg.data)
+        if requested == self.ball_detection_active:
+            return
+
+        # 먼저 상태를 바꿔 이미 큐에 들어온 콜백도 즉시 반환하게 한다.
+        self.ball_detection_active = requested
+        self._clear_ball_detection_state()
+        if requested:
+            self.ball_status_publisher._reset_webcam_detection_cycle()
+            self._start_ball_image_subscriptions()
+        else:
+            self._stop_ball_image_subscriptions()
+
+        self.get_logger().info(
+            "Ball image detection switched "
+            f"{'ON' if requested else 'OFF'}"
+        )
+
+    # =============================================================
     # CameraInfo
     # =============================================================
     def cb_camera_info(self, msg: CameraInfo) -> None:
@@ -811,6 +889,9 @@ class BallVisionFusionNode(Node):
         color_msg: Image,
         depth_msg: Image,
     ) -> None:
+        if not getattr(self, "ball_detection_active", True):
+            return
+
         now = time.monotonic()
 
         try:
@@ -1365,6 +1446,9 @@ class BallVisionFusionNode(Node):
     # Webcam YOLO
     # =============================================================
     def cb_webcam_state(self, msg: String) -> None:
+        if not getattr(self, "ball_detection_active", True):
+            return
+
         now = time.monotonic()
 
         try:
@@ -1535,9 +1619,9 @@ class BallVisionFusionNode(Node):
         }
 
     # =============================================================
-    # ball_in_hand
+    # raw_ball_in_hand
     # =============================================================
-    def cb_ball_in_hand(self, msg: Bool) -> None:
+    def cb_raw_ball_in_hand(self, msg: Bool) -> None:
         self.ball_in_hand = bool(msg.data)
 
     # =============================================================
@@ -1563,7 +1647,8 @@ class BallVisionFusionNode(Node):
         )
 
         realsense_valid = bool(
-            self.latest_realsense is not None
+            self.ball_detection_active
+            and self.latest_realsense is not None
             and realsense_age is not None
             and realsense_age <= self.realsense_timeout_sec
             and self.latest_realsense.get(
@@ -1573,7 +1658,8 @@ class BallVisionFusionNode(Node):
         )
 
         webcam_valid = bool(
-            self.latest_webcam is not None
+            self.ball_detection_active
+            and self.latest_webcam is not None
             and webcam_age is not None
             and webcam_age <= self.webcam_timeout_sec
             and self.latest_webcam.get(
@@ -1671,6 +1757,7 @@ class BallVisionFusionNode(Node):
         output.update(
             {
                 "source_priority": source_priority,
+                "ball_detection_active": self.ball_detection_active,
                 "realsense_detection_method": "opencv_hsv_depth",
                 "realsense_age_sec": realsense_age,
                 "webcam_age_sec": webcam_age,

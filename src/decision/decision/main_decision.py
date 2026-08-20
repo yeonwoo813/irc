@@ -4,6 +4,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from collections import deque, Counter
 from msgs.msg import LineResult, MotionCommand, MotionEnd, BallResult, HurdleResult
+from std_msgs.msg import Bool
 
 # 커스텀메시지 가져오기
 
@@ -63,7 +64,6 @@ class Ball:
     Pick_Ready = Motion.Pick
     Shoot = Motion.Shoot
     Shoot_Close = Motion.Shoot_Close
-    Ball_In_Hand = 50
 
 class Line:
     Line_None = 99
@@ -145,6 +145,10 @@ class MainDecision(Node):
         self.neck_down_pending = False
         self.turn_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
+        # Shoot 명령 발행 직후가 아니라 모션이 실제로 끝난 뒤 다음 공 검출로
+        # 전환하기 위해 시작/완료 전이를 따로 추적한다.
+        self.shoot_in_progress = False
+        self.shoot_motion_started = False
 
         #hurdle
         self.hurdle_step = 0
@@ -179,11 +183,87 @@ class MainDecision(Node):
         #publish
         self.motion_pub = self.create_publisher(MotionCommand, 'motion_command', 10)
 
+        # 공과 골대의 고비용 RealSense 영상 처리를 경기 단계별로 하나만
+        # 활성화한다. TRANSIENT_LOCAL을 사용해 vision 노드가 늦게 시작해도
+        # 마지막 모드를 즉시 받을 수 있게 한다.
+        vision_mode_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.ball_active_pub = self.create_publisher(
+            Bool,
+            '/vision/ball_active',
+            vision_mode_qos,
+        )
+        self.hoop_active_pub = self.create_publisher(
+            Bool,
+            '/vision/hoop_active',
+            vision_mode_qos,
+        )
+        self.ball_vision_active = None
+        self.hoop_vision_active = None
+        self._set_vision_activity(
+            ball_active=True,
+            hoop_active=False,
+            reason='startup: search for ball',
+        )
+
         # 0.05초마다 ball lost 타임아웃 0.8초를 확인하는 타이머
         self.ball_loss_grace_timer = self.create_timer(
             0.05,
             self._check_ball_loss_timeout,
         )
+
+    def _set_vision_activity(
+        self,
+        ball_active,
+        hoop_active,
+        reason='',
+    ):
+        """Enable exactly the detector needed by the current match phase."""
+        ball_active = bool(ball_active)
+        hoop_active = bool(hoop_active)
+        if ball_active and hoop_active:
+            raise ValueError('ball and hoop detection cannot both be active')
+
+        previous_ball = getattr(self, 'ball_vision_active', None)
+        previous_hoop = getattr(self, 'hoop_vision_active', None)
+        if previous_ball == ball_active and previous_hoop == hoop_active:
+            return False
+
+        ball_pub = getattr(self, 'ball_active_pub', None)
+        hoop_pub = getattr(self, 'hoop_active_pub', None)
+
+        # 전환 순간에도 두 검출기가 동시에 켜지지 않도록 OFF를 먼저 보낸다.
+        if (
+            previous_ball is not False
+            and not ball_active
+            and ball_pub is not None
+        ):
+            ball_pub.publish(Bool(data=False))
+        if (
+            previous_hoop is not False
+            and not hoop_active
+            and hoop_pub is not None
+        ):
+            hoop_pub.publish(Bool(data=False))
+        if previous_ball is not True and ball_active and ball_pub is not None:
+            ball_pub.publish(Bool(data=True))
+        if previous_hoop is not True and hoop_active and hoop_pub is not None:
+            hoop_pub.publish(Bool(data=True))
+
+        self.ball_vision_active = ball_active
+        self.hoop_vision_active = hoop_active
+        logger = getattr(self, 'get_logger', None)
+        if callable(logger):
+            suffix = f' ({reason})' if reason else ''
+            logger().info(
+                '[VisionMode] '
+                f'ball={"ON" if ball_active else "OFF"}, '
+                f'hoop={"ON" if hoop_active else "OFF"}{suffix}'
+            )
+        return True
 
     # 콜백함수에서 모션 종료 여부를 업데이트
     def MotionEndCallback(self, motion_end_msg:MotionEnd):
@@ -209,6 +289,21 @@ class MainDecision(Node):
                 self.get_logger().info(
                     "Hurdle_Go 완료: hurdle_detected=false, "
                     "허들 모드 잠금을 해제하고 라인 트래킹 복귀를 허용합니다."
+                )
+
+        # Shoot 모션의 false(실행 중) -> true(완료) 전이를 확인한 뒤에만
+        # 골대 검출을 끄고 다음 공 검출을 다시 시작한다.
+        if getattr(self, 'shoot_in_progress', False):
+            if not self.motion_end:
+                self.shoot_motion_started = True
+            elif getattr(self, 'shoot_motion_started', False):
+                self.shoot_in_progress = False
+                self.shoot_motion_started = False
+                MainDecision._set_vision_activity(
+                    self,
+                    ball_active=True,
+                    hoop_active=False,
+                    reason='shoot motion completed',
                 )
 
         self.get_logger().info(
@@ -473,9 +568,21 @@ class MainDecision(Node):
         self.pick_done = False
         if self.ball_in_hand == True:
             self.has_ball = True
+            MainDecision._set_vision_activity(
+                self,
+                ball_active=False,
+                hoop_active=True,
+                reason='ball possession confirmed',
+            )
             self.get_logger().info("pick success: ball is in hand")
         else:
             self.has_ball = False
+            MainDecision._set_vision_activity(
+                self,
+                ball_active=True,
+                hoop_active=False,
+                reason='pick failed: resume ball detection',
+            )
             self.get_logger().info("pick failed: ball is not in hand")
 
         return self.has_ball
@@ -604,14 +711,6 @@ class MainDecision(Node):
         ##### 공이 있음, shoot Mode #####
         #goal이 보이고 공을 가지고 있으면 shoot 시도
         if self.has_ball == True:
-            #shoot 직전 공확인
-            self.CheckBall()
-
-            #공 없으면 무시하고 라인트래킹
-            if self.has_ball == False:
-                self.LineTracking()
-                return
-            
             #shoot 준비완료
             if self.ball_status in (Ball.Shoot, Ball.Shoot_Close):
                 self.status = self.ball_status
@@ -620,6 +719,8 @@ class MainDecision(Node):
                 self.neck_down_pending = True
                 self.turn_after_shoot = True
                 self.turn_count = 0
+                self.shoot_in_progress = True
+                self.shoot_motion_started = False
                 self.MotionCommand()
                 return
 

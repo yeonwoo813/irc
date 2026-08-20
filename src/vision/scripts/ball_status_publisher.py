@@ -34,7 +34,6 @@ class BallStatus:
     Left_Turn_Afterpick = 30
     Right_Turn_Afterpick = 31
     Shoot_Close = 32
-    Ball_In_Hand = 50
     Ball_Lost = 45
     Ball_None = 99
 
@@ -80,7 +79,7 @@ class BallDecision:
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
         self.webcam_pick_y_max_px = 78.0
-        self.webcam_pick_x_min_px = -48.0
+        self.webcam_pick_x_min_px = -40.0
         self.webcam_pick_x_max_px = 35.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
@@ -244,6 +243,9 @@ class BallStatusPublisher:
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
         self.pick_command_seen = False
+        # Pick 이후 비전에서 true를 한 번 확인하면 Shoot 완료까지
+        # 유지하는 공 소유 상태입니다.
+        self.ball_in_hand = False
         # 슛 가능 거리 진입 시 기본자세는 한 번만 실행한다.
         self.shoot_initial_waiting = False
         self.shoot_initial_done = False
@@ -304,9 +306,10 @@ class BallStatusPublisher:
             self.shoot_command_seen
             and command == BallStatus.Neck_Down
         ):
+            self.ball_in_hand = False
             self._reset_shoot_cycle()
             self._log_info(
-                "Shoot completed; shoot initial-pose lock released."
+                "Shoot completed; ball-in-hand and shoot locks released."
             )
 
         if command == BallStatus.Pick_Ready:
@@ -344,13 +347,26 @@ class BallStatusPublisher:
         webcam_ball_distance_px: Optional[float] = None,
         ball_in_hand: bool = False,
     ) -> Tuple[int, float]:
-        if not ball_in_hand:
+        # 함수 인자는 비전의 원본 값이고, self.ball_in_hand는
+        # Shoot 완료까지 유지되는 확정값이다.
+        ball_in_hand = bool(ball_in_hand)
+        if self.pick_command_seen and ball_in_hand:
+            if not self.ball_in_hand:
+                self._log_info(
+                    "Ball in hand confirmed; possession is locked until "
+                    "Shoot completes."
+                )
+            self.ball_in_hand = True
+
+        if not self.ball_in_hand:
             self._reset_shoot_cycle()
 
         if not self.back_to_initial_done and not self.webcam_ball_confirmed:
             # 손에 든 공은 다음 공의 최초 웹캠 검출로 집계하지
             # 않는다.
-            detected_for_vote = bool(webcam_ball_detected and not ball_in_hand)
+            detected_for_vote = bool(
+                webcam_ball_detected and not self.ball_in_hand
+            )
             self.webcam_detection_buffer.append(detected_for_vote)
             detected_count = sum(self.webcam_detection_buffer)
             if (
@@ -380,7 +396,7 @@ class BallStatusPublisher:
             webcam_ball_y_distance=webcam_ball_y_distance,
             webcam_ball_angle_error=webcam_ball_angle_error,
             webcam_ball_distance_px=webcam_ball_distance_px,
-            ball_in_hand=ball_in_hand,
+            ball_in_hand=self.ball_in_hand,
         )
 
         status, angle = self.ball_decision.decide(features)
@@ -391,7 +407,7 @@ class BallStatusPublisher:
             angle = 0.0
 
         goal_in_shoot_zone = bool(
-            ball_in_hand
+            self.ball_in_hand
             and realsense_goal_distance_cm is not None
             and math.isfinite(realsense_goal_distance_cm)
             and self.ball_decision.goal_too_close_distance_cm
@@ -412,8 +428,8 @@ class BallStatusPublisher:
         msg.status = int(status)
         msg.angle = float(angle)
         if hasattr(msg, 'ball_in_hand'):
-            msg.ball_in_hand = bool(ball_in_hand)
-        if ball_in_hand and realsense_goal_angle is not None:
+            msg.ball_in_hand = self.ball_in_hand
+        if self.ball_in_hand and realsense_goal_angle is not None:
             measured_angle = realsense_goal_angle
         else:
             measured_angle = (

@@ -42,6 +42,7 @@ from cv_bridge import CvBridge
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 
@@ -265,14 +266,11 @@ class HoopVisionNode(Node):
         # =========================================================
         # ROS I/O
         # =========================================================
-        self.color_sub = Subscriber(self, Image, self.color_topic)
-        self.depth_sub = Subscriber(self, Image, self.depth_topic)
-        self.sync = ApproximateTimeSynchronizer(
-            [self.color_sub, self.depth_sub],
-            queue_size=5,
-            slop=0.1,
-        )
-        self.sync.registerCallback(self.image_callback)
+        # inactive일 때 대용량 영상이 Python 프로세스로 전달되지 않도록
+        # RealSense 구독 자체를 경기 단계에 맞춰 생성/해제한다.
+        self.color_sub = None
+        self.depth_sub = None
+        self.sync = None
 
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
@@ -280,11 +278,16 @@ class HoopVisionNode(Node):
             self.camera_info_callback,
             10,
         )
+        active_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.active_sub = self.create_subscription(
             Bool,
             self.active_topic,
             self.active_callback,
-            10,
+            active_qos,
         )
 
         self.state_pub = self.create_publisher(String, self.state_topic, 10)
@@ -294,6 +297,9 @@ class HoopVisionNode(Node):
         self.debug_pub = self.create_publisher(
             Image, self.debug_image_topic, 10
         )
+
+        if self.active:
+            self._start_image_subscriptions()
 
         self.get_logger().info("HoopVisionNode started.")
         self.get_logger().info(f"Color topic: {self.color_topic}")
@@ -427,8 +433,52 @@ class HoopVisionNode(Node):
     # =============================================================
     # ROS 콜백
     # =============================================================
+    def _start_image_subscriptions(self) -> None:
+        if self.color_sub is not None or self.depth_sub is not None:
+            return
+
+        self.color_sub = Subscriber(self, Image, self.color_topic)
+        self.depth_sub = Subscriber(self, Image, self.depth_topic)
+        self.sync = ApproximateTimeSynchronizer(
+            [self.color_sub, self.depth_sub],
+            queue_size=5,
+            slop=0.1,
+        )
+        self.sync.registerCallback(self.image_callback)
+
+    def _stop_image_subscriptions(self) -> None:
+        for subscriber in (self.color_sub, self.depth_sub):
+            ros_subscription = getattr(subscriber, "sub", None)
+            if ros_subscription is not None:
+                self.destroy_subscription(ros_subscription)
+
+        self.sync = None
+        self.color_sub = None
+        self.depth_sub = None
+
     def active_callback(self, msg: Bool) -> None:
-        self.active = bool(msg.data)
+        requested = bool(msg.data)
+        if requested == self.active:
+            return
+
+        # 먼저 상태를 바꿔 이미 큐에 들어온 콜백도 즉시 반환하게 한다.
+        self.active = requested
+        self.history.clear()
+        self.last_detection = None
+        self.last_detection_time = None
+        if requested:
+            self._start_image_subscriptions()
+        else:
+            self._stop_image_subscriptions()
+            self._publish_state(
+                detection=None,
+                process_ms=0.0,
+                stamp_sec=time.monotonic(),
+            )
+
+        self.get_logger().info(
+            f"Hoop image detection switched {'ON' if requested else 'OFF'}"
+        )
 
     def camera_info_callback(self, msg: CameraInfo) -> None:
         if len(msg.k) < 9:

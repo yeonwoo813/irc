@@ -203,6 +203,8 @@ def generate_launch_description() -> LaunchDescription:
             "show_window:=false",
             "-p",
             "publish_debug_image:=true",
+            "-p",
+            "active_on_start:=false",
         ],
         cwd=scripts_dir,
         output="screen",

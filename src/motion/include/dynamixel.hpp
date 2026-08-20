@@ -31,7 +31,7 @@ using namespace Eigen;
 
 #define RAD_TO_VALUE (4096.0 / (2.0 * M_PI))
 
-//Neck 모터 ID 추가
+// Neck motor ID
 static constexpr uint8_t NECK_DXL_ID = 23;
 
 class Dxl
@@ -60,7 +60,7 @@ public:
     int StreamWriteRaw(const RawArray& raw);
     void EndStreamWrite();
 
-    //Neck 제어에 사용되는 함수들
+    // Neck motor control
     bool EnableNeckTorque();
     bool ReadNeckPresentRaw(int32_t& raw);
     int StreamWriteNeckRaw(int32_t raw);
@@ -124,7 +124,7 @@ private:
     bool port_open_{false};
     bool torque_enabled_{false};
 
-    //Neck 관련 상태변수 추가
+    // Neck motor state
     bool neck_torque_enabled_{false};
     int32_t neck_last_goal_raw_{2048};
 

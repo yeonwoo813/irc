@@ -95,6 +95,7 @@ def generate_launch_description():
             'start_yolo': use_vision,
             'start_ball': use_vision,
             'start_hurdle': use_vision,
+            'start_hoop': use_vision,
             'start_monitor': use_vision,
             'start_selector': use_vision,
             'webcam_device': webcam_device,

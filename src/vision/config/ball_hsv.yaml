@@ -1,17 +1,17 @@
 ball_vision_fusion:
   ros__parameters:
-    h_low: 4
-    h_high: 17
-    s_low: 139
+    h_low: 6
+    h_high: 23
+    s_low: 95
     s_high: 255
-    v_low: 115
+    v_low: 117
     v_high: 255
-    support_v_max: 102
-    floor_h_low: 174
-    floor_h_high: 8
-    floor_s_low: 61
-    floor_s_high: 220
-    floor_v_low: 105
+    support_v_max: 132
+    floor_h_low: 175
+    floor_h_high: 10
+    floor_s_low: 41
+    floor_s_high: 253
+    floor_v_low: 72
     floor_v_high: 255
     support_diameter_m: 0.15
     support_black_ratio_min: 0.3

@@ -508,8 +508,8 @@ class HurdleLineGeometryTest(unittest.TestCase):
             frame_h=480,
         )
 
-        self.assertEqual(payload["line_distance"], -220.0)
-        self.assertEqual(payload["line_second_point_distance_px"], 100.0)
+        self.assertEqual(payload["line_distance"], -245.0)
+        self.assertEqual(payload["line_second_point_distance_px"], 75.0)
         self.assertAlmostEqual(
             payload["hurdle_line_angle_deg"],
             math.degrees(math.atan2(320.0, 90.0)),

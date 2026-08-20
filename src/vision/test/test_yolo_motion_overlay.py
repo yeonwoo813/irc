@@ -11,8 +11,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from yolo_detector import (  # noqa: E402
+    LineStatus,
     MotionDisplayState,
     add_ball_geometry,
+    apply_line_status,
+    make_line_payload,
+    make_vision_payload,
     motion_overlay_lines,
 )
 from ball_status_publisher import BallStatus, BallStatusPublisher  # noqa: E402
@@ -95,6 +99,63 @@ class BallGeometryTest(unittest.TestCase):
         self.assertIsNone(payload["ball_x_distance_px"])
         self.assertIsNone(payload["ball_y_distance_px"])
         self.assertIsNone(payload["ball_angle_deg"])
+
+
+class LineGeometryTest(unittest.TestCase):
+    def test_line_uses_same_center_plus_25_as_ball(self) -> None:
+        payload = make_line_payload(
+            line_points=[(345.0, 400.0)],
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertEqual(payload["line_distance"], 0.0)
+        self.assertEqual(payload["follow_angle"], 0.0)
+
+    def test_line_at_image_center_is_left_of_calibrated_center(self) -> None:
+        payload = make_line_payload(
+            line_points=[(320.0, 400.0)],
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertEqual(payload["line_distance"], -25.0)
+        self.assertLess(payload["follow_angle"], 0.0)
+
+    def test_configured_offset_is_shared_by_line_and_ball(self) -> None:
+        payload = make_vision_payload(
+            dets=[],
+            line_points=[(360.0, 400.0)],
+            frame_w=640,
+            frame_h=480,
+            cfg={
+                "robot_center_offset_x_px": 40.0,
+                "ball_class": "ball",
+                "ball_conf": 0.2,
+                "hurdle_class": "hurdle",
+                "hurdle_conf": 0.2,
+            },
+        )
+
+        self.assertEqual(payload["robot_center_x"], 360.0)
+        self.assertEqual(payload["line_distance"], 0.0)
+
+    def test_line_decision_uses_calibrated_distance(self) -> None:
+        payload = make_line_payload(
+            line_points=[
+                (410.0, 470.0),
+                (410.0, 380.0),
+                (410.0, 290.0),
+            ],
+            frame_w=640,
+            frame_h=480,
+        )
+        payload = apply_line_status(payload, frame_w=640, frame_h=480)
+
+        # 보정 전 중심(320) 기준이면 +90px이어서 오른쪽 보정 모션이지만,
+        # 실제 로봇 중심(345) 기준으로는 +65px이므로 직진해야 한다.
+        self.assertEqual(payload["line_distance"], 65.0)
+        self.assertEqual(payload["status"], LineStatus.Forward_4step)
 
 
 class _FakePublisher:
