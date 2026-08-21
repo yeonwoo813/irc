@@ -41,6 +41,10 @@ if(BUILD_TESTING)
     test_detector_activation
     test/test_detector_activation.py
   )
+  ament_add_pytest_test(
+    test_realsense_debug_selector
+    test/test_realsense_debug_selector.py
+  )
 endif()
 
 install(PROGRAMS

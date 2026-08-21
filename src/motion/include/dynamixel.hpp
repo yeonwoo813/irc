@@ -12,7 +12,7 @@
 
 using namespace Eigen;
 
-#define DEVICE_NAME "/dev/ttyUSB1"
+#define DEVICE_NAME "/dev/ttyUSB0"
 #define BAUDRATE             2000000
 #define PROTOCOL_VERSION     2.0
 #define NUMBER_OF_DYNAMIXELS 22

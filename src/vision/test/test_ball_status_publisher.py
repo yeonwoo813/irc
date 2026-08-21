@@ -220,6 +220,17 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         self.assertFalse(self.publisher.webcam_ball_confirmed)
         self.assertFalse(self.publisher.back_to_initial_waiting)
 
+    def test_goal_distance_is_published_for_decision_threshold(self):
+        self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=89.5,
+            realsense_goal_angle=0.0,
+        )
+
+        self.assertAlmostEqual(
+            self.node.recorder.messages[-1].goal_distance_cm,
+            89.5,
+        )
+
     def test_initial_pose_is_locked_after_motion_command_confirmation(self):
         self._confirm_webcam_ball()
         self.assertEqual(

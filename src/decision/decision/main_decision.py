@@ -84,6 +84,7 @@ class MainDecision(Node):
         #test_mode 파라미터 선언 및 초기화
         self.declare_parameter('test_mode', False)
         self.declare_parameter('ball_lost_timeout_sec', 0.8)
+        self.declare_parameter('shoot_fresh_vision_distance_cm', 70.0)
         test_mode_param = self.get_parameter('test_mode').value
         if isinstance(test_mode_param, str):
             self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
@@ -92,6 +93,14 @@ class MainDecision(Node):
         self.ball_lost_timeout_sec = max(
             0.0,
             float(self.get_parameter('ball_lost_timeout_sec').value),
+        )
+        self.shoot_fresh_vision_distance_cm = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'shoot_fresh_vision_distance_cm'
+                ).value
+            ),
         )
 
         #초기값 설정
@@ -109,6 +118,7 @@ class MainDecision(Node):
         self.latest_line_follow_point = False
         self.latest_ball_angle = 0.0
         self.latest_ball_in_hand = False
+        self.latest_goal_distance_cm = 0.0
         self.latest_hurdle_angle = 0.0
         self.latest_hurdle_ready = False
 
@@ -149,6 +159,10 @@ class MainDecision(Node):
         # 전환하기 위해 시작/완료 전이를 따로 추적한다.
         self.shoot_in_progress = False
         self.shoot_motion_started = False
+        # 골대가 설정 거리 이내로 들어오면 Shoot 명령 전까지 유지한다.
+        # Shoot 발행 후에는 다음 Pick 성공 전까지 재활성화하지 않는다.
+        self.shoot_fresh_vision_active = False
+        self.shoot_fresh_vision_armed = True
 
         #hurdle
         self.hurdle_step = 0
@@ -312,6 +326,21 @@ class MainDecision(Node):
         if self.motion_ready and not was_ready:
             self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
 
+        # 골대 근거리 구간에서는 모션 중 쌓인 ball 결과를 버리고,
+        # motion_end 이후 새로 수신되는 결과 3개를 기다립니다.
+        if (
+            self.motion_end
+            and not was_motion_end
+            and getattr(self, 'shoot_fresh_vision_active', False)
+        ):
+            self.ball_data = False
+            self.ball_buffer.clear()
+            self.get_logger().info(
+                "[ShootFreshVision] motion_end 이후 ball_result를 "
+                "다시 받기 위해 ball_buffer를 초기화합니다."
+            )
+            return
+
         # 모션 실행 중 쌓인 최신 비전 결과를 모션 종료 즉시 집계합니다.
         # 다음 line/ball/hurdle 콜백을 기다리지 않도록 모션이 실제로 종료되는 전환 시점에 한 번만 판단
         if self.motion_end and not was_motion_end:
@@ -337,6 +366,27 @@ class MainDecision(Node):
         self.latest_ball_in_hand = bool(
             getattr(ball_msg, 'ball_in_hand', False)
         )
+        self.latest_goal_distance_cm = float(
+            getattr(ball_msg, 'goal_distance_cm', 0.0)
+        )
+
+        fresh_vision_distance = getattr(
+            self,
+            'shoot_fresh_vision_distance_cm',
+            70.0,
+        )
+        if (
+            not getattr(self, 'shoot_fresh_vision_active', False)
+            and getattr(self, 'shoot_fresh_vision_armed', True)
+            and getattr(self, 'has_ball', False)
+            and 0.0 < self.latest_goal_distance_cm <= fresh_vision_distance
+        ):
+            self.shoot_fresh_vision_active = True
+            self.get_logger().info(
+                "[ShootFreshVision] 활성화: "
+                f"goal_distance={self.latest_goal_distance_cm:.1f}cm "
+                f"(기준 {fresh_vision_distance:.1f}cm 이하)"
+            )
 
         if not self.motion_ready:
             return
@@ -528,7 +578,8 @@ class MainDecision(Node):
         #우선순위 2 : ball mode
         #Ball mode 활성화 조건
         elif (
-            self.pick_done == True
+            self.has_ball == True
+            or self.pick_done == True
             or self.turn_after_pick == True
             or getattr(self, 'back_to_walk_after_pick', False)
             or self.turn_after_shoot == True
@@ -568,6 +619,13 @@ class MainDecision(Node):
         self.pick_done = False
         if self.ball_in_hand == True:
             self.has_ball = True
+            self.shoot_fresh_vision_active = False
+            was_fresh_vision_armed = getattr(
+                self,
+                'shoot_fresh_vision_armed',
+                True,
+            )
+            self.shoot_fresh_vision_armed = True
             MainDecision._set_vision_activity(
                 self,
                 ball_active=False,
@@ -575,6 +633,17 @@ class MainDecision(Node):
                 reason='ball possession confirmed',
             )
             self.get_logger().info("pick success: ball is in hand")
+            if not was_fresh_vision_armed:
+                fresh_vision_distance = getattr(
+                    self,
+                    'shoot_fresh_vision_distance_cm',
+                    70.0,
+                )
+                self.get_logger().info(
+                    "[ShootFreshVision] 다음 Shoot을 위해 재무장: "
+                    "Pick 성공 후 골대 "
+                    f"{fresh_vision_distance:.1f}cm 이내 검출을 기다립니다."
+                )
         else:
             self.has_ball = False
             MainDecision._set_vision_activity(
@@ -715,6 +784,8 @@ class MainDecision(Node):
             if self.ball_status in (Ball.Shoot, Ball.Shoot_Close):
                 self.status = self.ball_status
                 #shoot 이후 처리
+                self.shoot_fresh_vision_active = False
+                self.shoot_fresh_vision_armed = False
                 self.has_ball = False
                 self.neck_down_pending = True
                 self.turn_after_shoot = True
@@ -722,6 +793,17 @@ class MainDecision(Node):
                 self.shoot_in_progress = True
                 self.shoot_motion_started = False
                 self.MotionCommand()
+                return
+
+            # 공을 들고 골대가 일시적으로 보이지 않아도 BallMode를
+            # 유지한다. status=99/45를 모션 0으로 잘못 발행하지 않고
+            # 새 골대 결과를 기다린다.
+            if self.ball_status in (Ball.Ball_None, Ball.Ball_Lost):
+                self.get_logger().info(
+                    "has_ball=true: BallMode를 유지하며 골대 재검출을 "
+                    "기다립니다."
+                )
+                self._reset_vision_decision_cycle()
                 return
 
             else:

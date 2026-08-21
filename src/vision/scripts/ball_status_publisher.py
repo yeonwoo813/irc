@@ -79,8 +79,8 @@ class BallDecision:
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
         self.webcam_pick_y_max_px = 78.0
-        self.webcam_pick_x_min_px = -40.0
-        self.webcam_pick_x_max_px = 35.0
+        self.webcam_pick_x_min_px = -38.0
+        self.webcam_pick_x_max_px = 33.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
         # 공을 잡고 있고 골대가 120cm 이내이면 골대 기준으로 판단한다.
@@ -314,6 +314,7 @@ class BallStatusPublisher:
 
         if command == BallStatus.Pick_Ready:
             self.pick_command_seen = True
+            self.ball_in_hand = True  # TEST ONLY
             return
 
         # MainDecision은 Pick 모션이 끝난 뒤 CheckBall()을 실행한
@@ -443,6 +444,10 @@ class BallStatusPublisher:
             msg.x_distance_px = float(webcam_ball_x_distance or 0.0)
         if hasattr(msg, 'y_distance_px'):
             msg.y_distance_px = float(webcam_ball_y_distance or 0.0)
+        if hasattr(msg, 'goal_distance_cm'):
+            msg.goal_distance_cm = float(
+                realsense_goal_distance_cm or 0.0
+            )
 
         self.ball_pub.publish(msg)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""공/허들/후프 디버그 영상 중 현재 검출된 화면 하나를 선택한다."""
+"""공/허들/후프 디버그 영상 중 현재 활성화된 화면 하나를 선택한다."""
 
 import json
 import time
@@ -10,9 +10,14 @@ import cv2
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 
 class RealSenseDebugSelector(Node):
@@ -31,6 +36,8 @@ class RealSenseDebugSelector(Node):
         self.declare_parameter("ball_state_topic", "/ball/vision_state")
         self.declare_parameter("hurdle_state_topic", "/hurdle/vision_state")
         self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
+        self.declare_parameter("ball_active_topic", "/vision/ball_active")
+        self.declare_parameter("hoop_active_topic", "/vision/hoop_active")
         self.declare_parameter(
             "output_topic",
             "/vision/realsense_debug_image",
@@ -51,6 +58,10 @@ class RealSenseDebugSelector(Node):
         self.ball_detected = False
         self.hurdle_detected = False
         self.hoop_detected = False
+        # None means that the decision node has not announced a mode yet.
+        # In that brief startup state, any incoming debug stream may be shown.
+        self.ball_enabled: Optional[bool] = None
+        self.hoop_enabled: Optional[bool] = None
         self.ball_state_time = 0.0
         self.hurdle_state_time = 0.0
         self.hoop_state_time = 0.0
@@ -98,6 +109,26 @@ class RealSenseDebugSelector(Node):
             str(self.get_parameter("hoop_state_topic").value),
             self.cb_hoop_state,
             10,
+        )
+        # main_decision publishes these as transient-local values. Matching
+        # that durability also restores the current mode after this selector
+        # is restarted independently.
+        vision_mode_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("ball_active_topic").value),
+            self.cb_ball_active,
+            vision_mode_qos,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("hoop_active_topic").value),
+            self.cb_hoop_active,
+            vision_mode_qos,
         )
 
         self.get_logger().info(
@@ -149,25 +180,32 @@ class RealSenseDebugSelector(Node):
         self.hoop_detected = bool(state.get("detected", False))
         self.hoop_state_time = time.monotonic()
 
+    def cb_ball_active(self, msg: Bool) -> None:
+        self.ball_enabled = bool(msg.data)
+        if not self.ball_enabled:
+            # Do not let an image from the previous match phase block the
+            # next detector's default stream.
+            self.latest_ball_image = None
+
+    def cb_hoop_active(self, msg: Bool) -> None:
+        self.hoop_enabled = bool(msg.data)
+        if not self.hoop_enabled:
+            self.latest_hoop_image = None
+
     def _active_source(self) -> str:
+        # Select the detector that is running, even while it currently has no
+        # detection. Detection state is not an activity signal: using it here
+        # made the window retain the last ball frame after switching to hoop.
+        if self.hoop_enabled is True:
+            return "hoop"
+        if self.ball_enabled is True:
+            return "ball"
+
         now = time.monotonic()
-        ball_active = bool(
-            self.ball_detected
-            and now - self.ball_state_time <= self.state_timeout_sec
-        )
         hurdle_active = bool(
             self.hurdle_detected
             and now - self.hurdle_state_time <= self.state_timeout_sec
         )
-        hoop_active = bool(
-            self.hoop_detected
-            and now - self.hoop_state_time <= self.state_timeout_sec
-        )
-
-        if hoop_active:
-            return "hoop"
-        if ball_active:
-            return "ball"
         if hurdle_active:
             return "hurdle"
         return "default"
@@ -181,21 +219,13 @@ class RealSenseDebugSelector(Node):
     def cb_hurdle_image(self, msg: Image) -> None:
         self.latest_hurdle_image = msg
         source = self._active_source()
-        if source == "hurdle":
-            self._publish_and_show(msg)
-        elif source == "default" and self.latest_ball_image is None:
+        if source in {"hurdle", "default"}:
             self._publish_and_show(msg)
 
     def cb_hoop_image(self, msg: Image) -> None:
         self.latest_hoop_image = msg
         source = self._active_source()
-        if source == "hoop":
-            self._publish_and_show(msg)
-        elif (
-            source == "default"
-            and self.latest_ball_image is None
-            and self.latest_hurdle_image is None
-        ):
+        if source in {"hoop", "default"}:
             self._publish_and_show(msg)
 
     def destroy_node(self):
