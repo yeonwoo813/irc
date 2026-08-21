@@ -40,10 +40,18 @@ def _make_harness():
         shoot_fresh_vision_active=False,
         shoot_fresh_vision_armed=True,
         shoot_fresh_vision_distance_cm=70.0,
+        goal_lost_timeout_sec=0.5,
+        goal_last_seen_time=None,
+        goal_loss_waiting=False,
     )
     harness.logger = _Logger()
     harness.decision_count = 0
     harness.get_logger = lambda: harness.logger
+    harness._now_seconds = lambda: 10.0
+    harness._reset_goal_loss_state = MethodType(
+        MainDecision._reset_goal_loss_state,
+        harness,
+    )
 
     def record_decision():
         harness.decision_count += 1
@@ -356,9 +364,10 @@ def test_latched_hurdle_mode_cannot_be_preempted_by_ball_detection():
     assert harness.selected_mode == "hurdle"
 
 
-def test_has_ball_keeps_ball_mode_when_goal_is_temporarily_missing():
+def _make_goal_grace_harness(now_seconds):
     harness = SimpleNamespace(
         motion_ready=True,
+        motion_end=True,
         line_data=True,
         ball_data=True,
         hurdle_data=True,
@@ -369,50 +378,60 @@ def test_has_ball_keeps_ball_mode_when_goal_is_temporarily_missing():
         back_to_walk_after_pick=False,
         turn_after_shoot=False,
         ball_status=Ball.Ball_None,
-        line_status=99,
+        line_status=Motion.Forward_4step,
         lost_step=0,
+        goal_last_seen_time=10.0,
+        goal_loss_waiting=False,
+        goal_lost_timeout_sec=0.5,
+        current_mode="BallMode",
+        line_buffer=deque([1, 1, 1], maxlen=5),
+        ball_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_ready_buffer=deque([False, False, False], maxlen=5),
     )
     harness.logger = _Logger()
     harness.get_logger = lambda: harness.logger
+    harness._now_seconds = lambda: now_seconds
     harness._hold_BallMode = lambda: False
     harness._ball_status_is_detected = MainDecision._ball_status_is_detected
+    harness._reset_goal_loss_state = MethodType(
+        MainDecision._reset_goal_loss_state,
+        harness,
+    )
+    harness._reset_vision_decision_cycle = MethodType(
+        MainDecision._reset_vision_decision_cycle,
+        harness,
+    )
+    harness._hold_goal_BallMode = MethodType(
+        MainDecision._hold_goal_BallMode,
+        harness,
+    )
     harness.selected_mode = None
     harness.HurdleMode = lambda: setattr(harness, "selected_mode", "hurdle")
     harness.BallMode = lambda: setattr(harness, "selected_mode", "ball")
     harness.LostMode = lambda: setattr(harness, "selected_mode", "lost")
     harness.LineTracking = lambda: setattr(harness, "selected_mode", "line")
+    return harness
+
+
+def test_goal_loss_under_half_second_holds_ball_mode():
+    harness = _make_goal_grace_harness(now_seconds=10.499)
 
     MainDecision.Decision(harness)
 
-    assert harness.selected_mode == "ball"
-
-
-def test_has_ball_waits_for_goal_without_publishing_motion_zero():
-    harness = SimpleNamespace(
-        current_mode="LineTrackingMode",
-        pick_done=False,
-        turn_after_pick=False,
-        neck_down_pending=False,
-        turn_after_shoot=False,
-        has_ball=True,
-        ball_status=Ball.Ball_None,
-    )
-    harness.logger = _Logger()
-    harness.get_logger = lambda: harness.logger
-    harness.commands = []
-    harness.reset_count = 0
-    harness.MotionCommand = lambda: harness.commands.append(harness.status)
-    harness._reset_vision_decision_cycle = lambda: setattr(
-        harness,
-        "reset_count",
-        harness.reset_count + 1,
-    )
-
-    MainDecision.BallMode(harness)
-
+    assert harness.selected_mode is None
     assert harness.current_mode == "BallMode"
-    assert harness.commands == []
-    assert harness.reset_count == 1
+    assert harness.goal_loss_waiting is True
+
+
+def test_goal_loss_at_half_second_releases_to_previous_line_logic():
+    harness = _make_goal_grace_harness(now_seconds=10.5)
+
+    MainDecision.Decision(harness)
+
+    assert harness.selected_mode == "line"
+    assert harness.goal_last_seen_time is None
+    assert harness.goal_loss_waiting is False
 
 
 def test_hurdle_ready_uses_majority_instead_of_latest_frame():
@@ -708,12 +727,20 @@ def _make_post_pick_harness(ball_in_hand):
         backward_after_pick=False,
         ball_in_hand=ball_in_hand,
         has_ball=False,
+        goal_last_seen_time=None,
+        goal_loss_waiting=False,
     )
     harness.logger = _Logger()
     harness.get_logger = lambda: harness.logger
     harness.commands = []
     harness.turn_after_pick_calls = 0
     harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness._now_seconds = lambda: 20.0
+    harness._ball_status_is_detected = MainDecision._ball_status_is_detected
+    harness._reset_goal_loss_state = MethodType(
+        MainDecision._reset_goal_loss_state,
+        harness,
+    )
     harness.CheckBall = MethodType(MainDecision.CheckBall, harness)
 
     def record_turn_after_pick():
@@ -729,6 +756,7 @@ def test_successful_pick_runs_neck_up_then_backward_then_turn():
     MainDecision.BallMode(harness)
     assert harness.commands == [Motion.Neck_Up]
     assert harness.backward_after_pick is True
+    assert harness.goal_last_seen_time == 20.0
 
     MainDecision.BallMode(harness)
     assert harness.commands == [Motion.Neck_Up, Motion.Backward_half]
@@ -744,6 +772,7 @@ def test_failed_pick_runs_backward_then_turn_without_neck_up():
     MainDecision.BallMode(harness)
     assert harness.commands == [Motion.Backward_half]
     assert harness.backward_after_pick is False
+    assert harness.goal_last_seen_time is None
 
     MainDecision.BallMode(harness)
     assert harness.turn_after_pick_calls == 1
@@ -764,10 +793,16 @@ def test_confirmed_ball_is_not_checked_again_before_shoot():
         turn_count=3,
         shoot_fresh_vision_active=True,
         shoot_fresh_vision_armed=True,
+        goal_last_seen_time=12.0,
+        goal_loss_waiting=True,
     )
     harness.commands = []
     harness.check_ball_calls = 0
     harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness._reset_goal_loss_state = MethodType(
+        MainDecision._reset_goal_loss_state,
+        harness,
+    )
 
     def record_check_ball():
         harness.check_ball_calls += 1
@@ -803,12 +838,21 @@ def test_shoot_disarms_fresh_vision_until_next_successful_pick():
         shoot_fresh_vision_active=True,
         shoot_fresh_vision_armed=True,
         shoot_fresh_vision_distance_cm=70.0,
+        goal_lost_timeout_sec=0.5,
+        goal_last_seen_time=15.0,
+        goal_loss_waiting=True,
         motion_ready=False,
     )
     harness.logger = _Logger()
     harness.get_logger = lambda: harness.logger
     harness.commands = []
     harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness._now_seconds = lambda: 20.0
+    harness._ball_status_is_detected = MainDecision._ball_status_is_detected
+    harness._reset_goal_loss_state = MethodType(
+        MainDecision._reset_goal_loss_state,
+        harness,
+    )
 
     MainDecision.BallMode(harness)
 

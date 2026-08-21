@@ -1,6 +1,7 @@
+from collections import deque
 from types import SimpleNamespace
 
-from decision.main_decision import MainDecision
+from decision.main_decision import MainDecision, Motion
 
 
 class _Logger:
@@ -29,6 +30,15 @@ def _activity_harness(ball_active=True, hoop_active=False):
         ball_active_pub=_Publisher("ball", events),
         hoop_active_pub=_Publisher("hoop", events),
         get_logger=lambda: logger,
+        goal_last_seen_time=None,
+        goal_loss_waiting=False,
+    )
+    harness._now_seconds = lambda: 10.0
+    harness._reset_goal_loss_state = lambda: (
+        MainDecision._reset_goal_loss_state(harness)
+    )
+    harness._finish_turn_after_shoot = lambda reason: (
+        MainDecision._finish_turn_after_shoot(harness, reason)
     )
     return harness, events, logger
 
@@ -83,7 +93,7 @@ def test_pick_result_selects_the_matching_detector():
     assert failed_events == [("hoop", False), ("ball", True)]
 
 
-def test_shoot_completion_reenables_ball_detection():
+def test_shoot_completion_keeps_ball_detection_disabled():
     harness, events, logger = _activity_harness(
         ball_active=False,
         hoop_active=True,
@@ -109,8 +119,51 @@ def test_shoot_completion_reenables_ball_detection():
     )
     assert harness.shoot_in_progress is False
     assert harness.shoot_motion_started is False
-    assert events == [("hoop", False), ("ball", True)]
+    assert events == [("hoop", False)]
+    assert harness.ball_vision_active is False
+    assert harness.hoop_vision_active is False
     assert any(
-        "shoot motion completed" in message
+        "wait for post-shoot turn" in message
         for message in logger.messages
     )
+
+
+def test_post_shoot_turn_completion_clears_buffer_then_enables_ball():
+    harness, events, _ = _activity_harness(
+        ball_active=False,
+        hoop_active=False,
+    )
+    harness.turn_after_shoot = True
+    harness.turn_count = 0
+    harness.goal_count = 0
+    harness.line_status = 99
+    harness.ball_data = True
+    harness.ball_buffer = deque([32, 32, 32], maxlen=5)
+    harness.commands = []
+    harness.line_tracking_calls = 0
+    harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness.LineTracking = lambda: setattr(
+        harness,
+        "line_tracking_calls",
+        harness.line_tracking_calls + 1,
+    )
+
+    # 첫 호출에서는 강제회전만 실행하고 공 검출기는 계속 꺼 둔다.
+    MainDecision.TurnAfterShoot(harness)
+    assert harness.commands == [Motion.Right_Turn_Afterpick]
+    assert harness.turn_count == 1
+    assert events == []
+    assert list(harness.ball_buffer) == [32, 32, 32]
+
+    # 회전 후 라인을 찾은 시점에 기존 결과를 지운 뒤 공 검출을 켠다.
+    harness.line_status = Motion.Forward_4step
+    MainDecision.TurnAfterShoot(harness)
+
+    assert harness.turn_after_shoot is False
+    assert harness.turn_count == 0
+    assert harness.ball_data is False
+    assert list(harness.ball_buffer) == []
+    assert events == [("ball", True)]
+    assert harness.ball_vision_active is True
+    assert harness.hoop_vision_active is False
+    assert harness.line_tracking_calls == 1
