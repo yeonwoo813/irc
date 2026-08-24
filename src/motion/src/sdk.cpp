@@ -1420,7 +1420,7 @@ void SDK_Motion::define_motions()
         0.04,
         0.04,
         0.04,
-        0.5
+        1.0
     };
 
     motion_return_default.blends =

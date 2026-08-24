@@ -1,11 +1,11 @@
-version: 3
+version: 4
 profiles:
   ball:
-    h_low: 6
-    h_high: 23
-    s_low: 95
+    h_low: 4
+    h_high: 24
+    s_low: 49
     s_high: 255
-    v_low: 117
+    v_low: 103
     v_high: 255
     depth_min_mm: 100
     depth_max_mm: 6000
@@ -19,7 +19,7 @@ profiles:
     s_low: 0
     s_high: 255
     v_low: 0
-    v_high: 132
+    v_high: 126
     depth_min_mm: 100
     depth_max_mm: 6000
     blur_size: 3
@@ -27,24 +27,37 @@ profiles:
     min_area: 120
     ball_circularity_min: 0.45
   floor:
-    h_low: 175
-    h_high: 10
-    s_low: 41
-    s_high: 253
-    v_low: 72
-    v_high: 255
+    h_low: 169
+    h_high: 7
+    s_low: 36
+    s_high: 162
+    v_low: 66
+    v_high: 164
     depth_min_mm: 100
     depth_max_mm: 6000
     blur_size: 3
     morph_size: 5
     min_area: 120
     ball_circularity_min: 0.45
-  hoop:
-    h_low: 8
-    h_high: 60
-    s_low: 60
-    s_high: 255
-    v_low: 20
+  hoop_red:
+    h_low: 174
+    h_high: 5
+    s_low: 149
+    s_high: 226
+    v_low: 107
+    v_high: 255
+    depth_min_mm: 100
+    depth_max_mm: 6000
+    blur_size: 3
+    morph_size: 5
+    min_area: 250
+    ball_circularity_min: 0.45
+  hoop_white:
+    h_low: 0
+    h_high: 179
+    s_low: 0
+    s_high: 23
+    v_low: 162
     v_high: 255
     depth_min_mm: 100
     depth_max_mm: 6000
@@ -65,4 +78,4 @@ detector:
   edge_support_min_visible_fraction: 0.12
 metadata:
   note: Latest venue calibration. Updated by realsense_hsv_calibrator.py.
-  last_saved_unix: 1787228586.1313004
+  last_saved_unix: 1787573096.6494894

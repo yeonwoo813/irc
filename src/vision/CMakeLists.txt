@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
@@ -26,16 +27,8 @@ if(BUILD_TESTING)
     test/test_ball_detector_core.py
   )
   ament_add_pytest_test(
-    test_ball_status_publisher
-    test/test_ball_status_publisher.py
-  )
-  ament_add_pytest_test(
-    test_hurdle_status_publisher
-    test/test_hurdle_status_publisher.py
-  )
-  ament_add_pytest_test(
-    test_yolo_motion_overlay
-    test/test_yolo_motion_overlay.py
+    test_hoop_vision_geometry
+    test/test_hoop_vision_geometry.py
   )
   ament_add_pytest_test(
     test_detector_activation
@@ -44,6 +37,10 @@ if(BUILD_TESTING)
   ament_add_pytest_test(
     test_realsense_debug_selector
     test/test_realsense_debug_selector.py
+  )
+  ament_add_pytest_test(
+    test_hoop_hsv_config
+    test/test_hoop_hsv_config.py
   )
 endif()
 

@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -65,6 +66,12 @@ class LineDecision:
         self.move_distance = 90.0
         self.curve_distance = 100.0
 
+        # 직선에서 거리와 각도가 서로 반대 방향을 가리키는 특수
+        # 상황에만 조향각을 사용한다. 평소에는 기존 거리 우선 로직을
+        # 유지하고, 거리 보정은 방향 충돌을 완화하는 용도로 제한한다.
+        self.straight_distance_angle_scale_px = 600.0
+        self.straight_distance_angle_limit = 10.0
+
 
     def decide(self, features: LineFeatures) -> Tuple[int, float]:
         if features.point_count <= 0:
@@ -75,41 +82,95 @@ class LineDecision:
             return self._status_from_follow_angle(features.follow_angle)
 
         # 점 3개는 일반 직선 상황이다.
-        # 라인이 중심선에서 멀면 각도보다 거리 보정을 우선한다.
         if features.point_count == 3:
+            return self._status_from_straight_line(
+                features.line_angle,
+                features.line_distance,
+            )
+
+        # 점 4개 이상은 먼저 이차함수의 a값으로 직선과 곡선을 구분한다.
+        curve_a = features.curve_a
+        is_curve = curve_a is not None and abs(curve_a) > self.curve_a
+
+        # 곡선 구간의 기존 거리 우선 및 접선 각도 판단은 유지한다.
+        if is_curve:
             distance = features.line_distance
             if (
                 distance is not None
-                and abs(distance) >= self.move_distance
+                and abs(distance) >= self.curve_distance
             ):
                 if distance < 0:
                     return LineStatus.Left_Half_Forward, 0.0
                 return LineStatus.Right_Half_Forward, 0.0
-            return self._status_from_line_angle(features.line_angle)
+            return self._status_from_curve_angle(features.tangent_angle)
 
-        # 점 4개 이상은 먼저 이차함수의 a값으로 직선과 곡선을 구분한다.
-        # 곡선은 curve_distance, 직선은 move_distance를 거리 기준으로 사용한다.
-        curve_a = features.curve_a
-        is_curve = curve_a is not None and abs(curve_a) > self.curve_a
-        distance_limit = (
-            self.curve_distance if is_curve else self.move_distance
+        return self._status_from_straight_line(
+            features.line_angle,
+            features.line_distance,
         )
 
-        distance = features.line_distance
+    def _status_from_straight_line(
+        self,
+        line_angle: Optional[float],
+        line_distance: Optional[float],
+    ) -> Tuple[int, float]:
+        """Use steering only when straight-line distance and angle conflict."""
+        has_direction_conflict = bool(
+            line_angle is not None
+            and line_distance is not None
+            and abs(line_distance) >= self.move_distance
+            and abs(line_angle) >= self.forward_angle
+            and line_distance * line_angle < 0.0
+        )
+        if has_direction_conflict:
+            return self._status_from_conflicting_straight_errors(
+                line_angle,
+                line_distance,
+            )
+
+        # 기존 직선 로직: 중심에서 90px 이상 벗어나면 거리 방향의
+        # 반보행을 우선하고, 그 안에서는 원래 라인 각도를 사용한다.
         if (
-            distance is not None
-            and abs(distance) >= distance_limit
+            line_distance is not None
+            and abs(line_distance) >= self.move_distance
         ):
-            if distance < 0:
+            if line_distance < 0.0:
                 return LineStatus.Left_Half_Forward, 0.0
             return LineStatus.Right_Half_Forward, 0.0
 
-        # 거리 보정이 필요하지 않은 곡선은 접선 각도로 판단한다.
-        if is_curve:
-            return self._status_from_curve_angle(features.tangent_angle)
+        return self._status_from_line_angle(line_angle)
 
-        # 중심선과 가까우면 직선 각도를 기준으로 판단한다.
-        return self._status_from_line_angle(features.line_angle)
+    def _status_from_conflicting_straight_errors(
+        self,
+        line_angle: float,
+        line_distance: float,
+    ) -> Tuple[int, float]:
+        """Combine only meaningful, opposite straight-line errors."""
+
+        distance_angle = math.degrees(
+            math.atan(
+                line_distance
+                / self.straight_distance_angle_scale_px
+            )
+        )
+        distance_angle = max(
+            -self.straight_distance_angle_limit,
+            min(self.straight_distance_angle_limit, distance_angle),
+        )
+        steering_angle = line_angle + distance_angle
+        status, angle = self._status_from_line_angle(steering_angle)
+
+        # 거리 보정만으로 반보행이 제자리 회전으로 승격되지 않게 한다.
+        # 제자리 회전은 원래 라인 각도도 회전 기준을 넘었을 때만 허용한다.
+        if (
+            status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
+            and abs(line_angle) <= self.turn_angle
+        ):
+            if steering_angle < 0.0:
+                return LineStatus.Left_Half_Forward, abs(steering_angle)
+            return LineStatus.Right_Half_Forward, abs(steering_angle)
+
+        return status, angle
 
     def _status_from_follow_angle(self, angle: Optional[float]) -> Tuple[int, float]:
         if angle is None:

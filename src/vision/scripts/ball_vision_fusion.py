@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Ball Vision Fusion Node.
+공 비전 융합 노드.
 
 역할
 1. RealSense color + aligned depth 영상에서 OpenCV로 주황색 공을 직접 검출한다.
@@ -23,6 +23,8 @@ Ball Vision Fusion Node.
 - ball_result
 - /ball/vision_state
 - /ball/realsense_debug_image
+- /vision/ball_active
+- /vision/hoop_active
 
 주의
 - OpenCV HSV 값은 경기장 조명과 공 색상에 맞게 반드시 조정해야 한다.
@@ -94,7 +96,9 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
         self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
         self.declare_parameter("active_topic", "/vision/ball_active")
+        self.declare_parameter("hoop_active_topic", "/vision/hoop_active")
         self.declare_parameter("active_on_start", True)
+        self.declare_parameter("manage_activity_from_ball_in_hand", True)
         self.declare_parameter(
             "raw_ball_in_hand_topic",
             "/raw_ball_in_hand",
@@ -251,6 +255,12 @@ class BallVisionFusionNode(Node):
             self.get_parameter("hoop_state_topic").value
         )
         self.active_topic = str(self.get_parameter("active_topic").value)
+        self.hoop_active_topic = str(
+            self.get_parameter("hoop_active_topic").value
+        )
+        self.manage_activity_from_ball_in_hand = bool(
+            self.get_parameter("manage_activity_from_ball_in_hand").value
+        )
         self.raw_ball_in_hand_topic = str(
             self.get_parameter("raw_ball_in_hand_topic").value
         )
@@ -477,17 +487,25 @@ class BallVisionFusionNode(Node):
         self.ball_detection_active = bool(
             self.get_parameter("active_on_start").value
         )
+        self.managed_hoop_active: Optional[bool] = None
+        self.image_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         # =========================================================
         # ROS I/O
         # =========================================================
-        # inactive일 때 대용량 영상이 Python 프로세스로 전달되지 않도록
-        # RealSense 구독 자체를 경기 단계에 맞춰 생성/해제한다.
+        # RealSense 구독과 synchronizer는 프로세스 수명 동안 유지한다.
+        # 모드 전환 때 DDS 구독을 삭제/재생성하면 첫 프레임까지 공백이
+        # 생기거나 message_filters가 다시 채워지는 동안 화면이 멈출 수 있다.
+        # 비활성 모드에서는 콜백 초입에서 즉시 반환해 OpenCV 연산만 쉰다.
         self.rs_color_sub = None
         self.rs_depth_sub = None
         self.rs_sync = None
 
-        active_qos = QoSProfile(
+        self.activity_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -496,7 +514,17 @@ class BallVisionFusionNode(Node):
             Bool,
             self.active_topic,
             self.cb_ball_active,
-            active_qos,
+            self.activity_qos,
+        )
+        self.pub_ball_active = self.create_publisher(
+            Bool,
+            self.active_topic,
+            self.activity_qos,
+        )
+        self.pub_hoop_active = self.create_publisher(
+            Bool,
+            self.hoop_active_topic,
+            self.activity_qos,
         )
 
         self.sub_camera_info = self.create_subscription(
@@ -529,6 +557,9 @@ class BallVisionFusionNode(Node):
             topic_name=self.ball_result_topic,
         )
 
+        if self.manage_activity_from_ball_in_hand:
+            self._set_vision_mode_from_ball_in_hand(False, force=True)
+
         self.pub_vision_state = self.create_publisher(
             String,
             self.vision_state_topic,
@@ -537,7 +568,7 @@ class BallVisionFusionNode(Node):
         self.pub_realsense_debug = self.create_publisher(
             Image,
             self.realsense_debug_image_topic,
-            10,
+            self.image_qos,
         )
 
         timer_period = 1.0 / max(self.publish_hz, 1.0)
@@ -546,8 +577,7 @@ class BallVisionFusionNode(Node):
             self.publish_ball_features,
         )
 
-        if self.ball_detection_active:
-            self._start_ball_image_subscriptions()
+        self._start_ball_image_subscriptions()
 
         self.get_logger().info("BallVisionFusionNode started.")
         self.get_logger().info(
@@ -571,7 +601,7 @@ class BallVisionFusionNode(Node):
         )
 
     def _load_hsv_defaults(self, path: Path) -> Dict[str, Any]:
-        """Read the last accepted ball/support/floor calibration at startup."""
+        """시작할 때 마지막으로 확정한 공·받침대·바닥 보정값을 읽는다."""
         fallback: Dict[str, Any] = {
             "h_low": 8,
             "h_high": 60,
@@ -793,7 +823,7 @@ class BallVisionFusionNode(Node):
         return SetParametersResult(successful=True)
 
     # =============================================================
-    # 경기 단계별 공 영상 구독
+    # 프로세스 수명 동안 유지하는 공 영상 구독
     # =============================================================
     def _start_ball_image_subscriptions(self) -> None:
         if self.rs_color_sub is not None or self.rs_depth_sub is not None:
@@ -803,11 +833,13 @@ class BallVisionFusionNode(Node):
             self,
             Image,
             self.realsense_color_topic,
+            qos_profile=self.image_qos,
         )
         self.rs_depth_sub = Subscriber(
             self,
             Image,
             self.realsense_depth_topic,
+            qos_profile=self.image_qos,
         )
         self.rs_sync = ApproximateTimeSynchronizer(
             [self.rs_color_sub, self.rs_depth_sub],
@@ -815,16 +847,6 @@ class BallVisionFusionNode(Node):
             slop=0.1,
         )
         self.rs_sync.registerCallback(self.cb_realsense_images)
-
-    def _stop_ball_image_subscriptions(self) -> None:
-        for subscriber in (self.rs_color_sub, self.rs_depth_sub):
-            ros_subscription = getattr(subscriber, "sub", None)
-            if ros_subscription is not None:
-                self.destroy_subscription(ros_subscription)
-
-        self.rs_sync = None
-        self.rs_color_sub = None
-        self.rs_depth_sub = None
 
     def _clear_ball_detection_state(self) -> None:
         self.latest_realsense = None
@@ -839,22 +861,68 @@ class BallVisionFusionNode(Node):
         if requested == self.ball_detection_active:
             return
 
-        # 먼저 상태를 바꿔 이미 큐에 들어온 콜백도 즉시 반환하게 한다.
+        # 구독과 synchronizer는 그대로 두고 처리 플래그만 바꾼다.
+        # 이미 큐에 들어온 콜백도 초입의 active 검사에서 즉시 반환한다.
         self.ball_detection_active = requested
         self._clear_ball_detection_state()
         if requested:
             self.ball_status_publisher._reset_webcam_detection_cycle()
-            self._start_ball_image_subscriptions()
-        else:
-            self._stop_ball_image_subscriptions()
 
         self.get_logger().info(
-            "Ball image detection switched "
+            "Ball image processing switched "
             f"{'ON' if requested else 'OFF'}"
         )
 
+    def _set_vision_mode_from_ball_in_hand(
+        self,
+        ball_in_hand: bool,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """vision 내부에서 공과 hoop 처리 모드를 전환한다.
+
+        RealSense 카메라와 두 동기화 구독은 계속 유지한다. 확정된 공 소유
+        상태에 맞는 OpenCV 콜백만 활성화하며, 두 검출기가 전환 순간 함께
+        실행되지 않도록 항상 OFF를 먼저 발행하고 ON을 나중에 발행한다.
+        """
+        if not getattr(self, "manage_activity_from_ball_in_hand", True):
+            return False
+
+        hoop_active = bool(ball_in_hand)
+        previous = getattr(self, "managed_hoop_active", None)
+        if previous == hoop_active and not force:
+            return False
+
+        ball_active = not hoop_active
+        ball_pub = getattr(self, "pub_ball_active", None)
+        hoop_pub = getattr(self, "pub_hoop_active", None)
+
+        if hoop_active:
+            # 공 검출 OFF → hoop 검출 ON
+            self.cb_ball_active(Bool(data=False))
+            if ball_pub is not None:
+                ball_pub.publish(Bool(data=False))
+            if hoop_pub is not None:
+                hoop_pub.publish(Bool(data=True))
+        else:
+            # hoop 검출 OFF → 공 검출 ON
+            if hoop_pub is not None:
+                hoop_pub.publish(Bool(data=False))
+            self.cb_ball_active(Bool(data=True))
+            if ball_pub is not None:
+                ball_pub.publish(Bool(data=True))
+
+        self.managed_hoop_active = hoop_active
+        self.get_logger().info(
+            "[VisionMode] "
+            f"ball={'ON' if ball_active else 'OFF'}, "
+            f"hoop={'ON' if hoop_active else 'OFF'} "
+            "(latched ball_in_hand)"
+        )
+        return True
+
     # =============================================================
-    # CameraInfo
+    # 카메라 내부 파라미터
     # =============================================================
     def cb_camera_info(self, msg: CameraInfo) -> None:
         if len(msg.k) < 9:
@@ -1058,7 +1126,7 @@ class BallVisionFusionNode(Node):
         frame_w: int,
         frame_h: int,
     ) -> Optional[Dict[str, Any]]:
-        """Find a physically plausible orange ball on its black support."""
+        """검은 받침대 위에 있는 물리적으로 타당한 주황색 공을 찾는다."""
         contours, _ = cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,
@@ -1443,7 +1511,7 @@ class BallVisionFusionNode(Node):
         }
 
     # =============================================================
-    # Webcam YOLO
+    # 웹캠 YOLO
     # =============================================================
     def cb_webcam_state(self, msg: String) -> None:
         if not getattr(self, "ball_detection_active", True):
@@ -1744,6 +1812,9 @@ class BallVisionFusionNode(Node):
             self.ball_status_publisher.publish_ball_status(
                 **features
             )
+        )
+        self._set_vision_mode_from_ball_in_hand(
+            self.ball_status_publisher.ball_in_hand
         )
 
         if webcam_valid:

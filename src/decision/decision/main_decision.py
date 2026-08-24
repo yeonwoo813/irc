@@ -85,7 +85,8 @@ class MainDecision(Node):
         self.declare_parameter('test_mode', False)
         self.declare_parameter('ball_lost_timeout_sec', 0.8)
         self.declare_parameter('goal_lost_timeout_sec', 0.5)
-        self.declare_parameter('shoot_fresh_vision_distance_cm', 70.0)
+        self.declare_parameter('shoot_fresh_vision_distance_cm', 80.0)
+        self.declare_parameter('shoot_fresh_vision_settle_sec', 0.5)
         test_mode_param = self.get_parameter('test_mode').value
         if isinstance(test_mode_param, str):
             self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
@@ -104,6 +105,14 @@ class MainDecision(Node):
             float(
                 self.get_parameter(
                     'shoot_fresh_vision_distance_cm'
+                ).value
+            ),
+        )
+        self.shoot_fresh_vision_settle_sec = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'shoot_fresh_vision_settle_sec'
                 ).value
             ),
         )
@@ -170,6 +179,7 @@ class MainDecision(Node):
         # Shoot 발행 후에는 다음 Pick 성공 전까지 재활성화하지 않는다.
         self.shoot_fresh_vision_active = False
         self.shoot_fresh_vision_armed = True
+        self.shoot_fresh_vision_settle_until = 0.0
 
         #hurdle
         self.hurdle_step = 0
@@ -180,7 +190,8 @@ class MainDecision(Node):
         self.hurdle_go_active = False
         self.hurdle_go_started = False
 
-        # 최근 5개의 비전 상태를 저장합니다.
+        # 최근 5개의 비전 상태를 저장하고, line과 BallMode는
+        # 판단 시점의 최근 3개만 다수결에 사용합니다.
         self.line_buffer = deque(maxlen=5)
         self.ball_buffer = deque(maxlen=5)
         self.hurdle_buffer = deque(maxlen=5)
@@ -341,7 +352,8 @@ class MainDecision(Node):
             self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
 
         # 골대 근거리 구간에서는 모션 중 쌓인 ball 결과를 버리고,
-        # motion_end 이후 새로 수신되는 결과 3개를 기다립니다.
+        # motion_end 이후 0.5초간 자세가 안정되기를 기다린 다음
+        # 새로 수신되는 결과 3개를 사용합니다.
         if (
             self.motion_end
             and not was_motion_end
@@ -349,9 +361,22 @@ class MainDecision(Node):
         ):
             self.ball_data = False
             self.ball_buffer.clear()
+            settle_sec = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        'shoot_fresh_vision_settle_sec',
+                        0.5,
+                    )
+                ),
+            )
+            self.shoot_fresh_vision_settle_until = (
+                self._now_seconds() + settle_sec
+            )
             self.get_logger().info(
-                "[ShootFreshVision] motion_end 이후 ball_result를 "
-                "다시 받기 위해 ball_buffer를 초기화합니다."
+                "[ShootFreshVision] motion_end 이후 ball_buffer를 "
+                f"초기화하고 {settle_sec:.1f}초 안정화를 기다립니다."
             )
             return
 
@@ -402,7 +427,7 @@ class MainDecision(Node):
         fresh_vision_distance = getattr(
             self,
             'shoot_fresh_vision_distance_cm',
-            70.0,
+            80.0,
         )
         if (
             not getattr(self, 'shoot_fresh_vision_active', False)
@@ -411,6 +436,24 @@ class MainDecision(Node):
             and 0.0 < self.latest_goal_distance_cm <= fresh_vision_distance
         ):
             self.shoot_fresh_vision_active = True
+            # 모션이 이미 끝난 상태에서 Fresh Vision이 켜진 경우에도
+            # 현재 프레임을 버리고 동일한 안정화 대기를 적용한다.
+            if getattr(self, 'motion_end', False):
+                self.ball_data = False
+                self.ball_buffer.clear()
+                settle_sec = max(
+                    0.0,
+                    float(
+                        getattr(
+                            self,
+                            'shoot_fresh_vision_settle_sec',
+                            0.5,
+                        )
+                    ),
+                )
+                self.shoot_fresh_vision_settle_until = (
+                    self._now_seconds() + settle_sec
+                )
             self.get_logger().info(
                 "[ShootFreshVision] 활성화: "
                 f"goal_distance={self.latest_goal_distance_cm:.1f}cm "
@@ -418,6 +461,11 @@ class MainDecision(Node):
             )
 
         if not self.motion_ready:
+            return
+
+        # Fresh Vision 구간에서는 motion_end 직후 안정화 시간 동안
+        # 들어온 골대 상태를 판단 버퍼에 넣지 않는다.
+        if MainDecision._shoot_fresh_vision_is_settling(self):
             return
 
         # Pick 전에 공이 보이면 마지막 검출 시간을 갱신한다.
@@ -476,6 +524,9 @@ class MainDecision(Node):
         if not self.motion_ready or not self.motion_end:
             return False
 
+        if MainDecision._shoot_fresh_vision_is_settling(self):
+            return False
+
         # 이미 현재 종료 사이클의 판단을 시작했다면 중복 명령을 막습니다.
         if self.line_data and self.ball_data and self.hurdle_data:
             return False
@@ -493,23 +544,53 @@ class MainDecision(Node):
             )
             return False
 
-        # status는 모션 중 저장된 최근 샘플의 다수결을 사용합니다.
-        self.line_status = Counter(
-            self.line_buffer
-        ).most_common(1)[0][0]
+        # 라인은 모션 중 저장된 값 가운데 최근 3개만
+        # 다수결에 사용합니다. 세 상태가 모두 다르면
+        # 현재 자세를 가장 잘 반영하는 최신 상태를 선택합니다.
+        line_votes = list(self.line_buffer)[-3:]
+        voted_status, vote_count = Counter(
+            line_votes
+        ).most_common(1)[0]
+        self.line_status = (
+            line_votes[-1]
+            if vote_count == 1
+            else voted_status
+        )
 
         if self.current_mode == "BallMode":
             ball_votes = list(self.ball_buffer)[-3:]
-            voted_status, vote_count = Counter(
-                ball_votes
-            ).most_common(1)[0]
+            ball_vote_counts = Counter(ball_votes)
 
-            # 최근 3개 상태가 모두 다르면 가장 최근 상태를 선택합니다.
-            self.ball_status = (
-                ball_votes[-1]
-                if vote_count == 1
-                else voted_status
-            )
+            # Pick은 정지 상태의 새 샘플 중 2개 이상이
+            # Pick_Ready일 때만 확정합니다.
+            if ball_vote_counts[Ball.Pick_Ready] >= 2:
+                self.ball_status = Ball.Pick_Ready
+            else:
+                voted_status, vote_count = (
+                    ball_vote_counts.most_common(1)[0]
+                )
+
+                # 1:1:1 가운데 Pick_Ready가 있으면 Pick 경계에서
+                # 흔들린 값일 수 있으므로 명령을 보류합니다. 모션 중
+                # 샘플을 비우고 정지 상태의 새 ball_result 3개를
+                # 다시 받습니다. Pick_Ready가 없는 1:1:1은 기존처럼
+                # 현재 자세를 가장 잘 반영하는 최신값을 선택합니다.
+                if vote_count == 1:
+                    if Ball.Pick_Ready in ball_votes:
+                        self.ball_data = False
+                        self.ball_buffer.clear()
+                        self.get_logger().info(
+                            "[PickVoteDeferred] BallMode 최근 3개가 "
+                            f"Pick_Ready를 포함한 1:1:1입니다: "
+                            f"{ball_votes}. 최신값을 실행하지 않고 "
+                            "ball_buffer를 비운 뒤 정지 상태의 "
+                            "새 샘플 3개를 기다립니다."
+                        )
+                        return False
+
+                    self.ball_status = ball_votes[-1]
+                else:
+                    self.ball_status = voted_status
         else:
             # BallMode가 아니면 기존 다수결 방식을 유지합니다.
             ball_votes = list(self.ball_buffer)
@@ -656,6 +737,7 @@ class MainDecision(Node):
             self.goal_last_seen_time = self._now_seconds()
             self.goal_loss_waiting = False
             self.shoot_fresh_vision_active = False
+            self.shoot_fresh_vision_settle_until = 0.0
             was_fresh_vision_armed = getattr(
                 self,
                 'shoot_fresh_vision_armed',
@@ -673,7 +755,7 @@ class MainDecision(Node):
                 fresh_vision_distance = getattr(
                     self,
                     'shoot_fresh_vision_distance_cm',
-                    70.0,
+                    80.0,
                 )
                 self.get_logger().info(
                     "[ShootFreshVision] 다음 Shoot을 위해 재무장: "
@@ -837,6 +919,7 @@ class MainDecision(Node):
                 #shoot 이후 처리
                 self.shoot_fresh_vision_active = False
                 self.shoot_fresh_vision_armed = False
+                self.shoot_fresh_vision_settle_until = 0.0
                 self.has_ball = False
                 self._reset_goal_loss_state()
                 self.neck_down_pending = True
@@ -1044,6 +1127,17 @@ class MainDecision(Node):
 
     def _now_seconds(self):
         return time.monotonic()
+
+    def _shoot_fresh_vision_is_settling(self):
+        if not getattr(self, 'shoot_fresh_vision_active', False):
+            return False
+        if not getattr(self, 'motion_end', False):
+            return False
+
+        settle_until = float(
+            getattr(self, 'shoot_fresh_vision_settle_until', 0.0)
+        )
+        return self._now_seconds() < settle_until
 
     # 공 없음(99)과 공 놓침(45)이 아닌 공 동작 상태인지 확인
     @staticmethod

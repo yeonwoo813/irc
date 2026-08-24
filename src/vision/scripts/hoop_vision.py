@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RealSense OpenCV Hoop Vision Node
+RealSense OpenCV Hoop 비전 노드
 
 역할
 1. RealSense color + aligned depth 영상을 시간 동기화해 받는다.
@@ -33,11 +33,13 @@ import json
 import math
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Deque, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 import rclpy
+import yaml
 from cv_bridge import CvBridge
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rcl_interfaces.msg import SetParametersResult
@@ -50,6 +52,25 @@ from std_msgs.msg import Bool, String
 class HoopVisionNode(Node):
     def __init__(self) -> None:
         super().__init__("hoop_vision")
+
+        source_config = (
+            Path(__file__).resolve().parent.parent / "config" / "hoop_hsv.yaml"
+        )
+        default_hsv_config = (
+            source_config
+            if source_config.exists()
+            else Path.home()
+            / "irc"
+            / "src"
+            / "vision"
+            / "config"
+            / "hoop_hsv.yaml"
+        )
+        self.declare_parameter("hsv_config_file", str(default_hsv_config))
+        self.hsv_config_path = Path(
+            str(self.get_parameter("hsv_config_file").value)
+        ).expanduser()
+        hsv_defaults = self._load_hsv_defaults(self.hsv_config_path)
 
         # =========================================================
         # ROS 토픽
@@ -65,8 +86,9 @@ class HoopVisionNode(Node):
         self.declare_parameter("detected_topic", "/hoop/detected")
         self.declare_parameter("debug_image_topic", "/hoop/debug_image")
 
-        # active 토픽이 아직 오지 않아도 단독 테스트할 수 있도록 기본 True.
-        self.declare_parameter("active_on_start", True)
+        # 통합 실행에서는 ball_vision_fusion이 현재 모드를 transient-local로
+        # 전달한다. 단독 hoop 테스트만 파라미터로 True를 지정한다.
+        self.declare_parameter("active_on_start", False)
 
         # =========================================================
         # ROI: 기본값은 카메라 화면 전체를 사용한다.
@@ -80,15 +102,15 @@ class HoopVisionNode(Node):
         # HSV 기준
         # OpenCV H 범위는 0~179이며 빨강이 0과 179 양 끝에 걸쳐 있다.
         # =========================================================
-        self.declare_parameter("red_h1_low", 0)
-        self.declare_parameter("red_h1_high", 10)
-        self.declare_parameter("red_h2_low", 160)
-        self.declare_parameter("red_h2_high", 179)
-        self.declare_parameter("red_s_low", 80)
-        self.declare_parameter("red_v_low", 60)
+        self.declare_parameter("red_h1_low", hsv_defaults["red_h1_low"])
+        self.declare_parameter("red_h1_high", hsv_defaults["red_h1_high"])
+        self.declare_parameter("red_h2_low", hsv_defaults["red_h2_low"])
+        self.declare_parameter("red_h2_high", hsv_defaults["red_h2_high"])
+        self.declare_parameter("red_s_low", hsv_defaults["red_s_low"])
+        self.declare_parameter("red_v_low", hsv_defaults["red_v_low"])
 
-        self.declare_parameter("white_s_high", 80)
-        self.declare_parameter("white_v_low", 80)
+        self.declare_parameter("white_s_high", hsv_defaults["white_s_high"])
+        self.declare_parameter("white_v_low", hsv_defaults["white_v_low"])
 
         # =========================================================
         # 후보 형상 및 색 비율 조건
@@ -262,12 +284,18 @@ class HoopVisionNode(Node):
         self.history: Deque[Dict[str, Any]] = deque(
             maxlen=self.smoothing_window
         )
+        self.image_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         # =========================================================
         # ROS I/O
         # =========================================================
-        # inactive일 때 대용량 영상이 Python 프로세스로 전달되지 않도록
-        # RealSense 구독 자체를 경기 단계에 맞춰 생성/해제한다.
+        # RealSense 구독과 synchronizer는 프로세스 수명 동안 유지한다.
+        # 모드 전환 때 구독을 재생성하지 않아 다음 카메라 프레임부터
+        # 즉시 hoop 처리로 넘어갈 수 있게 한다.
         self.color_sub = None
         self.depth_sub = None
         self.sync = None
@@ -295,16 +323,59 @@ class HoopVisionNode(Node):
             Bool, self.detected_topic, 10
         )
         self.debug_pub = self.create_publisher(
-            Image, self.debug_image_topic, 10
+            Image, self.debug_image_topic, self.image_qos
         )
 
-        if self.active:
-            self._start_image_subscriptions()
+        self._start_image_subscriptions()
 
         self.get_logger().info("HoopVisionNode started.")
         self.get_logger().info(f"Color topic: {self.color_topic}")
         self.get_logger().info(f"Aligned depth topic: {self.depth_topic}")
         self.get_logger().info(f"State output: {self.state_topic}")
+
+    def _load_hsv_defaults(self, path: Path) -> Dict[str, int]:
+        fallback = {
+            "red_h1_low": 0,
+            "red_h1_high": 10,
+            "red_h2_low": 160,
+            "red_h2_high": 179,
+            "red_s_low": 80,
+            "red_v_low": 60,
+            "white_s_high": 80,
+            "white_v_low": 80,
+        }
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                payload = yaml.safe_load(file) or {}
+            loaded = payload.get("hoop_vision", {}).get("ros__parameters", {})
+            values = {
+                name: int(loaded.get(name, default))
+                for name, default in fallback.items()
+            }
+            if not (
+                0 <= values["red_h1_low"] <= values["red_h1_high"] <= 179
+                and 0 <= values["red_h2_low"] <= values["red_h2_high"] <= 179
+                and 0 <= values["red_s_low"] <= 255
+                and 0 <= values["red_v_low"] <= 255
+                and 0 <= values["white_s_high"] <= 255
+                and 0 <= values["white_v_low"] <= 255
+            ):
+                raise ValueError("HSV value outside the OpenCV range")
+            self.get_logger().info(
+                "Loaded hoop red/white calibration from "
+                f"{path}: red H={values['red_h1_low']}.."
+                f"{values['red_h1_high']} + {values['red_h2_low']}.."
+                f"{values['red_h2_high']}, S>={values['red_s_low']}, "
+                f"V>={values['red_v_low']}; white "
+                f"S<={values['white_s_high']}, V>={values['white_v_low']}"
+            )
+            return values
+        except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+            self.get_logger().warning(
+                f"Could not load hoop HSV calibration {path}: {exc}; "
+                "using built-in defaults"
+            )
+            return fallback
 
     # =============================================================
     # 파라미터
@@ -437,39 +508,37 @@ class HoopVisionNode(Node):
         if self.color_sub is not None or self.depth_sub is not None:
             return
 
-        self.color_sub = Subscriber(self, Image, self.color_topic)
-        self.depth_sub = Subscriber(self, Image, self.depth_topic)
+        self.color_sub = Subscriber(
+            self,
+            Image,
+            self.color_topic,
+            qos_profile=self.image_qos,
+        )
+        self.depth_sub = Subscriber(
+            self,
+            Image,
+            self.depth_topic,
+            qos_profile=self.image_qos,
+        )
         self.sync = ApproximateTimeSynchronizer(
             [self.color_sub, self.depth_sub],
-            queue_size=5,
+            queue_size=2,
             slop=0.1,
         )
         self.sync.registerCallback(self.image_callback)
-
-    def _stop_image_subscriptions(self) -> None:
-        for subscriber in (self.color_sub, self.depth_sub):
-            ros_subscription = getattr(subscriber, "sub", None)
-            if ros_subscription is not None:
-                self.destroy_subscription(ros_subscription)
-
-        self.sync = None
-        self.color_sub = None
-        self.depth_sub = None
 
     def active_callback(self, msg: Bool) -> None:
         requested = bool(msg.data)
         if requested == self.active:
             return
 
-        # 먼저 상태를 바꿔 이미 큐에 들어온 콜백도 즉시 반환하게 한다.
+        # 구독을 끊지 않고 처리 플래그만 바꾼다. 이 방식은 DDS discovery와
+        # synchronizer 재충전으로 생기던 전환 공백을 피한다.
         self.active = requested
         self.history.clear()
         self.last_detection = None
         self.last_detection_time = None
-        if requested:
-            self._start_image_subscriptions()
-        else:
-            self._stop_image_subscriptions()
+        if not requested:
             self._publish_state(
                 detection=None,
                 process_ms=0.0,
@@ -477,7 +546,7 @@ class HoopVisionNode(Node):
             )
 
         self.get_logger().info(
-            f"Hoop image detection switched {'ON' if requested else 'OFF'}"
+            f"Hoop image processing switched {'ON' if requested else 'OFF'}"
         )
 
     def camera_info_callback(self, msg: CameraInfo) -> None:
