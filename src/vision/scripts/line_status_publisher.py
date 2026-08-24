@@ -56,13 +56,13 @@ class LineDecision:
     def __init__(self):
         #직진, 미세회전, 회전 각도 기준 설정
         self.forward_angle = 7.0
-        self.turn_angle = 20.0
+        self.turn_angle = 22.5
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
         self.curve_a = 1e-4
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
-        self.move_distance = 80.0
+        self.move_distance = 90.0
         self.curve_distance = 100.0
 
 
