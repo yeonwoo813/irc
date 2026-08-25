@@ -9,7 +9,7 @@ class LineStatus:
     Forward_4step = 1
     Left_Half_Forward = 2
     Right_Half_Forward = 3
-    Left_Turn_Half = 4 
+    Left_Turn_Half = 4
     Right_Turn_Half = 5
     Left_Turn = 6
     Right_Turn = 7
@@ -59,6 +59,7 @@ class LineDecision:
         self.forward_angle = 7.0
         self.fine_turn_angle = 22.5
         self.half_turn_angle = 30.0
+        self.large_turn_angle = 45.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
         self.curve_a = 1e-4
@@ -79,12 +80,12 @@ class LineDecision:
         if features.point_count <= 0:
             return LineStatus.Line_Lost, 0.0
 
-        # 점 1~2개에서는 follow_angle의 부호만으로 제자리 회전 방향을 정한다.
-        if features.point_count <= 2:
+        # 점 1개에서는 follow_angle의 부호만으로 제자리 회전 방향을 정한다.
+        if features.point_count == 1:
             return self._status_from_follow_angle(features.follow_angle)
 
-        # 점 3개는 일반 직선 상황이다.
-        if features.point_count == 3:
+        # 점 2~3개는 일반 직선 상황이다.
+        if features.point_count <= 3:
             return self._status_from_straight_line(
                 features.line_angle,
                 features.line_distance,
@@ -150,6 +151,16 @@ class LineDecision:
         # 반보행을 우선하고, 그 안에서는 원래 라인 각도를 사용한다.
         if distance_status is not None:
             return distance_status, 0.0
+
+        if (
+            line_angle is not None
+            and line_distance is not None
+            and abs(line_distance) < self.move_distance
+            and abs(line_angle) >= self.large_turn_angle
+        ):
+            if line_angle < 0.0:
+                return LineStatus.Left_Turn_Curve, abs(line_angle)
+            return LineStatus.Right_Turn_Curve, abs(line_angle)
 
         return angle_status, angle_value
 

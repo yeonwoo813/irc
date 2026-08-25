@@ -124,12 +124,12 @@ class HoopVisionNode(Node):
         self.declare_parameter("side_vertical_end_ratio", 0.75)
 
         self.declare_parameter("red_ratio_min", 0.55)
-        self.declare_parameter("white_inner_ratio_min", 0.50)
+        self.declare_parameter("white_inner_ratio_min", 0.40)
 
         # 일부가 가려져 빨간 테두리가 끊겨도 작은 간격은 후보 생성 단계에서
         # 다시 연결한다. 최종 색 비율은 연결 전 원본 마스크로 검사하므로,
         # 이 값이 곧바로 빨간 픽셀 증거를 부풀리지는 않는다.
-        self.declare_parameter("occlusion_merge_gap_px", 41)
+        self.declare_parameter("occlusion_merge_gap_px", 21)
         # 위/왼쪽/오른쪽 테두리 중 하나가 가려져도 나머지 두 구간과 전체
         # 빨간 비율이 충분하면 백보드로 인정한다.
         self.declare_parameter("min_visible_red_bands", 2)
@@ -153,7 +153,13 @@ class HoopVisionNode(Node):
         # =========================================================
         # 안정화 및 출력
         # =========================================================
+        self.declare_parameter("red_open_kernel_size", 3)
+        self.declare_parameter("red_close_kernel_size", 5)
         self.declare_parameter("morph_kernel_size", 5)
+        self.declare_parameter("confirmation_window_frames", 3)
+        self.declare_parameter("confirmation_required_frames", 2)
+        self.declare_parameter("confirmation_center_tolerance_px", 50.0)
+        self.declare_parameter("confirmation_depth_tolerance_cm", 30.0)
         self.declare_parameter("hold_seconds", 0.5)
         self.declare_parameter("smoothing_window", 5)
         self.declare_parameter("publish_debug_image", True)
@@ -250,6 +256,30 @@ class HoopVisionNode(Node):
             int(self.get_parameter("min_valid_center_depth_pixels").value),
         )
 
+        self.confirmation_window_frames = max(
+            1,
+            int(self.get_parameter("confirmation_window_frames").value),
+        )
+        self.confirmation_required_frames = max(
+            1,
+            min(
+                self.confirmation_window_frames,
+                int(self.get_parameter("confirmation_required_frames").value),
+            ),
+        )
+        self.confirmation_center_tolerance_px = max(
+            0.0,
+            float(
+                self.get_parameter("confirmation_center_tolerance_px").value
+            ),
+        )
+        self.confirmation_depth_tolerance_cm = max(
+            0.0,
+            float(
+                self.get_parameter("confirmation_depth_tolerance_cm").value
+            ),
+        )
+
         self.hold_seconds = max(
             0.0,
             float(self.get_parameter("hold_seconds").value),
@@ -284,6 +314,10 @@ class HoopVisionNode(Node):
         self.history: Deque[Dict[str, Any]] = deque(
             maxlen=self.smoothing_window
         )
+        self.raw_confirmation_history: Deque[Optional[Dict[str, Any]]] = deque(
+            maxlen=self.confirmation_window_frames
+        )
+        self.last_rejection_diagnostic: Dict[str, Any] = {}
         self.image_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -380,13 +414,25 @@ class HoopVisionNode(Node):
     # =============================================================
     # 파라미터
     # =============================================================
-    def _rebuild_kernel(self) -> None:
-        size = max(1, int(self.get_parameter("morph_kernel_size").value))
+    @staticmethod
+    def _morph_kernel(size: int) -> np.ndarray:
+        size = max(1, int(size))
         if size % 2 == 0:
             size += 1
-        self.kernel = cv2.getStructuringElement(
+        return cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
             (size, size),
+        )
+
+    def _rebuild_kernel(self) -> None:
+        self.red_open_kernel = self._morph_kernel(
+            int(self.get_parameter("red_open_kernel_size").value)
+        )
+        self.red_close_kernel = self._morph_kernel(
+            int(self.get_parameter("red_close_kernel_size").value)
+        )
+        self.kernel = self._morph_kernel(
+            int(self.get_parameter("morph_kernel_size").value)
         )
 
     def parameter_callback(self, params) -> SetParametersResult:
@@ -404,6 +450,8 @@ class HoopVisionNode(Node):
             "min_valid_center_depth_pixels",
             "occlusion_merge_gap_px",
             "min_visible_red_bands",
+            "confirmation_window_frames",
+            "confirmation_required_frames",
             "smoothing_window",
             "print_every_n_frames",
         }
@@ -424,6 +472,8 @@ class HoopVisionNode(Node):
             "depth_scale",
             "depth_min_m",
             "depth_max_m",
+            "confirmation_center_tolerance_px",
+            "confirmation_depth_tolerance_cm",
             "hold_seconds",
         }
 
@@ -439,14 +489,12 @@ class HoopVisionNode(Node):
                     self.show_window = bool(param.value)
                 elif param.name == "active_on_start":
                     self.active = bool(param.value)
+                elif param.name == "red_open_kernel_size":
+                    self.red_open_kernel = self._morph_kernel(param.value)
+                elif param.name == "red_close_kernel_size":
+                    self.red_close_kernel = self._morph_kernel(param.value)
                 elif param.name == "morph_kernel_size":
-                    size = max(1, int(param.value))
-                    if size % 2 == 0:
-                        size += 1
-                    self.kernel = cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE,
-                        (size, size),
-                    )
+                    self.kernel = self._morph_kernel(param.value)
         except (TypeError, ValueError) as exc:
             return SetParametersResult(successful=False, reason=str(exc))
 
@@ -485,6 +533,25 @@ class HoopVisionNode(Node):
             1,
             min(3, int(self.min_visible_red_bands)),
         )
+        self.confirmation_window_frames = max(
+            1,
+            int(self.confirmation_window_frames),
+        )
+        self.confirmation_required_frames = max(
+            1,
+            min(
+                self.confirmation_window_frames,
+                int(self.confirmation_required_frames),
+            ),
+        )
+        self.confirmation_center_tolerance_px = max(
+            0.0,
+            float(self.confirmation_center_tolerance_px),
+        )
+        self.confirmation_depth_tolerance_cm = max(
+            0.0,
+            float(self.confirmation_depth_tolerance_cm),
+        )
 
         if not (0.0 <= self.red_band_average_min <= 1.0):
             return SetParametersResult(
@@ -496,6 +563,14 @@ class HoopVisionNode(Node):
         new_window = max(1, int(self.smoothing_window))
         if self.history.maxlen != new_window:
             self.history = deque(list(self.history)[-new_window:], maxlen=new_window)
+
+        if self.raw_confirmation_history.maxlen != self.confirmation_window_frames:
+            self.raw_confirmation_history = deque(
+                list(self.raw_confirmation_history)[
+                    -self.confirmation_window_frames:
+                ],
+                maxlen=self.confirmation_window_frames,
+            )
 
         self.hold_seconds = max(0.0, float(self.hold_seconds))
         self.print_every_n_frames = max(1, int(self.print_every_n_frames))
@@ -536,6 +611,7 @@ class HoopVisionNode(Node):
         # synchronizer 재충전으로 생기던 전환 공백을 피한다.
         self.active = requested
         self.history.clear()
+        self.raw_confirmation_history.clear()
         self.last_detection = None
         self.last_detection_time = None
         if not requested:
@@ -625,6 +701,8 @@ class HoopVisionNode(Node):
             (0, 0, self.white_v_low),
             (179, self.white_s_high, 255),
         )
+        red_hsv_pixels = int(cv2.countNonZero(red_mask))
+        white_hsv_pixels = int(cv2.countNonZero(white_mask))
 
         depth_m = roi_depth * self.depth_scale
         invalid_depth = (
@@ -632,19 +710,18 @@ class HoopVisionNode(Node):
             | (depth_m < self.depth_min_m)
             | (depth_m > self.depth_max_m)
         )
-        # 빨간 후보는 거리 범위로 제한하지만, 흰 내부 마스크는 depth hole 때문에
-        # 색상 픽셀을 지우지 않는다. 내부 depth 유효성은 후보 확정 단계에서 별도로 검사한다.
-        red_mask[invalid_depth] = 0
+        # 빨간 테두리 후보는 HSV 형상을 그대로 사용한다. 경계의 depth hole로
+        # 테두리가 끊기지 않게 하고, depth 범위는 후보 확정 단계에서 검사한다.
 
         red_mask = cv2.morphologyEx(
             red_mask,
             cv2.MORPH_OPEN,
-            self.kernel,
+            self.red_open_kernel,
         )
         red_mask = cv2.morphologyEx(
             red_mask,
             cv2.MORPH_CLOSE,
-            self.kernel,
+            self.red_close_kernel,
         )
         white_mask = cv2.morphologyEx(
             white_mask,
@@ -656,6 +733,8 @@ class HoopVisionNode(Node):
             cv2.MORPH_CLOSE,
             self.kernel,
         )
+        red_final_pixels = int(cv2.countNonZero(red_mask))
+        white_final_pixels = int(cv2.countNonZero(white_mask))
 
         raw_detection = self._find_best_hoop(
             red_mask=red_mask,
@@ -666,11 +745,45 @@ class HoopVisionNode(Node):
             frame_width=frame_w,
             frame_height=frame_h,
         )
+        depth_valid_ratio = (
+            float(np.count_nonzero(~invalid_depth))
+            / float(max(1, invalid_depth.size))
+        )
+        self.last_rejection_diagnostic.update(
+            {
+                "red_hsv_pixels": red_hsv_pixels,
+                "red_final_pixels": red_final_pixels,
+                "white_hsv_pixels": white_hsv_pixels,
+                "white_final_pixels": white_final_pixels,
+                "depth_valid_ratio": depth_valid_ratio,
+            }
+        )
+
+        confirmation_candidate = (
+            dict(raw_detection) if raw_detection is not None else None
+        )
+        self.raw_confirmation_history.append(confirmation_candidate)
+        confirmation_count = self._confirmation_match_count(
+            current=raw_detection,
+            candidates=self.raw_confirmation_history,
+            center_tolerance_px=self.confirmation_center_tolerance_px,
+            depth_tolerance_cm=self.confirmation_depth_tolerance_cm,
+        )
+        confirmed_detection = (
+            raw_detection
+            if raw_detection is not None
+            and confirmation_count >= self.confirmation_required_frames
+            else None
+        )
 
         held_previous = False
-        if raw_detection is not None:
-            self.history.append(raw_detection)
-            smoothed = self._smooth_detection(raw_detection)
+        if confirmed_detection is not None:
+            confirmed_detection["confirmation_count"] = confirmation_count
+            confirmed_detection["confirmation_required_frames"] = (
+                self.confirmation_required_frames
+            )
+            self.history.append(confirmed_detection)
+            smoothed = self._smooth_detection(confirmed_detection)
             self.last_detection = dict(smoothed)
             self.last_detection_time = start_time
             published_detection = smoothed
@@ -705,7 +818,7 @@ class HoopVisionNode(Node):
                 red_mask=red_mask,
                 white_mask=white_mask,
                 detection=published_detection,
-                raw_detected=raw_detection is not None,
+                raw_detected=confirmed_detection is not None,
                 held_previous=held_previous,
                 roi=(x1, y1, x2, y2),
                 process_ms=process_ms,
@@ -722,22 +835,107 @@ class HoopVisionNode(Node):
 
         self.frame_count += 1
         if self.frame_count % self.print_every_n_frames == 0:
-            if published_detection is None:
-                self.get_logger().info(
-                    f"hoop miss | process={process_ms:.1f} ms"
-                )
-            else:
+            if confirmed_detection is not None:
                 self.get_logger().info(
                     "hoop detected "
+                    f"confirm={confirmation_count}/"
+                    f"{self.confirmation_required_frames} "
                     f"dist={published_detection['realsense_goal_distance_cm']:.1f} cm "
                     f"center_ang={published_detection['realsense_goal_angle']:+.1f} deg "
-                    f"held={published_detection.get('held_previous_detection', False)} "
+                    f"red_avg={raw_detection['red_band_ratio']:.2f} "
+                    f"white={raw_detection['white_inner_ratio']:.2f} "
                     f"process={process_ms:.1f} ms"
+                )
+            elif raw_detection is not None:
+                state = "hold" if published_detection is not None else "pending"
+                self.get_logger().info(
+                    f"hoop {state} | "
+                    f"confirmation={confirmation_count}/"
+                    f"{self.confirmation_required_frames} "
+                    f"candidate_depth={raw_detection['center_depth_cm']:.1f}cm "
+                    f"candidate_red={raw_detection['red_band_ratio']:.2f} "
+                    f"candidate_white={raw_detection['white_inner_ratio']:.2f} "
+                    f"| process={process_ms:.1f} ms"
+                )
+            else:
+                state = "hold" if published_detection is not None else "miss"
+                self.get_logger().info(
+                    f"hoop {state} | "
+                    f"{self._format_rejection_diagnostic(self.last_rejection_diagnostic)} "
+                    f"| process={process_ms:.1f} ms"
                 )
 
     # =============================================================
     # 검출
     # =============================================================
+    @staticmethod
+    def _rejection_stage(diagnostic: Dict[str, Any]) -> str:
+        """후보가 도달한 가장 마지막 단계를 사람이 읽을 실패명으로 바꾼다."""
+        if int(diagnostic.get("accepted_candidates", 0)) > 0:
+            return "accepted"
+        if int(diagnostic.get("red_hsv_pixels", 0)) <= 0:
+            return "red_hsv"
+        if int(diagnostic.get("red_final_pixels", 0)) <= 0:
+            return "red_morphology"
+        if int(diagnostic.get("contours", 0)) <= 0:
+            return "no_contour"
+        if int(diagnostic.get("area_pass", 0)) <= 0:
+            return "contour_area"
+        if int(diagnostic.get("aspect_pass", 0)) <= 0:
+            return "aspect_ratio"
+        if int(diagnostic.get("red_pass", 0)) <= 0:
+            return "red_bands"
+        if int(diagnostic.get("white_pass", 0)) <= 0:
+            return "white_inner"
+        if int(diagnostic.get("inner_depth_pass", 0)) <= 0:
+            return "inner_depth"
+        if int(diagnostic.get("center_depth_pass", 0)) <= 0:
+            return "center_depth"
+        if int(diagnostic.get("angle_pass", 0)) <= 0:
+            return "center_angle"
+        return "unknown"
+
+    @classmethod
+    def _format_rejection_diagnostic(
+        cls,
+        diagnostic: Dict[str, Any],
+    ) -> str:
+        """한 줄 로그에서 마스크와 각 후보 판정 단계를 모두 확인하게 한다."""
+        top, left, right = diagnostic.get(
+            "best_red_bands",
+            (0.0, 0.0, 0.0),
+        )
+        min_aspect = diagnostic.get("min_aspect_ratio")
+        max_aspect = diagnostic.get("max_aspect_ratio")
+        return (
+            f"reason={cls._rejection_stage(diagnostic)} "
+            "mask("
+            f"red_hsv={int(diagnostic.get('red_hsv_pixels', 0))},"
+            f"red_final={int(diagnostic.get('red_final_pixels', 0))},"
+            f"white={int(diagnostic.get('white_final_pixels', 0))},"
+            f"depth_valid={float(diagnostic.get('depth_valid_ratio', 0.0)):.2f}"
+            ") "
+            "stage("
+            f"contour={int(diagnostic.get('contours', 0))},"
+            f"area={int(diagnostic.get('area_pass', 0))},"
+            f"largest={float(diagnostic.get('largest_contour_area', 0.0)):.0f},"
+            f"aspect={int(diagnostic.get('aspect_pass', 0))},"
+            f"aspect_range={float(min_aspect or 0.0):.2f}.."
+            f"{float(max_aspect or 0.0):.2f},"
+            f"red={int(diagnostic.get('red_pass', 0))},"
+            f"visible={int(diagnostic.get('max_visible_red_bands', 0))},"
+            f"white={int(diagnostic.get('white_pass', 0))},"
+            f"inner_depth={int(diagnostic.get('inner_depth_pass', 0))},"
+            f"center_depth={int(diagnostic.get('center_depth_pass', 0))}"
+            ") "
+            "best("
+            f"red={float(top):.2f}/{float(left):.2f}/{float(right):.2f},"
+            f"red_avg={float(diagnostic.get('max_red_average', 0.0)):.2f},"
+            f"white={float(diagnostic.get('max_white_ratio', 0.0)):.2f},"
+            f"inner_depth_px={int(diagnostic.get('max_inner_depth_pixels', 0))}"
+            ")"
+        )
+
     def _get_roi(self, frame_w: int, frame_h: int) -> Tuple[int, int, int, int]:
         x1 = int(frame_w * self.roi_left_ratio)
         x2 = int(frame_w * self.roi_right_ratio)
@@ -832,6 +1030,38 @@ class HoopVisionNode(Node):
         if last_detection_time is None:
             return False
         return (current_time - last_detection_time) <= max(0.0, hold_seconds)
+
+    @staticmethod
+    def _confirmation_match_count(
+        current: Optional[Dict[str, Any]],
+        candidates: Deque[Optional[Dict[str, Any]]],
+        center_tolerance_px: float,
+        depth_tolerance_cm: float,
+    ) -> int:
+        """현재 후보와 위치 및 depth가 가까운 최근 후보 수를 반환한다."""
+        if current is None:
+            return 0
+
+        current_x = float(current["center_x"])
+        current_y = float(current["center_y"])
+        current_depth = float(current["center_depth_cm"])
+        center_limit = max(0.0, float(center_tolerance_px))
+        depth_limit = max(0.0, float(depth_tolerance_cm))
+
+        count = 0
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            center_delta = math.hypot(
+                float(candidate["center_x"]) - current_x,
+                float(candidate["center_y"]) - current_y,
+            )
+            depth_delta = abs(
+                float(candidate["center_depth_cm"]) - current_depth
+            )
+            if center_delta <= center_limit and depth_delta <= depth_limit:
+                count += 1
+        return count
 
     def _center_depth_m(
         self,
@@ -939,6 +1169,25 @@ class HoopVisionNode(Node):
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE,
         )
+        diagnostic: Dict[str, Any] = {
+            "contours": len(contours),
+            "area_pass": 0,
+            "aspect_pass": 0,
+            "red_pass": 0,
+            "white_pass": 0,
+            "inner_depth_pass": 0,
+            "center_depth_pass": 0,
+            "angle_pass": 0,
+            "accepted_candidates": 0,
+            "largest_contour_area": 0.0,
+            "min_aspect_ratio": None,
+            "max_aspect_ratio": None,
+            "max_visible_red_bands": 0,
+            "max_red_average": 0.0,
+            "best_red_bands": (0.0, 0.0, 0.0),
+            "max_white_ratio": 0.0,
+            "max_inner_depth_pixels": 0,
+        }
 
         best: Optional[Dict[str, Any]] = None
         best_score = -1.0
@@ -946,8 +1195,13 @@ class HoopVisionNode(Node):
 
         for contour in contours:
             contour_area = float(cv2.contourArea(contour))
+            diagnostic["largest_contour_area"] = max(
+                float(diagnostic["largest_contour_area"]),
+                contour_area,
+            )
             if contour_area < self.min_contour_area:
                 continue
+            diagnostic["area_pass"] += 1
 
             rect = cv2.minAreaRect(contour)
             raw_box = cv2.boxPoints(rect)
@@ -966,12 +1220,25 @@ class HoopVisionNode(Node):
                 continue
 
             aspect_ratio = width / height
+            previous_min_aspect = diagnostic["min_aspect_ratio"]
+            previous_max_aspect = diagnostic["max_aspect_ratio"]
+            diagnostic["min_aspect_ratio"] = (
+                aspect_ratio
+                if previous_min_aspect is None
+                else min(float(previous_min_aspect), aspect_ratio)
+            )
+            diagnostic["max_aspect_ratio"] = (
+                aspect_ratio
+                if previous_max_aspect is None
+                else max(float(previous_max_aspect), aspect_ratio)
+            )
             if not (
                 self.min_backboard_aspect_ratio
                 <= aspect_ratio
                 <= self.max_backboard_aspect_ratio
             ):
                 continue
+            diagnostic["aspect_pass"] += 1
 
             canonical_w = max(2.0, width)
             canonical_h = max(2.0, height)
@@ -1054,8 +1321,27 @@ class HoopVisionNode(Node):
                     self.red_band_average_min,
                 )
             )
-            if not red_bands_pass or white_inner_ratio < self.white_inner_ratio_min:
+            diagnostic["max_visible_red_bands"] = max(
+                int(diagnostic["max_visible_red_bands"]),
+                visible_red_bands,
+            )
+            if red_band_ratio > float(diagnostic["max_red_average"]):
+                diagnostic["max_red_average"] = red_band_ratio
+                diagnostic["best_red_bands"] = (
+                    top_red_ratio,
+                    left_red_ratio,
+                    right_red_ratio,
+                )
+            diagnostic["max_white_ratio"] = max(
+                float(diagnostic["max_white_ratio"]),
+                white_inner_ratio,
+            )
+            if not red_bands_pass:
                 continue
+            diagnostic["red_pass"] += 1
+            if white_inner_ratio < self.white_inner_ratio_min:
+                continue
+            diagnostic["white_pass"] += 1
 
             inner_depth = roi_depth_m[inner_mask.astype(bool)]
             valid_inner_depth = inner_depth[
@@ -1063,8 +1349,13 @@ class HoopVisionNode(Node):
                 & (inner_depth >= self.depth_min_m)
                 & (inner_depth <= self.depth_max_m)
             ]
+            diagnostic["max_inner_depth_pixels"] = max(
+                int(diagnostic["max_inner_depth_pixels"]),
+                int(valid_inner_depth.size),
+            )
             if valid_inner_depth.size < self.min_valid_depth_pixels:
                 continue
+            diagnostic["inner_depth_pass"] += 1
 
             # 회전 직사각형의 대각선 교점이 백보드 중심이다.
             center_roi = self._rectangle_center(box)
@@ -1078,6 +1369,7 @@ class HoopVisionNode(Node):
             )
             if center_depth_m is None:
                 continue
+            diagnostic["center_depth_pass"] += 1
             distance_m = self._center_distance_m(
                 center_x,
                 center_y,
@@ -1096,6 +1388,7 @@ class HoopVisionNode(Node):
             )
             if realsense_goal_angle is None:
                 continue
+            diagnostic["angle_pass"] += 1
             goal_center_dx_px, goal_center_dy_px = self._center_pixel_offsets(
                 center_x,
                 center_y,
@@ -1104,6 +1397,7 @@ class HoopVisionNode(Node):
             )
 
             score = red_band_ratio + 0.5 * white_inner_ratio
+            diagnostic["accepted_candidates"] += 1
 
             if score <= best_score:
                 continue
@@ -1139,6 +1433,7 @@ class HoopVisionNode(Node):
                 "box": full_box.astype(np.int32).tolist(),
             }
 
+        self.last_rejection_diagnostic = diagnostic
         return best
 
     def _smooth_detection(

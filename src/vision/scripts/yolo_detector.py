@@ -634,20 +634,15 @@ def make_line_payload(
                 math.degrees(math.atan2(-hurdle_b, 1.0))
             )
 
-    # 점 2~3개는 검출점 전체를 직선으로 피팅한다.
-    # 점 2개에서는 LineDecision이 follow_angle을 사용하고, 점 3개에서는
-    # line_angle을 사용하므로 동일한 직선 피팅각을 해당 필드에 넣는다.
-    if point_count >= 2:
-        if point_count <= 3:
-            line_coeffs = fit_line(line_points)
-            if line_coeffs is not None:
-                b, _c = line_coeffs
-                fitted_angle = float(math.degrees(math.atan2(-b, 1.0)))
-                payload["tangent_angle"] = fitted_angle
-                if point_count == 2:
-                    payload["follow_angle"] = fitted_angle
-                else:
-                    payload["line_angle"] = fitted_angle
+    # 점 2~3개는 검출점 전체를 직선으로 피팅하고 같은
+    # 직선 판단 로직에서 사용할 line_angle에 넣는다.
+    if 2 <= point_count <= 3:
+        line_coeffs = fit_line(line_points)
+        if line_coeffs is not None:
+            b, _c = line_coeffs
+            fitted_angle = float(math.degrees(math.atan2(-b, 1.0)))
+            payload["tangent_angle"] = fitted_angle
+            payload["line_angle"] = fitted_angle
 
     # 점 4개 이상이면 검출점 전체로 2차함수를 피팅한다. 세 번째로 가까운
     # 점에서 구한 접선각을 line_angle에도 넣어 실제 주행 모드 판단에 사용한다.

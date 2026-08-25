@@ -21,7 +21,7 @@ ros2 launch robot_bringup vision_stack.launch.py \
 ## 2. 다른 터미널에서 캘리브레이터 실행
 
 ```bash
-cd ~/irc
+cd ~/irc    
 source install/setup.bash
 ros2 run vision realsense_hsv_calibrator.py
 ```

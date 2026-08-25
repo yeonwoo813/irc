@@ -53,14 +53,186 @@ class CurveDistancePriorityTest(unittest.TestCase):
         self.assertEqual(status, LineStatus.Left_Turn_Curve)
         self.assertEqual(angle, 35.0)
 
-    def test_straight_line_keeps_move_distance_limit(self) -> None:
+    def test_curve_opposite_half_errors_do_not_use_straight_steering(self) -> None:
+        features = self._curve_features(95.0)
+        features.line_angle = -15.0
+        features.tangent_angle = -15.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Left_Half_Forward)
+        self.assertEqual(angle, 15.0)
+
+    def test_straight_far_same_direction_keeps_distance_priority(self) -> None:
         features = self._curve_features(self.decision.move_distance)
         features.curve_a = 0.0
-        features.line_angle = 0.0
+        features.line_angle = 17.0
 
         status, angle = self.decision.decide(features)
 
         self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_inside_distance_limit_uses_only_line_angle(self) -> None:
+        features = self._curve_features(59.0)
+        features.curve_a = 0.0
+        features.line_angle = 17.1
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertAlmostEqual(angle, 17.1)
+
+    def test_straight_conflicting_errors_can_cancel(self) -> None:
+        features = self._curve_features(-118.0)
+        features.curve_a = 0.0
+        features.line_angle = 10.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Forward_4step)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_conflict_includes_90_pixel_boundary(self) -> None:
+        features = LineFeatures(
+            point_count=3,
+            line_angle=-15.0,
+            line_distance=self.decision.move_distance,
+        )
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Forward_4step)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_conflict_uses_combined_direction(self) -> None:
+        features = self._curve_features(118.0)
+        features.curve_a = 0.0
+        features.line_angle = -20.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Left_Half_Forward)
+        expected_angle = abs(
+            features.line_angle
+            + self.decision.steering_limit
+        )
+        self.assertAlmostEqual(angle, expected_angle)
+
+    def test_straight_far_conflict_keeps_distance_priority(self) -> None:
+        features = self._curve_features(
+            self.decision.steering_distance_max
+        )
+        features.curve_a = 0.0
+        features.line_angle = -15.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_turn_half_does_not_use_steering(self) -> None:
+        features = self._curve_features(118.0)
+        features.curve_a = 0.0
+        features.line_angle = -(self.decision.half_turn_angle - 0.1)
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_opposite_half_forward_uses_steering(self) -> None:
+        features = self._curve_features(118.0)
+        features.curve_a = 0.0
+        features.line_angle = -self.decision.fine_turn_angle
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Left_Half_Forward)
+        self.assertAlmostEqual(
+            angle,
+            self.decision.fine_turn_angle
+            - self.decision.steering_limit,
+        )
+
+    def test_straight_conflict_above_30_degrees_uses_distance(self) -> None:
+        features = self._curve_features(118.0)
+        features.curve_a = 0.0
+        features.line_angle = -(self.decision.half_turn_angle + 0.1)
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_small_opposite_angle_keeps_distance_priority(self) -> None:
+        features = self._curve_features(self.decision.move_distance)
+        features.curve_a = 0.0
+        features.line_angle = -3.5
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_without_distance_keeps_angle_decision(self) -> None:
+        features = self._curve_features(0.0)
+        features.curve_a = 0.0
+        features.line_angle = -15.0
+        features.line_distance = None
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Left_Half_Forward)
+        self.assertEqual(angle, 15.0)
+
+    def test_straight_angle_bands(self) -> None:
+        cases = [
+            (7.0, LineStatus.Forward_4step),
+            (7.1, LineStatus.Right_Half_Forward),
+            (22.5, LineStatus.Right_Half_Forward),
+            (22.6, LineStatus.Right_Turn_Half),
+            (29.9, LineStatus.Right_Turn_Half),
+            (30.0, LineStatus.Right_Turn),
+            (30.1, LineStatus.Right_Turn),
+            (-7.0, LineStatus.Forward_4step),
+            (-7.1, LineStatus.Left_Half_Forward),
+            (-22.5, LineStatus.Left_Half_Forward),
+            (-22.6, LineStatus.Left_Turn_Half),
+            (-29.9, LineStatus.Left_Turn_Half),
+            (-30.0, LineStatus.Left_Turn),
+            (-30.1, LineStatus.Left_Turn),
+        ]
+
+        for angle, expected_status in cases:
+            with self.subTest(angle=angle):
+                status, _ = self.decision._status_from_line_angle(angle)
+                self.assertEqual(status, expected_status)
+
+    def test_one_point_keeps_follow_angle_turn_logic(self) -> None:
+        features = LineFeatures(
+            point_count=1,
+            line_angle=0.0,
+            line_distance=68.0,
+            follow_angle=-0.3,
+        )
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Left_Turn)
+        self.assertAlmostEqual(angle, 0.3)
+
+    def test_two_points_use_straight_steering_conflict(self) -> None:
+        features = LineFeatures(
+            point_count=2,
+            line_angle=-15.0,
+            line_distance=100.0,
+            follow_angle=0.3,
+        )
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Forward_4step)
         self.assertEqual(angle, 0.0)
 
 

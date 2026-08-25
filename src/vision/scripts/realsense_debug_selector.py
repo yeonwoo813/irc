@@ -267,8 +267,9 @@ class RealSenseDebugSelector(Node):
         """끊김 없는 RealSense 컬러 영상을 기준으로 출력 주기를 유지한다.
 
         각 검출기의 디버그 콜백은 최신 영상 한 장만 저장한다. 원본 컬러
-        프레임이 들어올 때 활성 모드의 새 디버그 영상이 있으면 그 영상을,
-        없으면 원본을 발행해 모드 전환 중에도 출력 토픽이 멈추지 않게 한다.
+        프레임이 들어올 때 활성 모드의 유효한 디버그 영상이 있으면 다음
+        디버그 영상이 올 때까지 재사용한다. 없거나 만료됐을 때만 원본을
+        발행해 모드 전환 중에도 출력 토픽이 멈추지 않게 한다.
         """
         self.latest_raw_image = msg
         now = time.monotonic()
@@ -278,8 +279,11 @@ class RealSenseDebugSelector(Node):
         if source in {"ball", "hurdle", "hoop"}:
             selected, received_at = self._fresh_debug_image(source, now)
 
-        if selected is not None and received_at > self.last_debug_output_time:
-            self.last_debug_output_time = received_at
+        if selected is not None:
+            self.last_debug_output_time = max(
+                self.last_debug_output_time,
+                received_at,
+            )
             self._publish_and_show(selected)
             return
 

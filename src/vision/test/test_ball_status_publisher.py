@@ -220,6 +220,19 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         self.assertFalse(self.publisher.webcam_ball_confirmed)
         self.assertFalse(self.publisher.back_to_initial_waiting)
 
+    def test_disabled_detection_does_not_accumulate_webcam_votes(self):
+        self.publisher.set_detection_enabled(False)
+
+        results = [self._publish(True) for _ in range(5)]
+
+        self.assertEqual(results, [(BallStatus.Ball_None, 0.0)] * 5)
+        self.assertEqual(list(self.publisher.webcam_detection_buffer), [])
+        self.assertFalse(self.publisher.webcam_ball_confirmed)
+
+        self.publisher.set_detection_enabled(True)
+        self._confirm_webcam_ball()
+        self.assertTrue(self.publisher.webcam_ball_confirmed)
+
     def test_goal_distance_is_published_for_decision_threshold(self):
         self.publisher.publish_ball_status(
             realsense_goal_distance_cm=89.5,

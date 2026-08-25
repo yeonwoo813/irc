@@ -23,6 +23,16 @@ from ball_status_publisher import BallStatus, BallStatusPublisher  # noqa: E402
 
 
 class MotionDisplayStateTest(unittest.TestCase):
+    def test_turn_half_name_is_shown(self) -> None:
+        state = MotionDisplayState()
+        state.on_command(4)
+        state.on_motion_state(motion_end=False, motion_ready=True)
+
+        self.assertEqual(
+            motion_overlay_lines(state),
+            ["motion:4 Left_Turn_Half", "run:RUNNING ready:1"],
+        )
+
     def test_command_is_shown_only_after_motion_starts(self) -> None:
         state = MotionDisplayState()
 
@@ -122,6 +132,16 @@ class LineGeometryTest(unittest.TestCase):
         self.assertEqual(payload["line_distance"], -25.0)
         self.assertLess(payload["follow_angle"], 0.0)
 
+    def test_two_line_points_publish_fitted_line_angle(self) -> None:
+        payload = make_line_payload(
+            line_points=[(520.0, 420.0), (500.0, 300.0)],
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertLess(payload["line_angle"], 0.0)
+        self.assertGreater(payload["follow_angle"], 0.0)
+
     def test_configured_offset_is_shared_by_line_and_ball(self) -> None:
         payload = make_vision_payload(
             dets=[],
@@ -157,6 +177,19 @@ class LineGeometryTest(unittest.TestCase):
         self.assertEqual(payload["line_distance"], 65.0)
         self.assertEqual(payload["status"], LineStatus.Forward_4step)
 
+    def test_turn_half_status_name_is_exposed(self) -> None:
+        payload = apply_line_status(
+            {
+                "point_count": 3,
+                "line_angle": 25.0,
+                "line_distance": 0.0,
+            },
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertEqual(payload["status"], LineStatus.Right_Turn_Half)
+        self.assertEqual(payload["status_name"], "Right_Turn_Half")
 
 class _FakePublisher:
     def __init__(self) -> None:
