@@ -9,8 +9,8 @@ class LineStatus:
     Forward_4step = 1
     Left_Half_Forward = 2
     Right_Half_Forward = 3
-    Left_Forward = 4
-    Right_Forward = 5
+    Left_Turn_Half = 4 
+    Right_Turn_Half = 5
     Left_Turn = 6
     Right_Turn = 7
     Forward_half = 8
@@ -55,22 +55,24 @@ class LineFeatures:
 
 class LineDecision:
     def __init__(self):
-        #직진, 미세회전, 회전 각도 기준 설정
+        # 직진, 미세회전, 중간회전, 회전 각도 기준
         self.forward_angle = 7.0
-        self.turn_angle = 22.5
+        self.fine_turn_angle = 22.5
+        self.half_turn_angle = 30.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
         self.curve_a = 1e-4
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
         self.move_distance = 90.0
+        self.steering_distance_max = 130.0
         self.curve_distance = 100.0
 
         # 직선에서 거리와 각도가 서로 반대 방향을 가리키는 특수
         # 상황에만 조향각을 사용한다. 평소에는 기존 거리 우선 로직을
         # 유지하고, 거리 보정은 방향 충돌을 완화하는 용도로 제한한다.
-        self.straight_distance_angle_scale_px = 600.0
-        self.straight_distance_angle_limit = 10.0
+        self.steering_scale_px = 600.0
+        self.steering_limit = 10.0
 
 
     def decide(self, features: LineFeatures) -> Tuple[int, float]:
@@ -115,14 +117,30 @@ class LineDecision:
         line_distance: Optional[float],
     ) -> Tuple[int, float]:
         """Use steering only when straight-line distance and angle conflict."""
-        has_direction_conflict = bool(
+        distance_status = self._distance_half_status(line_distance)
+        angle_status, angle_value = self._status_from_line_angle(line_angle)
+        opposite_half = bool(
+            (
+                distance_status == LineStatus.Left_Half_Forward
+                and angle_status == LineStatus.Right_Half_Forward
+            )
+            or (
+                distance_status == LineStatus.Right_Half_Forward
+                and angle_status == LineStatus.Left_Half_Forward
+            )
+        )
+        use_steering = bool(
             line_angle is not None
             and line_distance is not None
-            and abs(line_distance) >= self.move_distance
-            and abs(line_angle) >= self.forward_angle
-            and line_distance * line_angle < 0.0
+            and self.move_distance
+            <= abs(line_distance)
+            < self.steering_distance_max
+            and self.forward_angle
+            < abs(line_angle)
+            <= self.half_turn_angle
+            and opposite_half
         )
-        if has_direction_conflict:
+        if use_steering:
             return self._status_from_conflicting_straight_errors(
                 line_angle,
                 line_distance,
@@ -130,15 +148,20 @@ class LineDecision:
 
         # 기존 직선 로직: 중심에서 90px 이상 벗어나면 거리 방향의
         # 반보행을 우선하고, 그 안에서는 원래 라인 각도를 사용한다.
-        if (
-            line_distance is not None
-            and abs(line_distance) >= self.move_distance
-        ):
-            if line_distance < 0.0:
-                return LineStatus.Left_Half_Forward, 0.0
-            return LineStatus.Right_Half_Forward, 0.0
+        if distance_status is not None:
+            return distance_status, 0.0
 
-        return self._status_from_line_angle(line_angle)
+        return angle_status, angle_value
+
+    def _distance_half_status(
+        self,
+        line_distance: Optional[float],
+    ) -> Optional[int]:
+        if line_distance is None or abs(line_distance) < self.move_distance:
+            return None
+        if line_distance < 0.0:
+            return LineStatus.Left_Half_Forward
+        return LineStatus.Right_Half_Forward
 
     def _status_from_conflicting_straight_errors(
         self,
@@ -150,25 +173,24 @@ class LineDecision:
         distance_angle = math.degrees(
             math.atan(
                 line_distance
-                / self.straight_distance_angle_scale_px
+                / self.steering_scale_px
             )
         )
         distance_angle = max(
-            -self.straight_distance_angle_limit,
-            min(self.straight_distance_angle_limit, distance_angle),
+            -self.steering_limit,
+            min(self.steering_limit, distance_angle),
         )
         steering_angle = line_angle + distance_angle
         status, angle = self._status_from_line_angle(steering_angle)
 
-        # 거리 보정만으로 반보행이 제자리 회전으로 승격되지 않게 한다.
-        # 제자리 회전은 원래 라인 각도도 회전 기준을 넘었을 때만 허용한다.
+        # 거리 보정만으로 중간회전이 full turn으로 승격되지 않게 한다.
         if (
             status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
-            and abs(line_angle) <= self.turn_angle
+            and abs(line_angle) <= self.half_turn_angle
         ):
             if steering_angle < 0.0:
-                return LineStatus.Left_Half_Forward, abs(steering_angle)
-            return LineStatus.Right_Half_Forward, abs(steering_angle)
+                return LineStatus.Left_Turn_Half, abs(steering_angle)
+            return LineStatus.Right_Turn_Half, abs(steering_angle)
 
         return status, angle
 
@@ -190,18 +212,25 @@ class LineDecision:
 
         abs_angle = abs(angle)
 
-        # 8도 이하: 직진
+        # 7도 이하: 직진
         if abs_angle <= self.forward_angle:
             return LineStatus.Forward_4step, 0.0
 
-        # 8~20도: 미세회전
-        if abs_angle <= self.turn_angle:
+        # 7~22.5도: 전진하며 미세회전
+        if abs_angle <= self.fine_turn_angle:
             if angle < 0:
                 return LineStatus.Left_Half_Forward, abs_angle
             else:
                 return LineStatus.Right_Half_Forward, abs_angle
 
-        # 20도 초과: 회전
+        # 22.5도 초과, 30도 미만: 중간 제자리회전
+        if abs_angle < self.half_turn_angle:
+            if angle < 0:
+                return LineStatus.Left_Turn_Half, abs_angle
+            else:
+                return LineStatus.Right_Turn_Half, abs_angle
+
+        # 30도 이상: full turn
         if angle < 0:
             return LineStatus.Left_Turn, abs_angle
         else:
@@ -214,18 +243,18 @@ class LineDecision:
 
             abs_angle = abs(angle)
 
-            # 15도 이하: 직진
+            # 7도 이하: 직진
             if abs_angle <= self.forward_angle:
                 return LineStatus.Forward_4step, 0.0
 
-            # 15~25도: 미세회전
-            if abs_angle <= self.turn_angle:
+            # 7~22.5도: 미세회전
+            if abs_angle <= self.fine_turn_angle:
                 if angle < 0:
                     return LineStatus.Left_Half_Forward, abs_angle
                 else:
                     return LineStatus.Right_Half_Forward, abs_angle
 
-            # 25도 초과: curve 회전
+            # 22.5도 초과: curve 회전
             if angle < 0:
                 return LineStatus.Left_Turn_Curve, abs_angle
             else:

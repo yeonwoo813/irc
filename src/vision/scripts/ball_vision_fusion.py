@@ -484,6 +484,7 @@ class BallVisionFusionNode(Node):
         self.ball_in_hand = False
         self.frame_count = 0
         self.realsense_frame_count = 0
+        self.last_realsense_diagnostic_label: Optional[str] = None
         self.ball_detection_active = bool(
             self.get_parameter("active_on_start").value
         )
@@ -865,8 +866,7 @@ class BallVisionFusionNode(Node):
         # 이미 큐에 들어온 콜백도 초입의 active 검사에서 즉시 반환한다.
         self.ball_detection_active = requested
         self._clear_ball_detection_state()
-        if requested:
-            self.ball_status_publisher._reset_webcam_detection_cycle()
+        self.ball_status_publisher.set_detection_enabled(requested)
 
         self.get_logger().info(
             "Ball image processing switched "
@@ -1047,6 +1047,7 @@ class BallVisionFusionNode(Node):
             self.kernel,
         )
 
+        rejection_counts: Dict[str, int] = {}
         detection = self._find_best_ball(
             mask=mask,
             hsv=hsv,
@@ -1057,11 +1058,22 @@ class BallVisionFusionNode(Node):
             roi_y_start=y_start,
             frame_w=frame_w,
             frame_h=frame_h,
+            rejection_counts=rejection_counts,
+        )
+        rejection_diagnostic = self._classify_realsense_rejection(
+            ball_color_mask=ball_color_mask,
+            roi_depth_m=roi_depth_m,
+            depth_filtered_mask=depth_filtered_mask,
+            rejection_counts=rejection_counts,
         )
 
         held_previous = False
 
         if detection is not None:
+            detection["realsense_diagnostic"] = {
+                "category": "accepted",
+                "detail": "hsv_depth_shape_support_passed",
+            }
             self.realsense_lost_frames = 0
             self.last_realsense_detection = dict(detection)
             self.latest_realsense = dict(detection)
@@ -1078,11 +1090,22 @@ class BallVisionFusionNode(Node):
                 self.last_realsense_detection
             )
             self.latest_realsense["held_previous_detection"] = True
+            self.latest_realsense["realsense_diagnostic"] = {
+                "category": "held",
+                "detail": (
+                    "previous_detection_after_"
+                    f"{rejection_diagnostic['category']}:"
+                    f"{rejection_diagnostic['detail']}"
+                ),
+            }
             self.latest_realsense_time = now
 
         else:
             self.realsense_lost_frames = self.realsense_hold_frames
             self.latest_realsense = self._empty_realsense_state()
+            self.latest_realsense[
+                "realsense_diagnostic"
+            ] = rejection_diagnostic
             self.latest_realsense_time = now
 
         self.realsense_frame_count += 1
@@ -1114,6 +1137,97 @@ class BallVisionFusionNode(Node):
                 cv2.imshow("Ball RealSense OpenCV", debug)
                 cv2.waitKey(1)
 
+    def _classify_realsense_rejection(
+        self,
+        *,
+        ball_color_mask: np.ndarray,
+        roi_depth_m: np.ndarray,
+        depth_filtered_mask: np.ndarray,
+        rejection_counts: Dict[str, int],
+    ) -> Dict[str, Any]:
+        """Return the furthest detector stage reached by this frame."""
+        color_region = ball_color_mask > 0
+        hsv_pixels = int(np.count_nonzero(color_region))
+        depth_filtered_pixels = int(
+            np.count_nonzero(depth_filtered_mask)
+        )
+        color_depth = roi_depth_m[color_region]
+        finite_positive = color_depth[
+            np.isfinite(color_depth) & (color_depth > 0.0)
+        ]
+        valid_depth_pixels = int(
+            np.count_nonzero(
+                finite_positive <= self.depth_threshold_m
+            )
+        )
+        over_distance_pixels = int(
+            np.count_nonzero(
+                finite_positive > self.depth_threshold_m
+            )
+        )
+
+        metrics = {
+            "hsv_pixels": hsv_pixels,
+            "valid_depth_pixels": valid_depth_pixels,
+            "over_distance_pixels": over_distance_pixels,
+            "depth_filtered_pixels": depth_filtered_pixels,
+            "rejection_counts": dict(sorted(rejection_counts.items())),
+        }
+
+        def diagnostic(category: str, detail: str) -> Dict[str, Any]:
+            return {
+                "category": category,
+                "detail": detail,
+                **metrics,
+            }
+
+        if hsv_pixels == 0:
+            return diagnostic("hsv", "no_pixels_in_hsv_range")
+        if finite_positive.size == 0:
+            return diagnostic("depth", "no_finite_positive_depth")
+        if valid_depth_pixels == 0 and over_distance_pixels > 0:
+            return diagnostic(
+                "distance",
+                f"all_hsv_pixels_over_{self.depth_threshold_m:.2f}m",
+            )
+        if depth_filtered_pixels == 0:
+            return diagnostic("depth", "no_depth_valid_hsv_pixels")
+
+        def most_common(prefix: str) -> Optional[str]:
+            matches = [
+                (reason, count)
+                for reason, count in rejection_counts.items()
+                if reason.startswith(prefix)
+            ]
+            if not matches:
+                return None
+            return max(matches, key=lambda item: item[1])[0]
+
+        support_reason = most_common("support:")
+        if support_reason is not None:
+            return diagnostic("support", support_reason.split(":", 1)[1])
+        if rejection_counts.get("depth_patch_invalid", 0) > 0:
+            return diagnostic("depth", "candidate_center_depth_invalid")
+        if rejection_counts.get("physical_size", 0) > 0:
+            return diagnostic("shape", "depth_size_mismatch")
+
+        shape_reasons = (
+            "circle_fill",
+            "circularity",
+            "aspect_ratio",
+            "invalid_radius",
+            "invalid_perimeter",
+            "contour_area",
+            "no_contour_after_morphology",
+        )
+        selected_shape = max(
+            shape_reasons,
+            key=lambda reason: rejection_counts.get(reason, 0),
+        )
+        if rejection_counts.get(selected_shape, 0) > 0:
+            return diagnostic("shape", selected_shape)
+        return diagnostic("shape", "no_accepted_candidate")
+
     def _find_best_ball(
         self,
         mask: np.ndarray,
@@ -1125,6 +1239,7 @@ class BallVisionFusionNode(Node):
         roi_y_start: int,
         frame_w: int,
         frame_h: int,
+        rejection_counts: Optional[Dict[str, int]] = None,
     ) -> Optional[Dict[str, Any]]:
         """검은 받침대 위에 있는 물리적으로 타당한 주황색 공을 찾는다."""
         contours, _ = cv2.findContours(
@@ -1134,6 +1249,15 @@ class BallVisionFusionNode(Node):
         )
 
         best: Optional[Dict[str, Any]] = None
+
+        def rejected(reason: str) -> None:
+            if rejection_counts is None:
+                return
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+        if not contours:
+            rejected("no_contour_after_morphology")
+
         support_config = self._support_config()
         support_black_mask = black_support_mask(
             hsv,
@@ -1156,6 +1280,7 @@ class BallVisionFusionNode(Node):
             if touches_edge:
                 min_area *= self.edge_min_contour_area_ratio
             if area < min_area:
+                rejected("contour_area")
                 continue
 
             aspect_ratio = float(bw) / max(float(bh), 1.0)
@@ -1168,10 +1293,12 @@ class BallVisionFusionNode(Node):
                 else self.max_aspect_ratio
             )
             if not (min_aspect <= aspect_ratio <= max_aspect):
+                rejected("aspect_ratio")
                 continue
 
             perimeter = float(cv2.arcLength(contour, True))
             if perimeter <= 1e-6:
+                rejected("invalid_perimeter")
                 continue
             circularity = 4.0 * math.pi * area / (perimeter * perimeter)
             required_circularity = (
@@ -1179,10 +1306,12 @@ class BallVisionFusionNode(Node):
                 else self.min_circularity
             )
             if circularity < required_circularity:
+                rejected("circularity")
                 continue
 
             (cx_roi, cy_roi), radius = cv2.minEnclosingCircle(contour)
             if radius <= 1e-6:
+                rejected("invalid_radius")
                 continue
 
             circle_area = math.pi * radius * radius
@@ -1194,6 +1323,7 @@ class BallVisionFusionNode(Node):
                 else self.max_circle_ratio_error
             )
             if ratio_error > max_ratio_error:
+                rejected("circle_fill")
                 continue
 
             cx_img = int(round(cx_roi + roi_x_start))
@@ -1206,6 +1336,7 @@ class BallVisionFusionNode(Node):
                 frame_h=frame_h,
             )
             if z_m is None or self.fx <= 0.0:
+                rejected("depth_patch_invalid")
                 continue
 
             expected_radius_min = (
@@ -1225,6 +1356,7 @@ class BallVisionFusionNode(Node):
             allowed_radius_min = expected_radius_min * size_min_ratio
             allowed_radius_max = expected_radius_max * size_max_ratio
             if not (allowed_radius_min <= radius <= allowed_radius_max):
+                rejected("physical_size")
                 continue
 
             expected_radius_mid = 0.5 * (
@@ -1246,6 +1378,7 @@ class BallVisionFusionNode(Node):
                 black_mask=support_black_mask,
             )
             if not bool(support["accepted"]):
+                rejected(f"support:{support['reason']}")
                 continue
 
             score = (
@@ -1508,6 +1641,10 @@ class BallVisionFusionNode(Node):
             "raw_support_visible_fraction": None,
             "raw_support_outer_radius": None,
             "held_previous_detection": False,
+            "realsense_diagnostic": {
+                "category": "waiting",
+                "detail": "no_realsense_frame",
+            },
         }
 
     # =============================================================
@@ -1695,6 +1832,131 @@ class BallVisionFusionNode(Node):
     # =============================================================
     # BallFeatures 생성 및 알고리즘 전달
     # =============================================================
+    def _published_realsense_diagnostic(
+        self,
+        *,
+        realsense_valid: bool,
+        realsense_age: Optional[float],
+        features: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Add the 120 cm mission gate to the detector-stage diagnosis."""
+        if not self.ball_detection_active:
+            return {
+                "category": "inactive",
+                "detail": "ball_processing_disabled",
+            }
+
+        if realsense_valid:
+            distance_cm = features.get("realsense_ball_distance_cm")
+            entry_cm = float(
+                self.ball_status_publisher.ball_decision.ball_entry_distance_cm
+            )
+            if (
+                not features.get("ball_in_hand", False)
+                and distance_cm is not None
+                and float(distance_cm) > entry_cm
+            ):
+                return {
+                    "category": "distance",
+                    "detail": (
+                        f"ball_entry_gate_{float(distance_cm):.1f}cm"
+                        f">{entry_cm:.1f}cm"
+                    ),
+                    "distance_cm": float(distance_cm),
+                    "limit_cm": entry_cm,
+                }
+
+            if self.latest_realsense is not None:
+                return dict(
+                    self.latest_realsense.get(
+                        "realsense_diagnostic",
+                        {
+                            "category": "accepted",
+                            "detail": "detector_passed",
+                        },
+                    )
+                )
+
+        if (
+            realsense_age is not None
+            and realsense_age > self.realsense_timeout_sec
+        ):
+            return {
+                "category": "timeout",
+                "detail": f"last_frame_age_{realsense_age:.2f}s",
+            }
+
+        if self.latest_realsense is not None:
+            return dict(
+                self.latest_realsense.get(
+                    "realsense_diagnostic",
+                    {
+                        "category": "waiting",
+                        "detail": "no_diagnostic",
+                    },
+                )
+            )
+        return {
+            "category": "waiting",
+            "detail": "no_realsense_frame",
+        }
+
+    @staticmethod
+    def _format_realsense_diagnostic(diagnostic: Dict[str, Any]) -> str:
+        category = str(diagnostic.get("category", "unknown"))
+        detail = str(diagnostic.get("detail", "unknown"))
+        labels = {
+            "accepted": "ACCEPTED",
+            "held": "HELD",
+            "hsv": "REJECT_HSV",
+            "depth": "REJECT_DEPTH",
+            "distance": "REJECT_DISTANCE",
+            "shape": "REJECT_SHAPE",
+            "support": "REJECT_SUPPORT",
+            "timeout": "REJECT_TIMEOUT",
+            "inactive": "INACTIVE",
+            "waiting": "WAITING",
+        }
+        return f"{labels.get(category, category.upper())}:{detail}"
+
+    def _log_realsense_diagnostic_transition(
+        self,
+        diagnostic: Dict[str, Any],
+    ) -> bool:
+        """Log each detector rejection transition once without frame spam."""
+        label = BallVisionFusionNode._format_realsense_diagnostic(
+            diagnostic
+        )
+        if label == getattr(
+            self,
+            "last_realsense_diagnostic_label",
+            None,
+        ):
+            return False
+
+        self.last_realsense_diagnostic_label = label
+        metric_parts = []
+        metric_names = (
+            "hsv_pixels",
+            "valid_depth_pixels",
+            "over_distance_pixels",
+            "depth_filtered_pixels",
+            "distance_cm",
+            "limit_cm",
+        )
+        for name in metric_names:
+            if name in diagnostic:
+                metric_parts.append(f"{name}={diagnostic[name]}")
+        rejection_counts = diagnostic.get("rejection_counts")
+        if rejection_counts:
+            metric_parts.append(f"filters={rejection_counts}")
+
+        suffix = f" ({', '.join(metric_parts)})" if metric_parts else ""
+        self.get_logger().info(
+            f"[RealSenseBallDiagnostic] {label}{suffix}"
+        )
+        return True
+
     def publish_ball_features(self) -> None:
         now = time.monotonic()
 
@@ -1808,6 +2070,13 @@ class BallVisionFusionNode(Node):
                 }
             )
 
+        realsense_diagnostic = self._published_realsense_diagnostic(
+            realsense_valid=realsense_valid,
+            realsense_age=realsense_age,
+            features=features,
+        )
+        self._log_realsense_diagnostic_transition(realsense_diagnostic)
+
         status, angle = (
             self.ball_status_publisher.publish_ball_status(
                 **features
@@ -1837,6 +2106,7 @@ class BallVisionFusionNode(Node):
                 "ball_status": int(status),
                 "ball_status_angle": float(angle),
                 "camera_info_received": self.camera_info_received,
+                "realsense_diagnostic": realsense_diagnostic,
             }
         )
 
@@ -1908,6 +2178,8 @@ class BallVisionFusionNode(Node):
                 f"rs={features['realsense_ball_detected']} "
                 f"rs_dist={features['realsense_ball_distance_cm']} "
                 f"rs_ang={features['realsense_ball_angle_error']} "
+                "rs_diag="
+                f"{self._format_realsense_diagnostic(realsense_diagnostic)} "
                 f"webcam={features['webcam_ball_detected']} "
                 f"webcam_x={features['webcam_ball_x_distance']} "
                 f"webcam_y={features['webcam_ball_y_distance']} "

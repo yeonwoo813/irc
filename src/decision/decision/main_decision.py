@@ -11,12 +11,12 @@ from std_msgs.msg import Bool
 class Motion:
     Initial_Pose = 0
     Forward_4step = 1
-    Left_Half_Forward = 2  #기본3스텝
+    Left_Half_Forward = 2 
     Right_Half_Forward = 3
-    Left_Forward = 4 #no
-    Right_Forward = 5 #no
-    Left_Turn = 6  #line tracking
-    Right_Turn = 7 #line tracking
+    Left_Turn_Half = 4 #제자리회전 1번
+    Right_Turn_Half = 5 #제자리회전 1번
+    Left_Turn = 6  #line tracking 제자리회전
+    Right_Turn = 7 #line tracking 제자리회전
     Forward_half = 8 #webcam ball 미세걷기
     Backward_half = 9
     Left_Move = 10 #사이드스텝
@@ -159,6 +159,9 @@ class MainDecision(Node):
         self.backward_after_pick = False
         self.back_to_walk_after_pick = False
         self.turn_count = 0
+        # Pick 실패 뒤 후진/회전/보행자세 복귀가 끝날 때까지 같은 공을
+        # 다시 투표하지 않는다. 복귀가 끝나면 즉시 새 투표를 시작한다.
+        self.post_pick_failure_ball_suppressed = False
         #lost
         self.lost_count = 0
         self.lost_step = 0
@@ -733,6 +736,7 @@ class MainDecision(Node):
     def CheckBall(self):
         self.pick_done = False
         if self.ball_in_hand == True:
+            self.post_pick_failure_ball_suppressed = False
             self.has_ball = True
             self.goal_last_seen_time = self._now_seconds()
             self.goal_loss_waiting = False
@@ -765,12 +769,7 @@ class MainDecision(Node):
         else:
             self.has_ball = False
             self._reset_goal_loss_state()
-            MainDecision._set_vision_activity(
-                self,
-                ball_active=True,
-                hoop_active=False,
-                reason='pick failed: resume ball detection',
-            )
+            MainDecision._begin_post_pick_failure_ball_suppression(self)
             self.get_logger().info("pick failed: ball is not in hand")
 
         return self.has_ball
@@ -785,6 +784,15 @@ class MainDecision(Node):
             else:
                 self.turn_after_pick = False
                 self.backward_after_pick = False
+                if getattr(
+                    self,
+                    'post_pick_failure_ball_suppressed',
+                    False,
+                ):
+                    MainDecision._finish_post_pick_failure_recovery(
+                        self,
+                        'post-pick turn skipped',
+                    )
                 self.LineTracking()
                 return
 
@@ -808,6 +816,15 @@ class MainDecision(Node):
             self.back_to_walk_after_pick = False
             self.turn_count = 0
             self.pick_try_count = 0
+            if getattr(
+                self,
+                'post_pick_failure_ball_suppressed',
+                False,
+            ):
+                MainDecision._finish_post_pick_failure_recovery(
+                    self,
+                    'post-pick turn limit reached',
+                )
             self.LostMode()
             return
 
@@ -869,8 +886,18 @@ class MainDecision(Node):
         # 해당 모션 중 쌓인 비전값을 버리고 새 라인 데이터로 복귀 판단한다.
         if getattr(self, 'back_to_walk_after_pick', False):
             self.back_to_walk_after_pick = False
-            self.current_mode = "LineTrackingMode"
-            self._reset_vision_decision_cycle()
+            if getattr(
+                self,
+                'post_pick_failure_ball_suppressed',
+                False,
+            ):
+                MainDecision._finish_post_pick_failure_recovery(
+                    self,
+                    'Back_To_Walk completed',
+                )
+            else:
+                self.current_mode = "LineTrackingMode"
+                self._reset_vision_decision_cycle()
             return
 
         #Pick 이후 공 확인, 성공했을 때만 Neck Up 실행
@@ -1176,6 +1203,50 @@ class MainDecision(Node):
         self.hurdle_buffer.clear()
         self.hurdle_ready_buffer.clear()
 
+    def _begin_post_pick_failure_ball_suppression(self):
+        """Ignore the missed ball throughout the post-pick recovery."""
+        self.post_pick_failure_ball_suppressed = True
+        MainDecision._reset_ball_loss_state(self)
+        self.ball_data = False
+        self.ball_buffer.clear()
+        MainDecision._set_vision_activity(
+            self,
+            ball_active=False,
+            hoop_active=False,
+            reason='pick failed: suppress ball during recovery',
+        )
+        self.get_logger().info(
+            "[PostPickFailure] 공 검출을 중지하고 ball_buffer를 "
+            "초기화했습니다. Pick 실패 복구 분기가 끝날 때까지 "
+            "같은 공을 무시합니다."
+        )
+
+    def _finish_post_pick_failure_recovery(self, reason):
+        """Restore ball processing immediately after recovery ends."""
+        if not getattr(
+            self,
+            'post_pick_failure_ball_suppressed',
+            False,
+        ):
+            return False
+
+        # OFF 구간에 발행된 status=99와 과거 웹캠 투표가 새 공 판단에
+        # 섞이지 않도록 검출기를 켜기 직전에 모든 판단 버퍼를 비운다.
+        MainDecision._reset_vision_decision_cycle(self)
+        self.post_pick_failure_ball_suppressed = False
+        self.current_mode = "LineTrackingMode"
+        MainDecision._set_vision_activity(
+            self,
+            ball_active=True,
+            hoop_active=False,
+            reason='post-pick failure recovery completed',
+        )
+        self.get_logger().info(
+            f"[PostPickFailure] {reason}: 공 투표를 초기화하고 "
+            "즉시 새 프레임부터 공 검출과 5프레임 투표를 다시 시작합니다."
+        )
+        return True
+
     #공이 사라진 후 0.8초 동안 BallMode를 유지
     def _hold_BallMode(self):
         if self._ball_status_is_detected(self.ball_status):
@@ -1324,10 +1395,10 @@ class MainDecision(Node):
             motion_msg.command = Motion.Right_Half_Forward
         
         elif self.status == 4:
-            motion_msg.command = Motion.Left_Forward
+            motion_msg.command = Motion.Left_Turn_Half
         
         elif self.status == 5:
-            motion_msg.command = Motion.Right_Forward   
+            motion_msg.command = Motion.Right_Turn_Half  
         
         elif self.status == 6:
             motion_msg.command = Motion.Left_Turn
