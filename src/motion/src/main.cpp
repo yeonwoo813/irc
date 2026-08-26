@@ -18,7 +18,7 @@ constexpr int kNeckUpMotionId = 14;
 constexpr int kNeckDownMotionId = 18;
 
 // 실제 측정한 값으로 반드시 변경
-constexpr int32_t kNeckUpRaw = 3200;
+constexpr int32_t kNeckUpRaw = 3093;
 constexpr int32_t kNeckDownRaw = 2735;
 
 constexpr double kNeckMotionDuration = 0.5;
@@ -142,12 +142,51 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
 
     JoinFinishedMotionThread();
 
+    Dxl::RawArray start_raw{};
+    if (initial_motion && motion_id == 0)
+    {
+        if (!dxl_port_->ReadPresentRawStrict(start_raw))
+        {
+            dxl_port_->DisableTorqueAll();
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "초기자세 시작 전 몸통 모터(1~22번) 현재 위치 읽기 실패. "
+                "전체 몸통 토크를 끄고 초기자세를 시작하지 않습니다.");
+            return false;
+        }
+    }
+    else
+    {
+        // 연속 모션은 직전 모션에서 전송한 마지막 목표 위치부터 이어갑니다.
+        start_raw = dxl_port_->GetLastGoalRaw();
+    }
+
+    // 목 모터와 동일하게 Torque를 켜기 전에 현재 시작 위치를 Goal Position에
+    // 먼저 기록하여 이전 실행의 Goal Position으로 튀는 것을 방지합니다.
+    if (!dxl_port_->BeginStreamWrite())
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "몸통 모터 초기 Goal Position 전송 준비 실패");
+        return false;
+    }
+
+    const int initial_write_result =
+        dxl_port_->StreamWriteRaw(start_raw);
+
+    dxl_port_->EndStreamWrite();
+
+    if (initial_write_result != COMM_SUCCESS)
+    {
+        RCLCPP_ERROR(
+            this->get_logger(),
+            "몸통 모터 초기 Goal Position 전송 실패");
+        return false;
+    }
+
     // 최초 모션에서만 실제 Torque ON 패킷을 보내며 이후에는 켠 상태를 유지합니다.
     dxl_port_->EnableTorqueAllStreamlitStyle();
 
-    // 모션 사이의 GroupSyncRead 지연을 없애기 위해 직전 모션에서 실제로
-    // 전송한 마지막 목표 위치를 새 궤적의 시작점으로 이어서 사용합니다.
-    const Dxl::RawArray start_raw = dxl_port_->GetLastGoalRaw();
     callback_->SetCurrentRaw(start_raw);
 
     if (!callback_->SelectMotion(motion_id) ||

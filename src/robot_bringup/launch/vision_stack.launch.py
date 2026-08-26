@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""IRC 전체 Vision 실행: webcam YOLO + RealSense ball + webcam hurdle.
+"""IRC 전체 Vision 실행: webcam YOLO + RealSense ball/hoop YOLO.
 
 배치 위치:
   ~/irc/src/robot_bringup/launch/vision_stack.launch.py
@@ -12,9 +12,18 @@ import glob
 import sys
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    OpaqueFunction,
+    TimerAction,
+)
 from launch.conditions import IfCondition
-from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    EnvironmentVariable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+)
 from launch_ros.actions import Node
 
 
@@ -72,24 +81,25 @@ def generate_launch_description() -> LaunchDescription:
     scripts_dir = LaunchConfiguration("scripts_dir")
     settings_ini = LaunchConfiguration("settings_ini")
     start_realsense = LaunchConfiguration("start_realsense")
-    start_webcam = LaunchConfiguration("start_webcam")
     start_yolo = LaunchConfiguration("start_yolo")
     start_realsense_yolo = LaunchConfiguration("start_realsense_yolo")
+    start_realsense_viewer = LaunchConfiguration("start_realsense_viewer")
+    realsense_view_topic = LaunchConfiguration("realsense_view_topic")
     start_ball = LaunchConfiguration("start_ball")
     start_hurdle = LaunchConfiguration("start_hurdle")
-    start_hoop = LaunchConfiguration("start_hoop")
     start_monitor = LaunchConfiguration("start_monitor")
-    start_selector = LaunchConfiguration("start_selector")
 
     yolo_script = PathJoinSubstitution([scripts_dir, "yolo_detector.py"])
     realsense_yolo_script = PathJoinSubstitution(
         [scripts_dir, "realsense_yolo_detector.py"]
     )
     ball_script = PathJoinSubstitution([scripts_dir, "ball_vision_fusion.py"])
-    hurdle_script = PathJoinSubstitution([scripts_dir, "hurdle_vision_fusion.py"])
-    hoop_script = PathJoinSubstitution([scripts_dir, "hoop_vision.py"])
-    monitor_script = PathJoinSubstitution([scripts_dir, "vision_status_monitor.py"])
-    selector_script = PathJoinSubstitution([scripts_dir, "realsense_debug_selector.py"])
+    hurdle_script = PathJoinSubstitution(
+        [scripts_dir, "hurdle_vision_fusion.py"]
+    )
+    monitor_script = PathJoinSubstitution(
+        [scripts_dir, "vision_status_monitor.py"]
+    )
     rgb_stabilizer_script = PathJoinSubstitution(
         [scripts_dir, "realsense_rgb_stabilizer.py"]
     )
@@ -98,7 +108,13 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "scripts_dir",
             default_value=PathJoinSubstitution(
-                [EnvironmentVariable("HOME"), "irc", "src", "vision", "scripts"]
+                [
+                    EnvironmentVariable("HOME"),
+                    "irc",
+                    "src",
+                    "vision",
+                    "scripts",
+                ]
             ),
             description="vision Python scripts/settings/model directory",
         ),
@@ -119,11 +135,19 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("start_webcam", default_value="true"),
         DeclareLaunchArgument("start_yolo", default_value="true"),
         DeclareLaunchArgument("start_realsense_yolo", default_value="true"),
+        DeclareLaunchArgument(
+            "start_realsense_viewer",
+            default_value="true",
+            description="Open an rqt_image_view window for RealSense YOLO.",
+        ),
+        DeclareLaunchArgument(
+            "realsense_view_topic",
+            default_value="/vision/realsense_combined_image",
+            description="RealSense YOLO debug image topic shown by rqt.",
+        ),
         DeclareLaunchArgument("start_ball", default_value="true"),
         DeclareLaunchArgument("start_hurdle", default_value="true"),
-        DeclareLaunchArgument("start_hoop", default_value="false"),
         DeclareLaunchArgument("start_monitor", default_value="true"),
-        DeclareLaunchArgument("start_selector", default_value="true"),
         DeclareLaunchArgument(
             "webcam_device",
             default_value="auto",
@@ -134,13 +158,13 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument("webcam_width", default_value="640"),
         DeclareLaunchArgument("webcam_height", default_value="480"),
-        DeclareLaunchArgument("webcam_fps", default_value="15"),
+        DeclareLaunchArgument("webcam_fps", default_value="30"),
         DeclareLaunchArgument(
             "lock_realsense_rgb_after_warmup",
             default_value="true",
             description=(
                 "Warm up RealSense RGB auto exposure/WB, then lock the "
-                "settled values for stable HSV detection."
+                "settled values for stable YOLO input."
             ),
         ),
         DeclareLaunchArgument(
@@ -150,8 +174,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
     ]
 
-    # RealSense color/depth는 공과 후프 검출에 사용한다. 허들은 아래 webcam
-    # YOLO state만 사용하며 RealSense 영상을 구독하지 않는다.
+    # RealSense color/depth는 하나의 YOLO 노드에서 공과 후프 검출에 사용한다.
     realsense_node = Node(
         package="realsense2_camera",
         executable="realsense2_camera_node",
@@ -170,8 +193,8 @@ def generate_launch_description() -> LaunchDescription:
                 "enable_infra2": False,
                 "enable_gyro": False,
                 "enable_accel": False,
-                "rgb_camera.color_profile": "640,480,15",
-                "depth_module.depth_profile": "640,480,15",
+                "rgb_camera.color_profile": "640,480,30",
+                "depth_module.depth_profile": "640,480,30",
                 "enable_sync": True,
                 "align_depth.enable": True,
                 "pointcloud.enable": False,
@@ -235,15 +258,19 @@ def generate_launch_description() -> LaunchDescription:
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
+    realsense_viewer_node = Node(
+        package="rqt_image_view",
+        executable="rqt_image_view",
+        name="realsense_image_view",
+        arguments=[realsense_view_topic],
+        output="screen",
+        condition=IfCondition(start_realsense_viewer),
+    )
+
+    # 융합 노드는 YOLO JSON 상태만 처리하며 카메라 영상을 다시 구독하지 않는다.
     ball_process = ExecuteProcess(
         name="ball_vision_fusion_process",
-        cmd=[
-            sys.executable,
-            ball_script,
-            "--ros-args",
-            "-p",
-            "use_realsense_yolo:=true",
-        ],
+        cmd=[sys.executable, ball_script],
         cwd=scripts_dir,
         output="screen",
         emulate_tty=True,
@@ -261,27 +288,6 @@ def generate_launch_description() -> LaunchDescription:
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
-    # 시작할 때는 공 검출만 동작하고, 공 소유가 확인되면 hoop 검출로 전환한다.
-    hoop_process = ExecuteProcess(
-        name="hoop_vision_process",
-        cmd=[
-            sys.executable,
-            hoop_script,
-            "--ros-args",
-            "-p",
-            "show_window:=false",
-            "-p",
-            "publish_debug_image:=true",
-            "-p",
-            "active_on_start:=false",
-        ],
-        cwd=scripts_dir,
-        output="screen",
-        emulate_tty=True,
-        condition=IfCondition(start_hoop),
-        additional_env={"PYTHONUNBUFFERED": "1"},
-    )
-
     monitor_process = ExecuteProcess(
         name="vision_status_monitor_process",
         cmd=[sys.executable, monitor_script],
@@ -289,16 +295,6 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         emulate_tty=True,
         condition=IfCondition(start_monitor),
-        additional_env={"PYTHONUNBUFFERED": "1"},
-    )
-
-    selector_process = ExecuteProcess(
-        name="realsense_debug_selector_process",
-        cmd=[sys.executable, selector_script],
-        cwd=scripts_dir,
-        output="screen",
-        emulate_tty=True,
-        condition=IfCondition(start_selector),
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
@@ -311,14 +307,19 @@ def generate_launch_description() -> LaunchDescription:
         actions=[realsense_yolo_process],
     )
 
+    # Viewer subscribes before the detector is ready so debug-frame generation
+    # starts as soon as the TensorRT model finishes loading.
+    delayed_realsense_viewer = TimerAction(
+        period=4.0,
+        actions=[realsense_viewer_node],
+    )
+
     delayed_vision = TimerAction(
         period=2.0,
         actions=[
             ball_process,
             hurdle_process,
-            hoop_process,
             monitor_process,
-            selector_process,
         ],
     )
 
@@ -330,6 +331,7 @@ def generate_launch_description() -> LaunchDescription:
             webcam_node,
             yolo_process,
             delayed_realsense_yolo,
+            delayed_realsense_viewer,
             delayed_vision,
         ]
     )

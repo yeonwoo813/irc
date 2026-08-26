@@ -24,6 +24,8 @@ def _make_harness():
         ball_data=False,
         hurdle_data=False,
         line_buffer=deque([1, 2, 2, 2, 3], maxlen=5),
+        line_vote_detail_buffer=deque(maxlen=5),
+        line_frame_sequence=0,
         ball_buffer=deque([99, 99, 12, 99, 12], maxlen=5),
         hurdle_buffer=deque([99, 26, 99, 99, 26], maxlen=5),
         hurdle_ready_buffer=deque([False, True, False, True, True], maxlen=5),
@@ -358,6 +360,46 @@ def test_callbacks_store_latest_flags_before_motion_is_ready():
     assert list(harness.ball_buffer) == [99, 99, 12, 99, 12]
     assert list(harness.hurdle_buffer) == [99, 26, 99, 99, 26]
     assert list(harness.hurdle_ready_buffer) == [False, True, False, True, True]
+
+
+def test_line_vote_log_contains_the_exact_three_frame_inputs():
+    harness = _make_harness()
+    harness.line_buffer.clear()
+    harness.line_vote_detail_buffer.clear()
+
+    frames = [
+        (21, 5, "curve", -26.9, 68.0, 1.45e-3),
+        (21, 6, "curve", -36.8, 97.0, 2.27e-3),
+        (21, 6, "curve", -34.5, -6.0, 1.30e-3),
+    ]
+    for status, point_count, decision_type, angle, distance, curve_a in frames:
+        MainDecision.LineResultCallback(
+            harness,
+            SimpleNamespace(
+                status=status,
+                angle=abs(angle),
+                follow_point=False,
+                point_count=point_count,
+                decision_type=decision_type,
+                decision_angle=angle,
+                line_distance=distance,
+                curve_a=curve_a,
+            ),
+        )
+
+    harness.motion_end = True
+    assert harness._try_decision_from_cached_results() is True
+
+    vote_logs = [
+        message
+        for message in harness.logger.messages
+        if "[LineVoteFrames]" in message
+    ]
+    assert len(vote_logs) == 1
+    assert "selected=21" in vote_logs[0]
+    assert "seq=1 status=21 type=curve pc=5 angle=-26.9deg distance=+68.0px" in vote_logs[0]
+    assert "seq=2 status=21 type=curve pc=6 angle=-36.8deg distance=+97.0px" in vote_logs[0]
+    assert "seq=3 status=21 type=curve pc=6 angle=-34.5deg distance=-6.0px" in vote_logs[0]
 
 
 def test_confirmed_hurdle_result_stays_latched_until_crossing_completes():

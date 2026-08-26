@@ -66,14 +66,22 @@ class LineDecision:
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
         self.move_distance = 90.0
-        self.steering_distance_max = 130.0
-        self.curve_distance = 100.0
+        self.steering_distance_max = 150.0
 
-        # 직선에서 거리와 각도가 서로 반대 방향을 가리키는 특수
-        # 상황에만 조향각을 사용한다. 평소에는 기존 거리 우선 로직을
-        # 유지하고, 거리 보정은 방향 충돌을 완화하는 용도로 제한한다.
+        # 직선에서 90~150px 구간은 거리와 각도가 서로 반대 방향일 때만
+        # 조향각을 사용하고, 150px 이상에서는 방향과 관계없이 사용한다.
         self.steering_scale_px = 600.0
         self.steering_limit = 10.0
+
+        # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
+        self.curve_forward_angle = 7.0
+        self.curve_fine_turn_angle = 22.5
+        self.curve_turn_angle = 30.0
+
+        self.curve_move_distance = 90.0
+        self.curve_steering_distance_max = 150.0
+        self.curve_steering_scale_px = 600.0
+        self.curve_steering_limit = 10.0
 
 
     def decide(self, features: LineFeatures) -> Tuple[int, float]:
@@ -95,17 +103,11 @@ class LineDecision:
         curve_a = features.curve_a
         is_curve = curve_a is not None and abs(curve_a) > self.curve_a
 
-        # 곡선 구간의 기존 거리 우선 및 접선 각도 판단은 유지한다.
         if is_curve:
-            distance = features.line_distance
-            if (
-                distance is not None
-                and abs(distance) >= self.curve_distance
-            ):
-                if distance < 0:
-                    return LineStatus.Left_Half_Forward, 0.0
-                return LineStatus.Right_Half_Forward, 0.0
-            return self._status_from_curve_angle(features.tangent_angle)
+            return self._status_from_curve_line(
+                features.tangent_angle,
+                features.line_distance,
+            )
 
         return self._status_from_straight_line(
             features.line_angle,
@@ -130,17 +132,25 @@ class LineDecision:
                 and angle_status == LineStatus.Left_Half_Forward
             )
         )
-        use_steering = bool(
+        steering_inputs_valid = bool(
             line_angle is not None
             and line_distance is not None
-            and self.move_distance
-            <= abs(line_distance)
-            < self.steering_distance_max
             and self.forward_angle
             < abs(line_angle)
             <= self.half_turn_angle
+        )
+        use_near_conflict_steering = bool(
+            steering_inputs_valid
+            and self.move_distance
+            <= abs(line_distance)
+            < self.steering_distance_max
             and opposite_half
         )
+        use_far_steering = bool(
+            steering_inputs_valid
+            and abs(line_distance) >= self.steering_distance_max
+        )
+        use_steering = use_near_conflict_steering or use_far_steering
         if use_steering:
             return self._status_from_conflicting_straight_errors(
                 line_angle,
@@ -164,11 +174,66 @@ class LineDecision:
 
         return angle_status, angle_value
 
+    def _status_from_curve_line(
+        self,
+        tangent_angle: Optional[float],
+        line_distance: Optional[float],
+    ) -> Tuple[int, float]:
+        distance_status = self._distance_half_status(
+            line_distance,
+            self.curve_move_distance,
+        )
+        angle_status, angle_value = self._status_from_curve_angle(
+            tangent_angle
+        )
+        opposite_half = bool(
+            (
+                distance_status == LineStatus.Left_Half_Forward
+                and angle_status == LineStatus.Right_Half_Forward
+            )
+            or (
+                distance_status == LineStatus.Right_Half_Forward
+                and angle_status == LineStatus.Left_Half_Forward
+            )
+        )
+        steering_inputs_valid = bool(
+            tangent_angle is not None
+            and line_distance is not None
+            and self.curve_forward_angle
+            < abs(tangent_angle)
+            <= self.curve_half_turn_angle
+        )
+        use_near_conflict_steering = bool(
+            steering_inputs_valid
+            and self.curve_move_distance
+            <= abs(line_distance)
+            < self.curve_steering_distance_max
+            and opposite_half
+        )
+        use_far_steering = bool(
+            steering_inputs_valid
+            and abs(line_distance) >= self.curve_steering_distance_max
+        )
+        if use_near_conflict_steering or use_far_steering:
+            return self._status_from_conflicting_curve_errors(
+                tangent_angle,
+                line_distance,
+            )
+
+        if distance_status is not None:
+            return distance_status, 0.0
+
+        return angle_status, angle_value
+
     def _distance_half_status(
         self,
         line_distance: Optional[float],
+        move_distance: Optional[float] = None,
     ) -> Optional[int]:
-        if line_distance is None or abs(line_distance) < self.move_distance:
+        distance_limit = (
+            self.move_distance if move_distance is None else move_distance
+        )
+        if line_distance is None or abs(line_distance) < distance_limit:
             return None
         if line_distance < 0.0:
             return LineStatus.Left_Half_Forward
@@ -198,6 +263,34 @@ class LineDecision:
         if (
             status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
             and abs(line_angle) <= self.half_turn_angle
+        ):
+            if steering_angle < 0.0:
+                return LineStatus.Left_Turn_Half, abs(steering_angle)
+            return LineStatus.Right_Turn_Half, abs(steering_angle)
+
+        return status, angle
+
+    def _status_from_conflicting_curve_errors(
+        self,
+        tangent_angle: float,
+        line_distance: float,
+    ) -> Tuple[int, float]:
+        distance_angle = math.degrees(
+            math.atan(
+                line_distance
+                / self.curve_steering_scale_px
+            )
+        )
+        distance_angle = max(
+            -self.curve_steering_limit,
+            min(self.curve_steering_limit, distance_angle),
+        )
+        steering_angle = tangent_angle + distance_angle
+        status, angle = self._status_from_curve_angle(steering_angle)
+
+        if (
+            status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
+            and abs(tangent_angle) <= self.curve_half_turn_angle
         ):
             if steering_angle < 0.0:
                 return LineStatus.Left_Turn_Half, abs(steering_angle)
@@ -249,27 +342,31 @@ class LineDecision:
 
     #곡선구간에서 판단 기준
     def _status_from_curve_angle(self, angle: Optional[float]) -> Tuple[int, float]:
-            if angle is None:
-                return LineStatus.Line_Lost, 0.0
+        if angle is None:
+            return LineStatus.Line_Lost, 0.0
 
-            abs_angle = abs(angle)
+        abs_angle = abs(angle)
 
-            # 7도 이하: 직진
-            if abs_angle <= self.forward_angle:
-                return LineStatus.Forward_4step, 0.0
+        # 7도 이하: 직진
+        if abs_angle <= self.curve_forward_angle:
+            return LineStatus.Forward_4step, 0.0
 
-            # 7~22.5도: 미세회전
-            if abs_angle <= self.fine_turn_angle:
-                if angle < 0:
-                    return LineStatus.Left_Half_Forward, abs_angle
-                else:
-                    return LineStatus.Right_Half_Forward, abs_angle
-
-            # 22.5도 초과: curve 회전
+        # 7~22.5도: 미세회전
+        if abs_angle <= self.curve_fine_turn_angle:
             if angle < 0:
-                return LineStatus.Left_Turn_Curve, abs_angle
-            else:
-                return LineStatus.Right_Turn_Curve, abs_angle
+                return LineStatus.Left_Half_Forward, abs_angle
+            return LineStatus.Right_Half_Forward, abs_angle
+
+        # 22.5~30도: 제자리회전
+        if abs_angle <= self.curve_turn_angle:
+            if angle < 0:
+                return LineStatus.Left_Turn, abs_angle
+            return LineStatus.Right_Turn, abs_angle
+
+        # 30도 이상: curve 회전
+        if angle < 0:
+            return LineStatus.Left_Turn_Curve, abs_angle
+        return LineStatus.Right_Turn_Curve, abs_angle
 
 
 class LineStatusPublisher:
@@ -312,11 +409,36 @@ class LineStatusPublisher:
         #라인 상태를 판단
         status, angle = self.line_decision.decide(features)
 
+        if point_count <= 0:
+            decision_type = "lost"
+            decision_angle = None
+        elif point_count == 1:
+            decision_type = "follow"
+            decision_angle = follow_angle
+        elif point_count <= 3:
+            decision_type = "straight"
+            decision_angle = line_angle
+        elif curve_a is not None and abs(curve_a) > self.line_decision.curve_a:
+            decision_type = "curve"
+            decision_angle = tangent_angle
+        else:
+            decision_type = "straight"
+            decision_angle = line_angle
+
         #라인 상태를 Publish
         msg = LineResult()
         msg.status = int(status)
         msg.angle = float(angle)
         msg.follow_point = False
+        msg.point_count = int(max(0, point_count))
+        msg.decision_type = decision_type
+        msg.decision_angle = float(
+            decision_angle if decision_angle is not None else math.nan
+        )
+        msg.line_distance = float(
+            line_distance if line_distance is not None else math.nan
+        )
+        msg.curve_a = float(curve_a if curve_a is not None else math.nan)
 
         self.line_pub.publish(msg)
 

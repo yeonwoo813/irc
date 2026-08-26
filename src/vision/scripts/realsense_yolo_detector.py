@@ -14,6 +14,10 @@ Outputs:
 - /hoop/vision_state
 - /realsense_yolo/ball_detected
 - /hoop/detected
+- /vision/realsense_ball_image
+- /vision/realsense_hoop_image
+- /vision/realsense_combined_image
+- /vision/realsense_debug_image (currently active mode)
 - /ball/realsense_debug_image
 - /hoop/debug_image
 
@@ -48,6 +52,70 @@ try:
     from ultralytics import YOLO
 except ImportError:
     YOLO = None
+
+
+YELLOW = (0, 235, 255)
+CYAN = (245, 235, 180)
+WHITE = (255, 255, 255)
+PANEL_BG = (18, 18, 18)
+
+
+def _display_number(
+    value: object,
+    suffix: str = "",
+    digits: int = 1,
+) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not math.isfinite(number):
+        return "N/A"
+    return f"{number:.{digits}f}{suffix}"
+
+
+def draw_info_panel(
+    frame: np.ndarray,
+    lines: List[str],
+    *,
+    align: str = "left",
+) -> None:
+    """Draw the old OpenCV-style information panel with a yellow border."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.42
+    thickness = 1
+    padding_x, padding_y = 8, 7
+    line_gap = 6
+    sizes = [
+        cv2.getTextSize(line, font, scale, thickness)[0]
+        for line in lines
+    ]
+    text_height = max((size[1] for size in sizes), default=10)
+    width = max((size[0] for size in sizes), default=80) + padding_x * 2
+    height = (
+        padding_y * 2
+        + len(lines) * text_height
+        + max(0, len(lines) - 1) * line_gap
+    )
+    x1 = 6 if align == "left" else max(6, frame.shape[1] - width - 6)
+    y1 = 6
+    x2 = min(frame.shape[1] - 2, x1 + width)
+    y2 = min(frame.shape[0] - 2, y1 + height)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), PANEL_BG, -1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), YELLOW, 2)
+
+    baseline = y1 + padding_y + text_height
+    for index, line in enumerate(lines):
+        cv2.putText(
+            frame,
+            line,
+            (x1 + padding_x, baseline + index * (text_height + line_gap)),
+            font,
+            scale,
+            WHITE,
+            thickness,
+            cv2.LINE_AA,
+        )
 
 
 @dataclass
@@ -178,8 +246,17 @@ class RealSenseYoloDetector(Node):
         # TRANSIENT_LOCAL activity topics when running the full stack.
         self.ball_active = True
         self.hoop_active = False
+        # OFF -> ON 순서로 모드를 전환하는 짧은 구간에도 마지막 화면을
+        # 유지한다. 화면 토픽 이름은 바뀌지 않고 패널 내용만 전환된다.
+        self.display_mode = "ball"
         self.last_inference_time = 0.0
         self.frame_count = 0
+        self.latest_ball_detection: Optional[Detection] = None
+        self.latest_backboard_detection: Optional[Detection] = None
+        self.latest_goal_detection: Optional[Detection] = None
+        self.latest_ball_state = self._empty_ball_state(True)
+        self.latest_hoop_state = self._empty_hoop_state(False)
+        self.latest_process_ms = 0.0
 
         self.image_qos = QoSProfile(
             depth=1,
@@ -191,12 +268,19 @@ class RealSenseYoloDetector(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # JSON 상태도 오래된 샘플을 쌓지 않는다. RELIABLE을 유지해 기존
+        # ball_vision_fusion/decision 구독자와의 QoS 호환성은 보존한다.
+        self.state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         self.ball_state_pub = self.create_publisher(
-            String, "/realsense_yolo/ball_state", 10
+            String, "/realsense_yolo/ball_state", self.state_qos
         )
         self.hoop_state_pub = self.create_publisher(
-            String, "/hoop/vision_state", 10
+            String, "/hoop/vision_state", self.state_qos
         )
         self.ball_detected_pub = self.create_publisher(
             Bool, "/realsense_yolo/ball_detected", 10
@@ -205,8 +289,23 @@ class RealSenseYoloDetector(Node):
             Bool, "/hoop/detected", 10
         )
 
-        # Keep legacy debug topic names so realsense_debug_selector.py
-        # does not need modification.
+        # 각 화면은 같은 YOLO 추론 결과로 만들며, 실제 구독자가 있을 때만
+        # frame.copy/OpenCV drawing/image publish를 수행한다.
+        self.ball_view_pub = self.create_publisher(
+            Image, "/vision/realsense_ball_image", self.image_qos
+        )
+        self.hoop_view_pub = self.create_publisher(
+            Image, "/vision/realsense_hoop_image", self.image_qos
+        )
+        self.combined_view_pub = self.create_publisher(
+            Image, "/vision/realsense_combined_image", self.image_qos
+        )
+        self.selected_view_pub = self.create_publisher(
+            Image, "/vision/realsense_debug_image", self.image_qos
+        )
+
+        # 기존 rqt 설정/외부 스크립트용 호환 토픽이다. 새 launch에서는
+        # selector를 실행하지 않으므로 중복 영상 복사나 재발행이 없다.
         self.ball_debug_pub = self.create_publisher(
             Image, "/ball/realsense_debug_image", self.image_qos
         )
@@ -254,7 +353,8 @@ class RealSenseYoloDetector(Node):
 
         self.get_logger().info(
             "RealSenseYoloDetector started "
-            f"max_fps={float(self.cfg['max_fps']):.1f}"
+            f"max_fps={float(self.cfg['max_fps']):.1f}; "
+            "rqt topics=ball, hoop, combined, active-mode"
         )
 
     def cb_camera_info(self, msg: CameraInfo) -> None:
@@ -279,6 +379,8 @@ class RealSenseYoloDetector(Node):
 
     def cb_ball_active(self, msg: Bool) -> None:
         requested = bool(msg.data)
+        if requested:
+            self.display_mode = "ball"
         if requested == self.ball_active:
             return
         self.ball_active = requested
@@ -290,6 +392,8 @@ class RealSenseYoloDetector(Node):
 
     def cb_hoop_active(self, msg: Bool) -> None:
         requested = bool(msg.data)
+        if requested:
+            self.display_mode = "hoop"
         if requested == self.hoop_active:
             return
         self.hoop_active = requested
@@ -520,6 +624,7 @@ class RealSenseYoloDetector(Node):
             "robot_bottom_y": float(robot_y),
             "confidence": det.conf,
             "target_class": det.name,
+            "backboard_bbox": [det.x1, det.y1, det.x2, det.y2],
             "backboard_detected": True,
             "active": self.hoop_active,
             "camera_info_received": self.camera_info_received,
@@ -566,6 +671,7 @@ class RealSenseYoloDetector(Node):
             "robot_bottom_y": None,
             "confidence": 0.0,
             "target_class": None,
+            "backboard_bbox": [],
             "backboard_detected": False,
             "active": active,
             "source": "realsense_yolo",
@@ -583,37 +689,71 @@ class RealSenseYoloDetector(Node):
         self.hoop_state_pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
         self.hoop_detected_pub.publish(Bool(data=bool(state.get("detected", False))))
 
-    def _draw_debug(
+    @staticmethod
+    def _draw_detection(
+        frame: np.ndarray,
+        detection: Optional[Detection],
+        label: str,
+    ) -> None:
+        if detection is None:
+            return
+        x1, y1, x2, y2 = map(
+            int,
+            [
+                detection.x1,
+                detection.y1,
+                detection.x2,
+                detection.y2,
+            ],
+        )
+        cv2.rectangle(frame, (x1, y1), (x2, y2), YELLOW, 3)
+        cv2.putText(
+            frame,
+            f"{label} {detection.conf:.2f}",
+            (x1, max(18, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.50,
+            YELLOW,
+            2,
+            cv2.LINE_AA,
+        )
+
+    def _draw_target_guide(
         self,
         frame: np.ndarray,
-        dets: List[Detection],
+        detection: Optional[Detection],
+    ) -> None:
+        if detection is None:
+            return
+        centerline_x = int(round(self.centerline_x_px))
+        robot = (centerline_x, frame.shape[0] - 1)
+        target = (
+            int(round(detection.cx)),
+            int(round(detection.cy)),
+        )
+        cv2.line(frame, robot, target, CYAN, 2, cv2.LINE_AA)
+        cv2.circle(frame, target, 5, YELLOW, -1)
+        cv2.circle(frame, robot, 5, WHITE, -1)
+
+    def _draw_debug_view(
+        self,
+        frame: np.ndarray,
+        mode: str,
+        ball: Optional[Detection],
+        backboard: Optional[Detection],
+        goal: Optional[Detection],
         ball_state: Dict[str, object],
         hoop_state: Dict[str, object],
         process_ms: float,
     ) -> np.ndarray:
         debug = frame.copy()
-        colors = {
-            str(self.cfg["ball_class"]): (0, 180, 255),
-            str(self.cfg["backboard_class"]): (255, 220, 120),
-        }
-
-        for det in dets:
-            if det.name == str(self.cfg["goal_class"]):
-                continue
-            color = colors.get(det.name, (210, 210, 210))
-            x1, y1, x2, y2 = map(int, [det.x1, det.y1, det.x2, det.y2])
-            cv2.rectangle(debug, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(
-                debug,
-                f"{det.name} {det.conf:.2f}",
-                (x1, max(18, y1 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
-
+        cv2.rectangle(
+            debug,
+            (1, 1),
+            (debug.shape[1] - 2, debug.shape[0] - 2),
+            YELLOW,
+            2,
+        )
         centerline_x = int(round(self.centerline_x_px))
         cv2.line(
             debug,
@@ -623,118 +763,203 @@ class RealSenseYoloDetector(Node):
             1,
         )
 
-        info_lines = []
-        if bool(hoop_state.get("detected", False)):
-            target_x = int(round(float(hoop_state["center_x"])))
-            target_y = int(round(float(hoop_state["center_y"])))
-            robot_y = debug.shape[0] - 1
-            guide_color = (245, 235, 180)
-            cv2.circle(debug, (target_x, target_y), 5, guide_color, -1)
-            cv2.line(
-                debug,
-                (centerline_x, robot_y),
-                (target_x, target_y),
-                guide_color,
-                2,
+        show_ball = mode in {"ball", "combined"}
+        show_hoop = mode in {"hoop", "combined"}
+        if show_ball:
+            self._draw_detection(debug, ball, "BALL")
+            self._draw_target_guide(debug, ball)
+            ball_depth_valid = bool(
+                ball_state.get("realsense_ball_detected", False)
             )
-            cv2.circle(
-                debug,
-                (centerline_x, robot_y),
-                5,
-                guide_color,
-                -1,
-            )
-
-            info_lines.extend([
+            ball_mode = "ACTIVE" if self.ball_active else "PREVIEW"
+            ball_lines = [
+                f"REALSENSE YOLO / BALL {ball_mode}",
+                f"detect:{'YES' if ball is not None else 'NO'} "
+                f"conf:{_display_number(ball.conf if ball else None, digits=2)}",
                 (
-                    "HOOP DIST: "
-                    f"{float(hoop_state['realsense_goal_distance_cm']):.1f}cm"
+                    "distance:"
+                    f"{_display_number(ball_state.get('realsense_ball_distance_cm'), 'cm')}"
                 ),
-                f"ANGLE: {float(hoop_state['realsense_goal_angle']):+.1f}deg",
-            ])
-
-        if bool(ball_state.get("realsense_ball_detected", False)):
-            info_lines.extend([
                 (
-                    "BALL DIST: "
-                    f"{float(ball_state['realsense_ball_distance_cm']):.1f}cm"
+                    "angle:"
+                    f"{_display_number(ball_state.get('realsense_ball_angle_error'), 'deg')}"
                 ),
-                f"ANGLE: {float(ball_state['realsense_ball_angle_error']):+.1f}deg",
-            ])
+                (
+                    "x:"
+                    f"{_display_number(ball_state.get('raw_x_m'), 'm', 3)} "
+                    "y:"
+                    f"{_display_number(ball_state.get('raw_y_m'), 'm', 3)}"
+                ),
+                (
+                    "z:"
+                    f"{_display_number(ball_state.get('raw_z_m'), 'm', 3)} "
+                    f"depth:{'OK' if ball_depth_valid else 'INVALID'}"
+                ),
+                f"inference:{process_ms:.1f}ms",
+            ]
+            draw_info_panel(debug, ball_lines, align="left")
 
-        info_y = 24
-        for text in info_lines:
-            (text_width, _), _ = cv2.getTextSize(
-                text,
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                1,
-            )
-            info_x = max(10, debug.shape[1] - text_width - 10)
-            cv2.putText(
+        if show_hoop:
+            # backboard가 거리/각도 기준이고 goal은 모델의 추가 검출 정보다.
+            self._draw_detection(debug, backboard, "BACKBOARD")
+            if goal is not None:
+                self._draw_detection(debug, goal, "GOAL")
+            self._draw_target_guide(debug, backboard)
+            hoop_depth_valid = bool(hoop_state.get("detected", False))
+            hoop_mode = "ACTIVE" if self.hoop_active else "PREVIEW"
+            hoop_lines = [
+                f"REALSENSE YOLO / HOOP {hoop_mode}",
+                f"detect:{'YES' if backboard is not None else 'NO'} "
+                f"conf:{_display_number(backboard.conf if backboard else None, digits=2)}",
+                (
+                    "distance:"
+                    f"{_display_number(hoop_state.get('realsense_goal_distance_cm'), 'cm')}"
+                ),
+                (
+                    "angle:"
+                    f"{_display_number(hoop_state.get('realsense_goal_angle'), 'deg')}"
+                ),
+                (
+                    "center:"
+                    f"{_display_number(hoop_state.get('center_x'), 'px')} / "
+                    f"{_display_number(hoop_state.get('center_y'), 'px')}"
+                ),
+                (
+                    "depth:"
+                    f"{_display_number(hoop_state.get('center_depth_cm'), 'cm')} "
+                    f"{'OK' if hoop_depth_valid else 'INVALID'}"
+                ),
+                f"inference:{process_ms:.1f}ms",
+            ]
+            draw_info_panel(
                 debug,
-                text,
-                (info_x, info_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                (0, 0, 0),
-                3,
-                cv2.LINE_AA,
+                hoop_lines,
+                align="right" if mode == "combined" else "left",
             )
-            cv2.putText(
-                debug,
-                text,
-                (info_x, info_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-            info_y += 23
-
-        lines = [
-            f"RS YOLO {process_ms:.1f}ms B:{int(self.ball_active)} H:{int(self.hoop_active)}"
-        ]
-        if (
-            not bool(ball_state.get("realsense_ball_detected", False))
-            and self.ball_active
-        ):
-            lines.append("BALL MISS")
-
-        y = 24
-        for text in lines:
-            cv2.putText(
-                debug,
-                text,
-                (10, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            y += 23
         return debug
 
+    @staticmethod
+    def _has_viewer(publisher) -> bool:
+        return publisher.get_subscription_count() > 0
+
+    def _debug_view_requested(self) -> bool:
+        if not bool(self.cfg["publish_debug_image"]):
+            return False
+        return any(
+            self._has_viewer(publisher)
+            for publisher in (
+                self.ball_view_pub,
+                self.hoop_view_pub,
+                self.combined_view_pub,
+                self.selected_view_pub,
+                self.ball_debug_pub,
+                self.hoop_debug_pub,
+            )
+        )
+
+    def _publish_debug_views(
+        self,
+        frame: np.ndarray,
+        color_msg: Image,
+        ball: Optional[Detection],
+        backboard: Optional[Detection],
+        goal: Optional[Detection],
+        ball_state: Dict[str, object],
+        hoop_state: Dict[str, object],
+        process_ms: float,
+    ) -> None:
+        if not bool(self.cfg["publish_debug_image"]):
+            return
+
+        publishers = {"ball": [], "hoop": [], "combined": []}
+        if self._has_viewer(self.ball_view_pub):
+            publishers["ball"].append(self.ball_view_pub)
+        if self._has_viewer(self.hoop_view_pub):
+            publishers["hoop"].append(self.hoop_view_pub)
+        if self._has_viewer(self.combined_view_pub):
+            publishers["combined"].append(self.combined_view_pub)
+        if self._has_viewer(self.ball_debug_pub):
+            publishers["ball"].append(self.ball_debug_pub)
+        if self._has_viewer(self.hoop_debug_pub):
+            publishers["hoop"].append(self.hoop_debug_pub)
+        if self._has_viewer(self.selected_view_pub):
+            selected_mode = getattr(self, "display_mode", "ball")
+            publishers[selected_mode].append(self.selected_view_pub)
+
+        for mode, outputs in publishers.items():
+            if not outputs:
+                continue
+            debug = self._draw_debug_view(
+                frame,
+                mode,
+                ball,
+                backboard,
+                goal,
+                ball_state,
+                hoop_state,
+                process_ms,
+            )
+            debug_msg = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
+            debug_msg.header = color_msg.header
+            for publisher in outputs:
+                publisher.publish(debug_msg)
+
+    def _publish_cached_debug(
+        self,
+        frame: np.ndarray,
+        color_msg: Image,
+    ) -> None:
+        """Keep image topics moving while inference is throttled or recovering."""
+        self._publish_debug_views(
+            frame,
+            color_msg,
+            self.latest_ball_detection,
+            self.latest_backboard_detection,
+            self.latest_goal_detection,
+            self.latest_ball_state,
+            self.latest_hoop_state,
+            self.latest_process_ms,
+        )
+
     def cb_images(self, color_msg: Image, depth_msg: Image) -> None:
-        if not self.ball_active and not self.hoop_active:
+        debug_requested = self._debug_view_requested()
+        if (
+            not self.ball_active
+            and not self.hoop_active
+            and not debug_requested
+        ):
             return
 
         now = time.monotonic()
         max_fps = max(0.1, float(self.cfg["max_fps"]))
-        if now - self.last_inference_time < 1.0 / max_fps:
+        # 카메라와 max_fps가 모두 30일 때 타임스탬프 흔들림 때문에 매 두 번째
+        # 프레임이 버려지지 않도록 10% 허용한다. 추론을 쉬는 프레임도 아래에서
+        # 최신 결과를 새 원본 영상 위에 그려 화면 송출 자체는 계속한다.
+        should_infer = (
+            now - self.last_inference_time >= (1.0 / max_fps) * 0.90
+        )
+        if not should_infer and not debug_requested:
             return
-        self.last_inference_time = now
 
-        start = time.perf_counter()
         try:
             frame = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
+        except Exception as exc:
+            self.get_logger().warning(f"Color conversion failed: {exc}")
+            return
+
+        if not should_infer:
+            self._publish_cached_debug(frame, color_msg)
+            return
+
+        self.last_inference_time = now
+        start = time.perf_counter()
+        try:
             depth_raw = self.bridge.imgmsg_to_cv2(
                 depth_msg, desired_encoding="passthrough"
             )
         except Exception as exc:
-            self.get_logger().warning(f"Image conversion failed: {exc}")
+            self.get_logger().warning(f"Depth conversion failed: {exc}")
+            self._publish_cached_debug(frame, color_msg)
             return
 
         depth_m = self._depth_m(np.asarray(depth_raw), depth_msg.encoding)
@@ -746,58 +971,54 @@ class RealSenseYoloDetector(Node):
             self.get_logger().warning(
                 "Color/depth mismatch; aligned_depth_to_color is required"
             )
+            self._publish_cached_debug(frame, color_msg)
             return
 
         try:
             dets = self._run_yolo(frame)
         except Exception as exc:
             self.get_logger().error(f"YOLO inference failed: {exc}")
+            self._publish_cached_debug(frame, color_msg)
             return
 
         ball = self._best(dets, str(self.cfg["ball_class"]))
         backboard = self._best(dets, str(self.cfg["backboard_class"]))
+        goal = self._best(dets, str(self.cfg["goal_class"]))
 
         process_ms = (time.perf_counter() - start) * 1000.0
 
-        ball_state = (
-            self._make_ball_state(ball, depth_m, process_ms)
-            if self.ball_active
-            else self._empty_ball_state(False)
+        # 추론은 한 번만 수행한다. 두 상태를 같은 결과에서 계산해 별도/통합
+        # rqt 화면이 모드 전환 중에도 같은 프레임을 보여 주게 한다. 실제 판단용
+        # 상태 토픽은 아래에서 활성 모드일 때만 발행한다.
+        ball_state = self._make_ball_state(ball, depth_m, process_ms)
+        hoop_state = self._make_hoop_state(
+            backboard,
+            depth_m,
+            frame.shape[0],
+            process_ms,
         )
-        hoop_state = (
-            self._make_hoop_state(
-                backboard,
-                depth_m,
-                frame.shape[0],
-                process_ms,
-            )
-            if self.hoop_active
-            else self._empty_hoop_state(False)
-        )
+        self.latest_ball_detection = ball
+        self.latest_backboard_detection = backboard
+        self.latest_goal_detection = goal
+        self.latest_ball_state = ball_state
+        self.latest_hoop_state = hoop_state
+        self.latest_process_ms = process_ms
 
         if self.ball_active:
             self._publish_ball_state(ball_state)
         if self.hoop_active:
             self._publish_hoop_state(hoop_state)
 
-        if bool(self.cfg["publish_debug_image"]):
-            debug_hoop_state = hoop_state
-            if not self.hoop_active:
-                debug_hoop_state = self._make_hoop_state(
-                    backboard,
-                    depth_m,
-                    frame.shape[0],
-                    process_ms,
-                )
-            debug = self._draw_debug(
-                frame, dets, ball_state, debug_hoop_state, process_ms
-            )
-            msg = self.bridge.cv2_to_imgmsg(debug, encoding="bgr8")
-            msg.header = color_msg.header
-            if self.ball_active:
-                self.ball_debug_pub.publish(msg)
-            if self.hoop_active:
-                self.hoop_debug_pub.publish(msg)
+        self._publish_debug_views(
+            frame,
+            color_msg,
+            ball,
+            backboard,
+            goal,
+            ball_state,
+            hoop_state,
+            process_ms,
+        )
 
         self.frame_count += 1
         every = max(1, int(self.cfg["print_every_n_frames"]))

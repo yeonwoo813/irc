@@ -31,7 +31,7 @@ class CurveDistancePriorityTest(unittest.TestCase):
 
     def test_curve_far_right_prioritizes_right_distance_correction(self) -> None:
         status, angle = self.decision.decide(
-            self._curve_features(self.decision.curve_distance)
+            self._curve_features(self.decision.curve_move_distance)
         )
 
         self.assertEqual(status, LineStatus.Right_Half_Forward)
@@ -39,7 +39,7 @@ class CurveDistancePriorityTest(unittest.TestCase):
 
     def test_curve_far_left_prioritizes_left_distance_correction(self) -> None:
         status, angle = self.decision.decide(
-            self._curve_features(-self.decision.curve_distance)
+            self._curve_features(-self.decision.curve_move_distance)
         )
 
         self.assertEqual(status, LineStatus.Left_Half_Forward)
@@ -47,21 +47,113 @@ class CurveDistancePriorityTest(unittest.TestCase):
 
     def test_curve_inside_distance_limit_uses_tangent_angle(self) -> None:
         status, angle = self.decision.decide(
-            self._curve_features(self.decision.curve_distance - 1.0)
+            self._curve_features(self.decision.curve_move_distance - 1.0)
         )
 
-        self.assertEqual(status, LineStatus.Left_Turn_Curve)
+        self.assertEqual(status, LineStatus.Left_Turn)
         self.assertEqual(angle, 35.0)
 
-    def test_curve_opposite_half_errors_do_not_use_straight_steering(self) -> None:
+    def test_curve_near_opposite_errors_use_combined_steering(self) -> None:
         features = self._curve_features(95.0)
         features.line_angle = -15.0
         features.tangent_angle = -15.0
 
         status, angle = self.decision.decide(features)
 
-        self.assertEqual(status, LineStatus.Left_Half_Forward)
-        self.assertEqual(angle, 15.0)
+        self.assertEqual(status, LineStatus.Forward_4step)
+        self.assertEqual(angle, 0.0)
+
+    def test_curve_below_far_limit_same_direction_keeps_distance_priority(
+        self,
+    ) -> None:
+        features = self._curve_features(
+            self.decision.curve_steering_distance_max - 1.0
+        )
+        features.tangent_angle = 15.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 0.0)
+
+    def test_curve_far_same_direction_uses_combined_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.curve_steering_distance_max
+        )
+        features.tangent_angle = 15.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Turn_Half)
+        self.assertEqual(angle, 25.0)
+
+    def test_curve_far_opposite_direction_uses_combined_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.curve_steering_distance_max
+        )
+        features.tangent_angle = -15.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Forward_4step)
+        self.assertEqual(angle, 0.0)
+
+    def test_curve_thresholds_are_independent_from_straight_thresholds(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.decision.curve_forward_angle,
+            self.decision.forward_angle,
+        )
+        self.assertEqual(
+            self.decision.curve_fine_turn_angle,
+            self.decision.fine_turn_angle,
+        )
+        self.assertEqual(
+            self.decision.curve_half_turn_angle,
+            self.decision.half_turn_angle,
+        )
+        self.assertEqual(
+            self.decision.curve_large_turn_angle,
+            self.decision.large_turn_angle,
+        )
+
+        self.decision.curve_forward_angle = 8.0
+        self.decision.curve_fine_turn_angle = 24.0
+        self.decision.curve_half_turn_angle = 32.0
+        self.decision.curve_large_turn_angle = 50.0
+        self.decision.curve_move_distance = 110.0
+
+        self.assertEqual(self.decision.forward_angle, 7.0)
+        self.assertEqual(self.decision.fine_turn_angle, 22.5)
+        self.assertEqual(self.decision.half_turn_angle, 30.0)
+        self.assertEqual(self.decision.large_turn_angle, 45.0)
+        self.assertEqual(self.decision.move_distance, 90.0)
+
+    def test_curve_angle_bands_use_curve_thresholds(self) -> None:
+        cases = [
+            (7.0, LineStatus.Forward_4step),
+            (7.1, LineStatus.Right_Half_Forward),
+            (22.5, LineStatus.Right_Half_Forward),
+            (22.6, LineStatus.Right_Turn_Half),
+            (29.9, LineStatus.Right_Turn_Half),
+            (30.0, LineStatus.Right_Turn),
+            (44.9, LineStatus.Right_Turn),
+            (45.0, LineStatus.Right_Turn_Curve),
+            (-7.0, LineStatus.Forward_4step),
+            (-7.1, LineStatus.Left_Half_Forward),
+            (-22.5, LineStatus.Left_Half_Forward),
+            (-22.6, LineStatus.Left_Turn_Half),
+            (-29.9, LineStatus.Left_Turn_Half),
+            (-30.0, LineStatus.Left_Turn),
+            (-44.9, LineStatus.Left_Turn),
+            (-45.0, LineStatus.Left_Turn_Curve),
+        ]
+
+        for angle, expected_status in cases:
+            with self.subTest(angle=angle):
+                status, _ = self.decision._status_from_curve_angle(angle)
+                self.assertEqual(status, expected_status)
 
     def test_straight_far_same_direction_keeps_distance_priority(self) -> None:
         features = self._curve_features(self.decision.move_distance)
@@ -119,7 +211,7 @@ class CurveDistancePriorityTest(unittest.TestCase):
         )
         self.assertAlmostEqual(angle, expected_angle)
 
-    def test_straight_far_conflict_keeps_distance_priority(self) -> None:
+    def test_straight_far_conflict_uses_combined_steering(self) -> None:
         features = self._curve_features(
             self.decision.steering_distance_max
         )
@@ -128,8 +220,34 @@ class CurveDistancePriorityTest(unittest.TestCase):
 
         status, angle = self.decision.decide(features)
 
+        self.assertEqual(status, LineStatus.Forward_4step)
+        self.assertEqual(angle, 0.0)
+
+    def test_straight_below_far_limit_same_direction_keeps_distance_priority(
+        self,
+    ) -> None:
+        features = self._curve_features(
+            self.decision.steering_distance_max - 1.0
+        )
+        features.curve_a = 0.0
+        features.line_angle = 15.0
+
+        status, angle = self.decision.decide(features)
+
         self.assertEqual(status, LineStatus.Right_Half_Forward)
         self.assertEqual(angle, 0.0)
+
+    def test_straight_far_same_direction_uses_combined_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.steering_distance_max
+        )
+        features.curve_a = 0.0
+        features.line_angle = 15.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Turn_Half)
+        self.assertEqual(angle, 25.0)
 
     def test_straight_turn_half_does_not_use_steering(self) -> None:
         features = self._curve_features(118.0)

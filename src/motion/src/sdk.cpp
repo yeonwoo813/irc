@@ -951,7 +951,7 @@ void SDK_Motion::define_motions()
 
     motion_pickup_ball.durations =
     {
-        0.1,
+        0.5,
         0.06,
         0.07,
         0.07,
@@ -1656,7 +1656,7 @@ void SDK_Motion::define_motions()
         {2066,1372,2251,2220,2050,2082,2750,1699,1472,2049,2046,2119,2058,1076,2236,2123,727,2436,3075,2144,1984,1965}
     };
 
-    motion_throw_close.durations = {0.5, 1.0, 0.1, 0.2};
+    motion_throw_close.durations = {0.5, 1.0, 0.1, 0.3};
     motion_throw_close.blends =
     {
         BlendType::Smooth,

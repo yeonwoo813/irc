@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <sstream>
 #include <thread>
 
 Dxl::Dxl(bool use_virtual)
@@ -254,6 +255,169 @@ bool Dxl::ReadPresentRawStreamlitStyle(RawArray& raw)
                         4));
             }
         }
+    }
+
+    group_sync_read.clearParam();
+    return true;
+}
+
+
+bool Dxl::ReadPresentRawStrict(RawArray& raw)
+{
+    if (virtual_mode_)
+    {
+        raw = last_goal_raw_;
+        return true;
+    }
+
+    if (!ready_ || !port_open_)
+    {
+        return false;
+    }
+
+    dynamixel::GroupSyncRead group_sync_read(
+        portHandler_,
+        packetHandler_,
+        DxlReg_PresentPosition,
+        4);
+
+    for (std::size_t i = 0; i < dxl_id_.size(); ++i)
+    {
+        if (!group_sync_read.addParam(dxl_id_[i]))
+        {
+            std::cerr
+                << "[Error] 초기 위치 GroupSyncRead 등록 실패: "
+                << "motor_id=" << static_cast<int>(dxl_id_[i])
+                << std::endl;
+            group_sync_read.clearParam();
+            return false;
+        }
+    }
+
+    const int group_comm_result = group_sync_read.txRxPacket();
+    if (group_comm_result != COMM_SUCCESS)
+    {
+        std::cerr
+            << "[Error] 초기 위치 GroupSyncRead 통신 실패: code="
+            << group_comm_result << " ("
+            << packetHandler_->getTxRxResult(group_comm_result)
+            << "). ID별 진단 읽기를 시작합니다."
+            << std::endl;
+
+        group_sync_read.clearParam();
+
+        // 동시 읽기 실패 시에만 개별 읽기를 수행하여 응답하지 않는 ID를 찾습니다.
+        portHandler_->clearPort();
+        int first_failed_id = -1;
+        std::ostringstream failed_ids;
+
+        for (std::size_t i = 0; i < dxl_id_.size(); ++i)
+        {
+            const uint8_t id = dxl_id_[i];
+            uint8_t dxl_error = 0;
+            uint32_t raw_unsigned = 0;
+            const int comm_result = packetHandler_->read4ByteTxRx(
+                portHandler_,
+                id,
+                DxlReg_PresentPosition,
+                &raw_unsigned,
+                &dxl_error);
+
+            if (comm_result != COMM_SUCCESS || dxl_error != 0)
+            {
+                if (first_failed_id < 0)
+                {
+                    first_failed_id = static_cast<int>(id);
+                }
+                if (failed_ids.tellp() > 0)
+                {
+                    failed_ids << ',';
+                }
+                failed_ids << static_cast<int>(id);
+
+                std::cerr
+                    << "[Error] 초기 위치 개별 읽기 실패: motor_id="
+                    << static_cast<int>(id)
+                    << ", comm_code=" << comm_result
+                    << " (" << packetHandler_->getTxRxResult(comm_result)
+                    << "), dxl_error=" << static_cast<int>(dxl_error);
+                if (dxl_error != 0)
+                {
+                    std::cerr
+                        << " ("
+                        << packetHandler_->getRxPacketError(dxl_error)
+                        << ')';
+                }
+                std::cerr << std::endl;
+                continue;
+            }
+
+            std::cerr
+                << "[Info] 초기 위치 개별 읽기 성공: motor_id="
+                << static_cast<int>(id)
+                << ", raw=" << raw_unsigned
+                << std::endl;
+        }
+
+        if (first_failed_id < 0)
+        {
+            std::cerr
+                << "[Error] 동시 읽기는 실패했지만 1~22번 개별 읽기는 "
+                << "모두 성공했습니다. GroupSyncRead 패킷 오류 가능성이 있습니다."
+                << std::endl;
+        }
+        else
+        {
+            std::cerr
+                << "[Error] 초기 위치 읽기 첫 실패 motor_id="
+                << first_failed_id
+                << ", 전체 실패 motor_id=["
+                << failed_ids.str() << ']'
+                << std::endl;
+        }
+
+        return false;
+    }
+
+    int first_unavailable_id = -1;
+    std::ostringstream unavailable_ids;
+
+    for (std::size_t i = 0; i < dxl_id_.size(); ++i)
+    {
+        if (!group_sync_read.isAvailable(
+                dxl_id_[i],
+                DxlReg_PresentPosition,
+                4))
+        {
+            if (first_unavailable_id < 0)
+            {
+                first_unavailable_id = static_cast<int>(dxl_id_[i]);
+            }
+            if (unavailable_ids.tellp() > 0)
+            {
+                unavailable_ids << ',';
+            }
+            unavailable_ids << static_cast<int>(dxl_id_[i]);
+            continue;
+        }
+
+        raw[i] = static_cast<int32_t>(
+            group_sync_read.getData(
+                dxl_id_[i],
+                DxlReg_PresentPosition,
+                4));
+    }
+
+    if (first_unavailable_id >= 0)
+    {
+        std::cerr
+            << "[Error] 초기 위치 GroupSyncRead 응답 누락: 첫 누락 motor_id="
+            << first_unavailable_id
+            << ", 전체 누락 motor_id=["
+            << unavailable_ids.str() << ']'
+            << std::endl;
+        group_sync_read.clearParam();
+        return false;
     }
 
     group_sync_read.clearParam();

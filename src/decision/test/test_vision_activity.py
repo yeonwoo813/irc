@@ -52,6 +52,9 @@ def _activity_harness(ball_active=True, hoop_active=False):
     harness._finish_turn_after_shoot = lambda reason: (
         MainDecision._finish_turn_after_shoot(harness, reason)
     )
+    harness._reset_vision_decision_cycle = lambda: (
+        MainDecision._reset_vision_decision_cycle(harness)
+    )
     return harness, events, logger
 
 
@@ -196,12 +199,13 @@ def test_shoot_completion_keeps_ball_detection_disabled():
     )
 
 
-def test_post_shoot_turn_completion_clears_buffer_then_enables_ball():
+def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
     harness, events, _ = _activity_harness(
         ball_active=False,
         hoop_active=False,
     )
     harness.turn_after_shoot = True
+    harness.back_to_walk_after_shoot = False
     harness.turn_count = 0
     harness.goal_count = 0
     harness.line_status = 99
@@ -223,15 +227,92 @@ def test_post_shoot_turn_completion_clears_buffer_then_enables_ball():
     assert events == []
     assert list(harness.ball_buffer) == [32, 32, 32]
 
-    # 회전 후 라인을 찾은 시점에 기존 결과를 지운 뒤 공 검출을 켠다.
+    # 회전 후 라인을 찾으면 바로 라인트래킹하지 않고 보행 자세로 복귀한다.
     harness.line_status = Motion.Forward_4step
     MainDecision.TurnAfterShoot(harness)
 
     assert harness.turn_after_shoot is False
+    assert harness.back_to_walk_after_shoot is True
     assert harness.turn_count == 0
-    assert harness.ball_data is False
+    assert harness.commands == [
+        Motion.Right_Turn_Afterpick,
+        Motion.Back_To_Walk,
+    ]
+    assert list(harness.ball_buffer) == [32, 32, 32]
+    assert events == []
+    assert harness.ball_vision_active is False
+    assert harness.hoop_vision_active is False
+    assert harness.line_tracking_calls == 0
+
+    # Back_To_Walk 완료 판단에 사용된 모션 중 결과는 모두 버린다.
+    MainDecision.BallMode(harness)
+
+    assert harness.back_to_walk_after_shoot is False
+    assert harness.current_mode == "LineTrackingMode"
+    assert list(harness.line_buffer) == []
     assert list(harness.ball_buffer) == []
+    assert list(harness.hurdle_buffer) == []
     assert events == [("ball", True)]
     assert harness.ball_vision_active is True
-    assert harness.hoop_vision_active is False
+    assert harness.line_tracking_calls == 0
+
+    # motion_end 이후 새 결과가 3개 모이기 전에는 라인 명령을 보내지 않는다.
+    harness.motion_ready = True
+    harness.motion_end = True
+    harness.hurdle_detected = False
+    harness.latest_line_angle = 0.0
+    harness.latest_line_follow_point = False
+    harness.latest_ball_angle = 0.0
+    harness.latest_ball_in_hand = False
+    harness.latest_hurdle_angle = 0.0
+    harness.Decision = lambda: harness.LineTracking()
+
+    for _ in range(2):
+        harness.line_buffer.append(Motion.Right_Half_Forward)
+        harness.ball_buffer.append(99)
+        harness.hurdle_buffer.append(99)
+        harness.hurdle_ready_buffer.append(False)
+        assert MainDecision._try_decision_from_cached_results(harness) is False
+
+    harness.line_buffer.append(Motion.Right_Half_Forward)
+    harness.ball_buffer.append(99)
+    harness.hurdle_buffer.append(99)
+    harness.hurdle_ready_buffer.append(False)
+
+    assert MainDecision._try_decision_from_cached_results(harness) is True
+    assert harness.line_status == Motion.Right_Half_Forward
     assert harness.line_tracking_calls == 1
+
+
+def test_post_shoot_turn_allows_tenth_rotation_before_lost_mode():
+    harness, events, _ = _activity_harness(
+        ball_active=False,
+        hoop_active=False,
+    )
+    harness.turn_after_shoot = True
+    harness.back_to_walk_after_shoot = False
+    harness.turn_count = 9
+    harness.goal_count = 1
+    harness.turn_shoot = Motion.Right_Turn_Afterpick
+    harness.line_status = 99
+    harness.commands = []
+    harness.lost_mode_calls = 0
+    harness.MotionCommand = lambda: harness.commands.append(harness.status)
+    harness.LostMode = lambda: setattr(
+        harness,
+        "lost_mode_calls",
+        harness.lost_mode_calls + 1,
+    )
+
+    MainDecision.TurnAfterShoot(harness)
+
+    assert harness.commands == [Motion.Right_Turn_Afterpick]
+    assert harness.turn_count == 10
+    assert harness.lost_mode_calls == 0
+
+    MainDecision.TurnAfterShoot(harness)
+
+    assert harness.turn_after_shoot is False
+    assert harness.turn_count == 0
+    assert harness.lost_mode_calls == 1
+    assert events == [("ball", True)]

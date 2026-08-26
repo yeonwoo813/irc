@@ -55,6 +55,9 @@ public:
     // 읽지 못한 ID는 이전 UI slider 역할의 fallback 값을 씁니다.
     bool ReadPresentRawStreamlitStyle(RawArray& raw);
 
+    // 최초 초기자세용: 1~22번이 모두 정상 응답한 경우에만 성공합니다.
+    bool ReadPresentRawStrict(RawArray& raw);
+
     // getpose.py처럼 모션 시작 시 GroupSyncWrite를 한 번 만들고 전체 모션 동안 재사용합니다.
     bool BeginStreamWrite();
     int StreamWriteRaw(const RawArray& raw);

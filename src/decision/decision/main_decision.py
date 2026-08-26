@@ -1,4 +1,5 @@
 import rclpy
+import math
 import time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -173,6 +174,7 @@ class MainDecision(Node):
         self.goal_loss_waiting = False
         self.neck_down_pending = False
         self.turn_after_shoot = False
+        self.back_to_walk_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
         # Shoot 모션의 실제 완료 전이를 추적한다. 다음 공 검출은 Shoot
         # 완료 시점이 아니라 이후 강제회전이 끝난 시점에 시작한다.
@@ -196,6 +198,8 @@ class MainDecision(Node):
         # 최근 5개의 비전 상태를 저장하고, line과 BallMode는
         # 판단 시점의 최근 3개만 다수결에 사용합니다.
         self.line_buffer = deque(maxlen=5)
+        self.line_vote_detail_buffer = deque(maxlen=5)
+        self.line_frame_sequence = 0
         self.ball_buffer = deque(maxlen=5)
         self.hurdle_buffer = deque(maxlen=5)
         self.hurdle_ready_buffer = deque(maxlen=5)
@@ -397,7 +401,26 @@ class MainDecision(Node):
             return
 
         #최신 데이터 갱신
-        self.line_buffer.append(line_msg.status)
+        line_status = int(line_msg.status)
+        self.line_buffer.append(line_status)
+        self.line_frame_sequence = getattr(self, 'line_frame_sequence', 0) + 1
+        detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
+        if detail_buffer is not None:
+            detail_buffer.append({
+                'sequence': self.line_frame_sequence,
+                'status': line_status,
+                'point_count': int(getattr(line_msg, 'point_count', 0)),
+                'decision_type': str(
+                    getattr(line_msg, 'decision_type', 'unknown')
+                ),
+                'decision_angle': float(
+                    getattr(line_msg, 'decision_angle', math.nan)
+                ),
+                'line_distance': float(
+                    getattr(line_msg, 'line_distance', math.nan)
+                ),
+                'curve_a': float(getattr(line_msg, 'curve_a', math.nan)),
+            })
         if self.motion_end == True:
             self._try_decision_from_cached_results()
         else:
@@ -560,6 +583,42 @@ class MainDecision(Node):
             else voted_status
         )
 
+        line_vote_details = list(
+            getattr(self, 'line_vote_detail_buffer', [])
+        )[-3:]
+        if len(line_vote_details) == 3:
+            frame_logs = []
+            for detail in line_vote_details:
+                angle = detail['decision_angle']
+                distance = detail['line_distance']
+                curve_a = detail['curve_a']
+                angle_text = (
+                    f"{angle:+.1f}deg" if math.isfinite(angle) else "N/A"
+                )
+                distance_text = (
+                    f"{distance:+.1f}px"
+                    if math.isfinite(distance)
+                    else "N/A"
+                )
+                curve_text = (
+                    f"{curve_a:+.2e}"
+                    if math.isfinite(curve_a)
+                    else "N/A"
+                )
+                frame_logs.append(
+                    f"seq={detail['sequence']} "
+                    f"status={detail['status']} "
+                    f"type={detail['decision_type']} "
+                    f"pc={detail['point_count']} "
+                    f"angle={angle_text} "
+                    f"distance={distance_text} "
+                    f"curve_a={curve_text}"
+                )
+            self.get_logger().info(
+                f"[LineVoteFrames] selected={self.line_status} | "
+                + " | ".join(frame_logs)
+            )
+
         if self.current_mode == "BallMode":
             ball_votes = list(self.ball_buffer)[-3:]
             ball_vote_counts = Counter(ball_votes)
@@ -701,6 +760,7 @@ class MainDecision(Node):
             or self.turn_after_pick == True
             or getattr(self, 'back_to_walk_after_pick', False)
             or self.turn_after_shoot == True
+            or getattr(self, 'back_to_walk_after_shoot', False)
             or self._ball_status_is_detected(self.ball_status)
         ):
             # 지금 0.8초 유예를 적용할 수 있는 Pick 전 단계인지 확인
@@ -848,12 +908,15 @@ class MainDecision(Node):
 
         # 최소 한 번 회전한 뒤, 라인이 보이면 회전 종료
         if self.turn_count > 0 and self.line_status != Line.Line_None:
-            self._finish_turn_after_shoot('post-shoot turn completed')
-            self.LineTracking()
+            self.turn_after_shoot = False
+            self.turn_count = 0
+            self.back_to_walk_after_shoot = True
+            self.status = Motion.Back_To_Walk
+            self.MotionCommand()
             return
         
-        # 라인이 안 보이면 최대 5번까지만 회전
-        if self.turn_count >= 5:
+        # 라인이 안 보이면 최대 10번까지만 회전
+        if self.turn_count >= 10:
             self._finish_turn_after_shoot('post-shoot turn limit reached')
             self.LostMode()
             return
@@ -865,6 +928,7 @@ class MainDecision(Node):
     def _finish_turn_after_shoot(self, reason):
         """강제회전 종료 후에만 다음 공 검출을 시작한다."""
         self.turn_after_shoot = False
+        self.back_to_walk_after_shoot = False
         self.turn_count = 0
 
         # 골대 또는 Shoot 직후 결과가 다음 공 판단에 섞이지 않도록 공
@@ -898,6 +962,17 @@ class MainDecision(Node):
             else:
                 self.current_mode = "LineTrackingMode"
                 self._reset_vision_decision_cycle()
+            return
+
+        # TurnAfterShoot 종료 후 Back_To_Walk가 완료되면 모션 중 쌓인
+        # 비전값을 모두 버리고 motion_end 이후의 새 결과만 기다린다.
+        if getattr(self, 'back_to_walk_after_shoot', False):
+            self.back_to_walk_after_shoot = False
+            self._reset_vision_decision_cycle()
+            self._finish_turn_after_shoot(
+                'post-shoot Back_To_Walk completed'
+            )
+            self.current_mode = "LineTrackingMode"
             return
 
         #Pick 이후 공 확인, 성공했을 때만 Neck Up 실행
@@ -951,6 +1026,7 @@ class MainDecision(Node):
                 self._reset_goal_loss_state()
                 self.neck_down_pending = True
                 self.turn_after_shoot = True
+                self.back_to_walk_after_shoot = False
                 self.turn_count = 0
                 self.shoot_in_progress = True
                 self.shoot_motion_started = False
@@ -1179,6 +1255,7 @@ class MainDecision(Node):
             and not getattr(self, 'turn_after_pick', False)
             and not getattr(self, 'back_to_walk_after_pick', False)
             and not getattr(self, 'turn_after_shoot', False)
+            and not getattr(self, 'back_to_walk_after_shoot', False)
             and getattr(self, 'pick_try_count', 0) == 0
         )
 
@@ -1199,6 +1276,9 @@ class MainDecision(Node):
         self.ball_data = False
         self.hurdle_data = False
         self.line_buffer.clear()
+        detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
+        if detail_buffer is not None:
+            detail_buffer.clear()
         self.ball_buffer.clear()
         self.hurdle_buffer.clear()
         self.hurdle_ready_buffer.clear()
