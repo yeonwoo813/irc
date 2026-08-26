@@ -32,6 +32,18 @@ def _activity_harness(ball_active=True, hoop_active=False):
         get_logger=lambda: logger,
         goal_last_seen_time=None,
         goal_loss_waiting=False,
+        ball_data=True,
+        ball_buffer=deque([12, 12, 12], maxlen=5),
+        ball_tracking_active=True,
+        ball_last_seen_time=9.0,
+        ball_loss_waiting=False,
+        post_pick_failure_ball_suppressed=False,
+        current_mode="BallMode",
+        line_data=True,
+        hurdle_data=True,
+        line_buffer=deque([1, 1, 1], maxlen=5),
+        hurdle_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_ready_buffer=deque([False, False, False], maxlen=5),
     )
     harness._now_seconds = lambda: 10.0
     harness._reset_goal_loss_state = lambda: (
@@ -90,7 +102,63 @@ def test_pick_result_selects_the_matching_detector():
     failed.has_ball = False
 
     assert MainDecision.CheckBall(failed) is False
-    assert failed_events == [("hoop", False), ("ball", True)]
+    assert failed_events == [("hoop", False)]
+    assert failed.post_pick_failure_ball_suppressed is True
+    assert list(failed.ball_buffer) == []
+    assert failed.ball_vision_active is False
+    assert failed.hoop_vision_active is False
+
+
+def test_failed_pick_reenables_ball_immediately_after_recovery():
+    harness, events, _ = _activity_harness(
+        ball_active=True,
+        hoop_active=False,
+    )
+    harness.pick_done = True
+    harness.ball_in_hand = False
+    harness.has_ball = False
+
+    assert MainDecision.CheckBall(harness) is False
+    assert events == [("ball", False)]
+
+    # Back_To_Walk 완료 직전까지 쌓인 OFF 상태 값도 모두 버린다.
+    harness.ball_buffer.extend([99, 99, 99])
+    MainDecision._finish_post_pick_failure_recovery(
+        harness,
+        "Back_To_Walk completed",
+    )
+    assert events == [("ball", False), ("ball", True)]
+    assert harness.post_pick_failure_ball_suppressed is False
+    assert list(harness.ball_buffer) == []
+    assert harness.current_mode == "LineTrackingMode"
+
+
+def test_failed_pick_turn_limit_restores_original_lost_mode_branch():
+    commands = []
+    harness, events, _ = _activity_harness(
+        ball_active=False,
+        hoop_active=False,
+    )
+    harness.turn_count = 10
+    harness.turn_after_pick = True
+    harness.backward_after_pick = False
+    harness.back_to_walk_after_pick = False
+    harness.pick_try_count = 2
+    harness.post_pick_failure_ball_suppressed = True
+    harness.line_status = 99
+    harness.status = None
+    harness.MotionCommand = lambda: commands.append(harness.status)
+    harness.LostMode = lambda: commands.append("lost")
+
+    MainDecision.TurnAfterPick(harness)
+
+    assert commands == ["lost"]
+    assert Motion.Back_To_Walk not in commands
+    assert events == [("ball", True)]
+    assert harness.back_to_walk_after_pick is False
+    assert harness.turn_after_pick is False
+    assert harness.pick_try_count == 0
+    assert harness.post_pick_failure_ball_suppressed is False
 
 
 def test_shoot_completion_keeps_ball_detection_disabled():

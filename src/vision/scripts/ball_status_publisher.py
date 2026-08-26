@@ -62,18 +62,22 @@ class BallDecision:
         # 120cm 이하이면 공 모드
         self.ball_entry_distance_cm = 120.0
 
-        # Realsense 직진, 회전 기준각 5도
-        self.angle_center_tol = 5.0
+        # Realsense 직진 각도 범위
+        self.angle_center_min = -2.10
+        self.angle_center_max = 7.90
 
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
-        self.goal_shoot_max_distance_cm = 70.0
-        self.goal_normal_shoot_min_distance_cm = 60.0
-        self.goal_too_close_distance_cm = 50.0
+        self.goal_shoot_max_distance_cm = 73.0
+        self.goal_normal_shoot_min_distance_cm = 64.0
+        self.goal_too_close_distance_cm = 55.0
 
         self.goal_approach_center_tol = 5.0
         self.goal_approach_large_angle = 60.0
-        self.goal_shoot_center_tol = 10.0
+        self.goal_shoot_close_min = -11.0
+        self.goal_shoot_close_max = 2.0
+        self.goal_shoot_far_min = -5.0
+        self.goal_shoot_far_max = 5.0
         self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준
@@ -143,9 +147,9 @@ class BallDecision:
         if webcam_ball_y_distance > self.webcam_pick_y_max_px:
             if angle < -10.0:
                 return BallStatus.Left_Turn_10, angle
-            if angle < -self.angle_center_tol:
+            if angle < -self.webcam_angle_center_tol:
                 return BallStatus.Left_Turn_5, angle
-            if angle <= self.angle_center_tol:
+            if angle <= self.webcam_angle_center_tol:
                 return BallStatus.Forward_half, 0.0
             if angle <= 10.0:
                 return BallStatus.Right_Turn_5, angle
@@ -165,9 +169,9 @@ class BallDecision:
 
         if angle < -60.0:
             return BallStatus.Left_Turn, angle
-        if angle < -self.angle_center_tol:
+        if angle < self.angle_center_min:
             return BallStatus.Left_Half_Forward, angle
-        if angle <= self.angle_center_tol:
+        if angle <= self.angle_center_max:
             return BallStatus.Forward_4step, 0.0
         if angle <= 60.0:
             return BallStatus.Right_Half_Forward, angle
@@ -212,11 +216,18 @@ class BallDecision:
         angle: float,
         shoot_status: int,
     ) -> Tuple[int, float]:
+        if shoot_status == BallStatus.Shoot_Close:
+            center_min = self.goal_shoot_close_min
+            center_max = self.goal_shoot_close_max
+        else:
+            center_min = self.goal_shoot_far_min
+            center_max = self.goal_shoot_far_max
+
         if angle < -self.goal_shoot_large_angle:
             return BallStatus.Left_Turn_10, angle
-        if angle < -self.goal_shoot_center_tol:
+        if angle < center_min:
             return BallStatus.Left_Turn_5, angle
-        if angle <= self.goal_shoot_center_tol:
+        if angle <= center_max:
             return shoot_status, 0.0
         if angle <= self.goal_shoot_large_angle:
             return BallStatus.Right_Turn_5, angle

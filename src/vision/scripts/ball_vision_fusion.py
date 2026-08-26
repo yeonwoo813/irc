@@ -103,6 +103,11 @@ class BallVisionFusionNode(Node):
             "realsense_camera_info_topic",
             "/camera/color/camera_info",
         )
+        self.declare_parameter("use_realsense_yolo", False)
+        self.declare_parameter(
+            "realsense_yolo_state_topic",
+            "/realsense_yolo/ball_state",
+        )
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
         self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
         self.declare_parameter("active_topic", "/vision/ball_active")
@@ -624,6 +629,13 @@ class BallVisionFusionNode(Node):
         # =========================================================
         # ROS I/O
         # =========================================================
+        self.use_realsense_yolo = bool(
+            self.get_parameter("use_realsense_yolo").value
+        )
+        self.realsense_yolo_state_topic = str(
+            self.get_parameter("realsense_yolo_state_topic").value
+        )
+
         # RealSense 구독과 synchronizer는 프로세스 수명 동안 유지한다.
         # 모드 전환 때 DDS 구독을 삭제/재생성하면 첫 프레임까지 공백이
         # 생기거나 message_filters가 다시 채워지는 동안 화면이 멈출 수 있다.
@@ -679,6 +691,19 @@ class BallVisionFusionNode(Node):
             10,
         )
 
+        self.sub_realsense_yolo_state = None
+        if self.use_realsense_yolo:
+            self.sub_realsense_yolo_state = self.create_subscription(
+                String,
+                self.realsense_yolo_state_topic,
+                self.cb_realsense_yolo_state,
+                10,
+            )
+            self.get_logger().info(
+                "RealSense ball source: YOLO "
+                f"{self.realsense_yolo_state_topic}"
+            )
+
         self.ball_status_publisher = BallStatusPublisher(
             self,
             topic_name=self.ball_result_topic,
@@ -704,7 +729,12 @@ class BallVisionFusionNode(Node):
             self.publish_ball_features,
         )
 
-        self._start_ball_image_subscriptions()
+        if self.use_realsense_yolo:
+            self.get_logger().info(
+                "Legacy RealSense HSV ball processing disabled."
+            )
+        else:
+            self._start_ball_image_subscriptions()
 
         self.get_logger().info("BallVisionFusionNode started.")
         self.get_logger().info(
@@ -1109,6 +1139,51 @@ class BallVisionFusionNode(Node):
             "(latched ball_in_hand)"
         )
         return True
+
+    def cb_realsense_yolo_state(self, msg: String) -> None:
+        # Feed RealSense YOLO output into the existing fusion/publisher logic.
+        if not getattr(self, "ball_detection_active", True):
+            return
+
+        now = time.monotonic()
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            self.get_logger().warn(
+                "Failed to parse /realsense_yolo/ball_state JSON"
+            )
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        state = self._empty_realsense_state()
+        state.update(payload)
+
+        detected = bool(state.get("realsense_ball_detected", False))
+        if detected:
+            try:
+                distance_cm = float(state.get("realsense_ball_distance_cm"))
+                angle_deg = float(state.get("realsense_ball_angle_error"))
+            except (TypeError, ValueError):
+                detected = False
+            else:
+                if (
+                    not math.isfinite(distance_cm)
+                    or distance_cm <= 0.0
+                    or not math.isfinite(angle_deg)
+                ):
+                    detected = False
+
+        if not detected:
+            diagnostic = state.get("realsense_diagnostic")
+            state = self._empty_realsense_state()
+            if isinstance(diagnostic, dict):
+                state["realsense_diagnostic"] = diagnostic
+            state["realsense_ball_detected"] = False
+
+        self.latest_realsense = state
+        self.latest_realsense_time = now
 
     # =============================================================
     # 카메라 내부 파라미터
@@ -1855,7 +1930,13 @@ class BallVisionFusionNode(Node):
         else:
             distance_m = z_m
 
-        angle_error_deg = math.degrees(math.atan2(x_m, z_m))
+        angle_center_x = float(frame_w) / 2.0 + 38.0
+        angle_center_deg = math.degrees(
+            math.atan2(angle_center_x - self.cx_intr, self.fx)
+        )
+        angle_error_deg = (
+            math.degrees(math.atan2(x_m, z_m)) - angle_center_deg
+        )
 
         return {
             "realsense_ball_detected": True,

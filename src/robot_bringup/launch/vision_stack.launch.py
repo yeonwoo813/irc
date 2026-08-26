@@ -74,6 +74,7 @@ def generate_launch_description() -> LaunchDescription:
     start_realsense = LaunchConfiguration("start_realsense")
     start_webcam = LaunchConfiguration("start_webcam")
     start_yolo = LaunchConfiguration("start_yolo")
+    start_realsense_yolo = LaunchConfiguration("start_realsense_yolo")
     start_ball = LaunchConfiguration("start_ball")
     start_hurdle = LaunchConfiguration("start_hurdle")
     start_hoop = LaunchConfiguration("start_hoop")
@@ -81,6 +82,9 @@ def generate_launch_description() -> LaunchDescription:
     start_selector = LaunchConfiguration("start_selector")
 
     yolo_script = PathJoinSubstitution([scripts_dir, "yolo_detector.py"])
+    realsense_yolo_script = PathJoinSubstitution(
+        [scripts_dir, "realsense_yolo_detector.py"]
+    )
     ball_script = PathJoinSubstitution([scripts_dir, "ball_vision_fusion.py"])
     hurdle_script = PathJoinSubstitution([scripts_dir, "hurdle_vision_fusion.py"])
     hoop_script = PathJoinSubstitution([scripts_dir, "hoop_vision.py"])
@@ -114,9 +118,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("start_realsense", default_value="true"),
         DeclareLaunchArgument("start_webcam", default_value="true"),
         DeclareLaunchArgument("start_yolo", default_value="true"),
+        DeclareLaunchArgument("start_realsense_yolo", default_value="true"),
         DeclareLaunchArgument("start_ball", default_value="true"),
         DeclareLaunchArgument("start_hurdle", default_value="true"),
-        DeclareLaunchArgument("start_hoop", default_value="true"),
+        DeclareLaunchArgument("start_hoop", default_value="false"),
         DeclareLaunchArgument("start_monitor", default_value="true"),
         DeclareLaunchArgument("start_selector", default_value="true"),
         DeclareLaunchArgument(
@@ -218,9 +223,27 @@ def generate_launch_description() -> LaunchDescription:
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
+    realsense_yolo_process = ExecuteProcess(
+        name="realsense_yolo_process",
+        cmd=[sys.executable, realsense_yolo_script, settings_ini],
+        cwd=scripts_dir,
+        output="screen",
+        emulate_tty=True,
+        respawn=True,
+        respawn_delay=2.0,
+        condition=IfCondition(start_realsense_yolo),
+        additional_env={"PYTHONUNBUFFERED": "1"},
+    )
+
     ball_process = ExecuteProcess(
         name="ball_vision_fusion_process",
-        cmd=[sys.executable, ball_script],
+        cmd=[
+            sys.executable,
+            ball_script,
+            "--ros-args",
+            "-p",
+            "use_realsense_yolo:=true",
+        ],
         cwd=scripts_dir,
         output="screen",
         emulate_tty=True,
@@ -282,6 +305,12 @@ def generate_launch_description() -> LaunchDescription:
     # YOLO는 모델/런타임 초기화에 시간이 걸리므로 카메라와 동시에 먼저
     # 시작한다. 구독 생성 전 모델을 로드하므로 카메라 토픽이 아직 없어도
     # 안전하며, 나머지 vision 프로세스는 기존처럼 2초 뒤 시작한다.
+    # Stagger TensorRT engine initialization to reduce peak memory.
+    delayed_realsense_yolo = TimerAction(
+        period=4.0,
+        actions=[realsense_yolo_process],
+    )
+
     delayed_vision = TimerAction(
         period=2.0,
         actions=[
@@ -300,6 +329,7 @@ def generate_launch_description() -> LaunchDescription:
             rgb_stabilizer_process,
             webcam_node,
             yolo_process,
+            delayed_realsense_yolo,
             delayed_vision,
         ]
     )

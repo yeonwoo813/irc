@@ -43,7 +43,7 @@ class RealSenseDebugSelector(Node):
             "/vision/realsense_debug_image",
         )
         self.declare_parameter("state_timeout_sec", 0.5)
-        self.declare_parameter("debug_timeout_sec", 0.25)
+        self.declare_parameter("debug_timeout_sec", 1.0)
         self.declare_parameter("show_window", True)
         self.declare_parameter(
             "window_name",
@@ -164,6 +164,7 @@ class RealSenseDebugSelector(Node):
             return
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            cv2.line(frame, (frame.shape[1] // 2 + 38, 0), (frame.shape[1] // 2 + 38, frame.shape[0] - 1), (128, 128, 128), 1)
             cv2.imshow(self.window_name, frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 rclpy.shutdown()

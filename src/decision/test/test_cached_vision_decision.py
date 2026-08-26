@@ -14,6 +14,7 @@ class _Logger:
 
 
 def _make_harness():
+    clock = SimpleNamespace(now=10.0)
     harness = SimpleNamespace(
         test_mode=False,
         motion_ready=True,
@@ -39,15 +40,18 @@ def _make_harness():
         hurdle_go_started=False,
         shoot_fresh_vision_active=False,
         shoot_fresh_vision_armed=True,
-        shoot_fresh_vision_distance_cm=70.0,
+        shoot_fresh_vision_distance_cm=80.0,
+        shoot_fresh_vision_settle_sec=0.5,
+        shoot_fresh_vision_settle_until=0.0,
         goal_lost_timeout_sec=0.5,
         goal_last_seen_time=None,
         goal_loss_waiting=False,
     )
     harness.logger = _Logger()
+    harness.clock = clock
     harness.decision_count = 0
     harness.get_logger = lambda: harness.logger
-    harness._now_seconds = lambda: 10.0
+    harness._now_seconds = lambda: harness.clock.now
     harness._reset_goal_loss_state = MethodType(
         MainDecision._reset_goal_loss_state,
         harness,
@@ -102,7 +106,27 @@ def test_motion_end_waits_when_cached_results_are_insufficient():
     )
 
 
-def test_goal_at_70cm_clears_only_ball_buffer_at_motion_end():
+def test_line_status_uses_mode_of_latest_three_samples():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.line_buffer = deque([1, 1, 2, 3, 2], maxlen=5)
+
+    harness._try_decision_from_cached_results()
+
+    assert harness.line_status == 2
+
+
+def test_line_status_uses_latest_when_latest_three_are_all_different():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.line_buffer = deque([1, 1, 2, 3, 7], maxlen=5)
+
+    harness._try_decision_from_cached_results()
+
+    assert harness.line_status == 7
+
+
+def test_goal_at_80cm_clears_only_ball_buffer_at_motion_end():
     harness = _make_harness()
     harness.current_mode = "BallMode"
     harness.has_ball = True
@@ -113,7 +137,7 @@ def test_goal_at_70cm_clears_only_ball_buffer_at_motion_end():
             status=Ball.Ball_None,
             angle=0.0,
             ball_in_hand=True,
-            goal_distance_cm=70.0,
+            goal_distance_cm=80.0,
         ),
     )
 
@@ -126,11 +150,12 @@ def test_goal_at_70cm_clears_only_ball_buffer_at_motion_end():
 
     assert harness.decision_count == 0
     assert list(harness.ball_buffer) == []
+    assert harness.shoot_fresh_vision_settle_until == 10.5
     assert list(harness.line_buffer) == [1, 2, 2, 2, 3]
     assert list(harness.hurdle_buffer) == [99, 26, 99, 99, 26]
 
 
-def test_goal_at_70cm_waits_for_three_ball_results_after_motion_end():
+def test_goal_at_80cm_waits_for_settle_then_three_fresh_results():
     harness = _make_harness()
     harness.current_mode = "BallMode"
     harness.has_ball = True
@@ -149,13 +174,19 @@ def test_goal_at_70cm_waits_for_three_ball_results_after_motion_end():
     )
     MainDecision.BallResultCallback(harness, message)
     MainDecision.BallResultCallback(harness, message)
+    MainDecision.BallResultCallback(harness, message)
     assert harness.decision_count == 0
+    assert list(harness.ball_buffer) == []
 
+    harness.clock.now = 10.5
+    MainDecision.BallResultCallback(harness, message)
+    MainDecision.BallResultCallback(harness, message)
+    assert harness.decision_count == 0
     MainDecision.BallResultCallback(harness, message)
     assert harness.decision_count == 1
 
 
-def test_shoot_fresh_vision_uses_70cm_threshold():
+def test_shoot_fresh_vision_uses_80cm_threshold():
     harness = _make_harness()
     harness.motion_ready = False
     harness.has_ball = True
@@ -166,7 +197,7 @@ def test_shoot_fresh_vision_uses_70cm_threshold():
             status=Ball.Ball_None,
             angle=0.0,
             ball_in_hand=True,
-            goal_distance_cm=70.1,
+            goal_distance_cm=80.1,
         ),
     )
     assert harness.shoot_fresh_vision_active is False
@@ -177,10 +208,32 @@ def test_shoot_fresh_vision_uses_70cm_threshold():
             status=Ball.Ball_None,
             angle=0.0,
             ball_in_hand=True,
-            goal_distance_cm=70.0,
+            goal_distance_cm=80.0,
         ),
     )
     assert harness.shoot_fresh_vision_active is True
+
+
+def test_fresh_vision_activation_while_stopped_starts_settle_immediately():
+    harness = _make_harness()
+    harness.current_mode = "BallMode"
+    harness.motion_end = True
+    harness.has_ball = True
+
+    MainDecision.BallResultCallback(
+        harness,
+        SimpleNamespace(
+            status=Ball.Ball_None,
+            angle=0.0,
+            ball_in_hand=True,
+            goal_distance_cm=80.0,
+        ),
+    )
+
+    assert harness.shoot_fresh_vision_active is True
+    assert harness.shoot_fresh_vision_settle_until == 10.5
+    assert list(harness.ball_buffer) == []
+    assert harness.decision_count == 0
 
 
 def test_ball_mode_uses_mode_of_latest_three_ball_statuses():
@@ -194,15 +247,82 @@ def test_ball_mode_uses_mode_of_latest_three_ball_statuses():
     assert harness.ball_status == 23
 
 
-def test_ball_mode_uses_latest_status_when_latest_three_are_all_different():
+def test_ball_mode_uses_latest_for_one_to_one_to_one_without_pick():
     harness = _make_harness()
     harness.motion_end = True
     harness.current_mode = "BallMode"
     harness.ball_buffer = deque([99, 99, 23, 8, 24], maxlen=5)
 
-    harness._try_decision_from_cached_results()
+    assert harness._try_decision_from_cached_results() is True
 
+    assert harness.decision_count == 1
     assert harness.ball_status == 24
+    assert list(harness.ball_buffer) == [99, 99, 23, 8, 24]
+
+
+def test_ball_mode_defers_one_to_one_to_one_when_pick_is_included():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.current_mode = "BallMode"
+    harness.ball_buffer = deque(
+        [99, 99, Ball.Pick_Ready, Motion.Right_Turn_Mission_5,
+         Motion.Forward_half],
+        maxlen=5,
+    )
+
+    assert harness._try_decision_from_cached_results() is False
+
+    assert harness.decision_count == 0
+    assert harness.ball_data is False
+    assert list(harness.ball_buffer) == []
+    assert any(
+        "[PickVoteDeferred]" in message
+        for message in harness.logger.messages
+    )
+
+
+def test_ball_mode_motion_end_uses_cached_samples_when_vote_is_not_tied():
+    harness = _make_harness()
+    harness.current_mode = "BallMode"
+
+    MainDecision.MotionEndCallback(
+        harness,
+        SimpleNamespace(motion_ready=True, motion_end=True),
+    )
+
+    assert harness.decision_count == 1
+    assert harness.ball_status == Ball.Pick_Ready
+    assert list(harness.ball_buffer) == [99, 99, 12, 99, 12]
+
+
+def test_ball_mode_pick_requires_two_of_three_fresh_results():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.current_mode = "BallMode"
+    harness.ball_buffer.clear()
+
+    for status in (Ball.Pick_Ready, Motion.Forward_half):
+        harness.ball_buffer.append(status)
+        assert harness._try_decision_from_cached_results() is False
+
+    harness.ball_buffer.append(Ball.Pick_Ready)
+
+    assert harness._try_decision_from_cached_results() is True
+    assert harness.ball_status == Ball.Pick_Ready
+    assert harness.decision_count == 1
+
+
+def test_ball_mode_single_pick_vote_does_not_override_two_approach_votes():
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.current_mode = "BallMode"
+    harness.ball_buffer = deque(
+        [Ball.Pick_Ready, Motion.Forward_half, Motion.Forward_half],
+        maxlen=5,
+    )
+
+    assert harness._try_decision_from_cached_results() is True
+    assert harness.ball_status == Motion.Forward_half
 
 
 def test_callbacks_store_latest_flags_before_motion_is_ready():
@@ -729,6 +849,9 @@ def _make_post_pick_harness(ball_in_hand):
         has_ball=False,
         goal_last_seen_time=None,
         goal_loss_waiting=False,
+        ball_data=True,
+        ball_buffer=deque([12, 12, 12], maxlen=5),
+        post_pick_failure_ball_suppressed=False,
     )
     harness.logger = _Logger()
     harness.get_logger = lambda: harness.logger
@@ -837,7 +960,9 @@ def test_shoot_disarms_fresh_vision_until_next_successful_pick():
         turn_count=0,
         shoot_fresh_vision_active=True,
         shoot_fresh_vision_armed=True,
-        shoot_fresh_vision_distance_cm=70.0,
+        shoot_fresh_vision_distance_cm=80.0,
+        shoot_fresh_vision_settle_sec=0.5,
+        shoot_fresh_vision_settle_until=0.0,
         goal_lost_timeout_sec=0.5,
         goal_last_seen_time=15.0,
         goal_loss_waiting=True,
@@ -873,7 +998,7 @@ def test_shoot_disarms_fresh_vision_until_next_successful_pick():
     )
     assert harness.shoot_fresh_vision_active is False
 
-    # 다음 Pick 성공이 확인되면 재무장하고, 그 뒤 골대가 70cm 이내로
+    # 다음 Pick 성공이 확인되면 재무장하고, 그 뒤 골대가 80cm 이내로
     # 검출될 때 두 번째 Shoot용 FreshVision을 다시 활성화한다.
     harness.ball_in_hand = True
     harness.turn_after_shoot = False
@@ -890,7 +1015,7 @@ def test_shoot_disarms_fresh_vision_until_next_successful_pick():
             status=Ball.Shoot_Close,
             angle=0.0,
             ball_in_hand=True,
-            goal_distance_cm=70.0,
+            goal_distance_cm=80.0,
         ),
     )
     assert harness.shoot_fresh_vision_active is True

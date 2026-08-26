@@ -992,33 +992,21 @@ class HoopVisionNode(Node):
     ) -> Tuple[float, float]:
         """화면 최하단에서 로봇 중심선의 기준점을 반환한다."""
         return (
-            float(max(1, frame_width)) / 2.0,
+            float(max(1, frame_width)) / 2.0 + 38.0,
             float(max(1, frame_height) - 1),
         )
 
     @staticmethod
     def _centerline_error_angle_deg(
         center_x: float,
-        center_y: float,
         robot_x: float,
-        robot_y: float,
+        focal_x_px: float,
     ) -> Optional[float]:
-        """공 각도와 같은 화면 기하식으로 백보드 중심의 좌우 각도를 계산한다."""
-        x_distance = center_x - robot_x
-        y_distance = abs(robot_y - center_y)
-        if y_distance <= 0.0:
+        """새 중심선 기준 백보드 중심의 실제 좌우 각도를 계산한다."""
+        if focal_x_px <= 0.0:
             return None
-        return math.degrees(math.atan2(x_distance, y_distance))
-
-    @staticmethod
-    def _center_pixel_offsets(
-        center_x: float,
-        center_y: float,
-        robot_x: float,
-        robot_y: float,
-    ) -> Tuple[float, float]:
-        """로봇 하단 중심 기준 백보드 중심의 수평/수직 픽셀 차이를 반환한다."""
-        return center_x - robot_x, robot_y - center_y
+        x_distance = center_x - robot_x
+        return math.degrees(math.atan2(x_distance, focal_x_px))
 
     @staticmethod
     def _hold_is_active(
@@ -1382,19 +1370,12 @@ class HoopVisionNode(Node):
             )
             realsense_goal_angle = self._centerline_error_angle_deg(
                 center_x,
-                center_y,
                 robot_x,
-                robot_y,
+                self.fx,
             )
             if realsense_goal_angle is None:
                 continue
             diagnostic["angle_pass"] += 1
-            goal_center_dx_px, goal_center_dy_px = self._center_pixel_offsets(
-                center_x,
-                center_y,
-                robot_x,
-                robot_y,
-            )
 
             score = red_band_ratio + 0.5 * white_inner_ratio
             diagnostic["accepted_candidates"] += 1
@@ -1415,8 +1396,6 @@ class HoopVisionNode(Node):
                 "center_y": center_y,
                 "realsense_goal_distance_cm": distance_m * 100.0,
                 "realsense_goal_angle": realsense_goal_angle,
-                "goal_center_dx_px": goal_center_dx_px,
-                "goal_center_dy_px": goal_center_dy_px,
                 "center_depth_cm": center_depth_m * 100.0,
                 "robot_center_x": float(robot_x),
                 "robot_bottom_y": float(robot_y),
@@ -1484,8 +1463,6 @@ class HoopVisionNode(Node):
                 "center_y": None,
                 "realsense_goal_distance_cm": None,
                 "realsense_goal_angle": None,
-                "goal_center_dx_px": None,
-                "goal_center_dy_px": None,
                 "center_depth_cm": None,
                 "robot_center_x": None,
                 "robot_bottom_y": None,
@@ -1537,9 +1514,21 @@ class HoopVisionNode(Node):
         pastel_pink = (210, 190, 255)
         pastel_cyan = (245, 235, 180)
         white = (255, 255, 255)
+        centerline_gray = (128, 128, 128)
         color = pastel_yellow if detection is not None else (170, 170, 255)
 
         cv2.rectangle(debug, (x1, y1), (x2, y2), color, 2)
+        centerline_x = int(round(self._robot_reference_point(
+            debug.shape[1],
+            debug.shape[0],
+        )[0]))
+        cv2.line(
+            debug,
+            (centerline_x, 0),
+            (centerline_x, debug.shape[0] - 1),
+            centerline_gray,
+            1,
+        )
 
         if detection is not None:
             box = np.asarray(detection.get("box", []), dtype=np.int32)
@@ -1552,16 +1541,7 @@ class HoopVisionNode(Node):
 
             robot_x = int(round(float(detection["robot_center_x"])))
             robot_y = int(round(float(detection["robot_bottom_y"])))
-            # 흰 선은 로봇의 정면 중심선, 하늘색 선은 로봇 기준점에서
-            # 백보드 중심으로 향하는 선이다. 두 선이 만나는 각도가
-            # realsense_goal_angle이며 오른쪽은 양수, 왼쪽은 음수이다.
-            cv2.line(
-                debug,
-                (robot_x, 0),
-                (robot_x, debug.shape[0] - 1),
-                white,
-                1,
-            )
+            # 하늘색 선은 새 중심선의 로봇 기준점에서 백보드 중심으로 향한다.
             cv2.line(
                 debug,
                 (robot_x, robot_y),
@@ -1612,8 +1592,6 @@ class HoopVisionNode(Node):
                     f"{detection['realsense_goal_distance_cm']:.1f}"
                 ),
                 f"realsense_goal_angle:{detection['realsense_goal_angle']:+.1f}deg",
-                f"goal_center_dx_px:{detection['goal_center_dx_px']:+.1f}",
-                f"goal_center_dy_px:{detection['goal_center_dy_px']:.1f}",
                 (
                     "red_bands_visible:"
                     f"{int(detection.get('visible_red_bands', 3))}/3"
@@ -1624,8 +1602,6 @@ class HoopVisionNode(Node):
                 "HOOP:MISS",
                 "realsense_goal_distance_cm:N/A",
                 "realsense_goal_angle:N/A",
-                "goal_center_dx_px:N/A",
-                "goal_center_dy_px:N/A",
                 "red_bands_visible:0/3",
             ]
 
