@@ -2,10 +2,12 @@
 """Tests for the actual-motion overlay shown on the webcam YOLO image."""
 
 from pathlib import Path
+import math
 import sys
 from types import SimpleNamespace
 import unittest
 
+import numpy as np
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -177,7 +179,7 @@ class LineGeometryTest(unittest.TestCase):
         self.assertEqual(payload["line_distance"], 65.0)
         self.assertEqual(payload["status"], LineStatus.Forward_4step)
 
-    def test_curve_distance_uses_third_closest_point(self) -> None:
+    def test_curve_distance_and_tangent_use_second_closest_point(self) -> None:
         payload = make_line_payload(
             line_points=[
                 (400.0, 450.0),
@@ -190,7 +192,24 @@ class LineGeometryTest(unittest.TestCase):
         )
 
         self.assertGreater(abs(payload["curve_a"]), 1.0e-4)
-        self.assertEqual(payload["line_distance"], 15.0)
+        self.assertEqual(payload["line_distance"], 25.0)
+
+        a = payload["curve_a"]
+        second_y = 350.0
+        # 같은 피팅식의 두 번째 점 y에서 계산한 접선이어야 한다.
+        coeffs = np.polyfit(
+            [450.0, 350.0, 250.0, 150.0],
+            [400.0, 370.0, 360.0, 370.0],
+            2,
+        )
+        expected_tangent = math.degrees(
+            math.atan2(-(2.0 * a * second_y + coeffs[1]), 1.0)
+        )
+        self.assertAlmostEqual(
+            payload["tangent_angle"],
+            expected_tangent,
+            places=6,
+        )
 
     def test_straight_with_four_points_keeps_nearest_point_distance(self) -> None:
         payload = make_line_payload(

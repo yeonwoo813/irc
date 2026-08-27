@@ -12,6 +12,59 @@ class _Logger:
         self.messages.append(message)
 
 
+def _startup_gate_harness():
+    logger = _Logger()
+    harness = SimpleNamespace(
+        test_mode=False,
+        webcam_yolo_ready=False,
+        realsense_yolo_ready=False,
+        line_data=True,
+        ball_data=True,
+        hurdle_data=True,
+        line_buffer=deque([1, 1, 1], maxlen=5),
+        line_vote_detail_buffer=deque([{"status": 1}], maxlen=5),
+        ball_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_buffer=deque([99, 99, 99], maxlen=5),
+        hurdle_ready_buffer=deque([False, False, False], maxlen=5),
+        get_logger=lambda: logger,
+    )
+    return harness, logger
+
+
+def test_startup_gate_waits_for_both_yolo_first_inferences():
+    harness, logger = _startup_gate_harness()
+
+    assert MainDecision._vision_stack_ready(harness) is False
+
+    MainDecision._set_yolo_readiness(harness, "webcam", True)
+    assert harness.webcam_yolo_ready is True
+    assert harness.realsense_yolo_ready is False
+    assert MainDecision._vision_stack_ready(harness) is False
+    assert list(harness.line_buffer) == []
+
+    # 한쪽만 준비된 동안 들어온 값도 두 번째 YOLO가 준비되는 순간 버린다.
+    harness.line_buffer.extend([2, 2, 2])
+    harness.ball_buffer.extend([99, 99, 99])
+    harness.hurdle_buffer.extend([99, 99, 99])
+    MainDecision._set_yolo_readiness(harness, "realsense", True)
+
+    assert MainDecision._vision_stack_ready(harness) is True
+    assert list(harness.line_buffer) == []
+    assert list(harness.ball_buffer) == []
+    assert list(harness.hurdle_buffer) == []
+    assert any("새 비전 프레임 3개" in message for message in logger.messages)
+
+
+def test_motion_command_is_blocked_before_both_yolo_are_ready():
+    harness, logger = _startup_gate_harness()
+    harness.motion_ready = True
+    harness.status = Motion.Forward_4step
+
+    MainDecision.MotionCommand(harness)
+
+    assert any("vision_startup=false" in message for message in logger.messages)
+
+
 class _Publisher:
     def __init__(self, name, events):
         self.name = name
@@ -207,7 +260,7 @@ def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
     harness.turn_after_shoot = True
     harness.back_to_walk_after_shoot = False
     harness.turn_count = 0
-    harness.post_shoot_min_turn_count = 3
+    harness.post_shoot_min_turn_count = 4
     harness.goal_count = 0
     harness.line_status = 99
     harness.ball_data = True
@@ -228,7 +281,7 @@ def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
     assert events == []
     assert list(harness.ball_buffer) == [32, 32, 32]
 
-    # 라인이 계속 보여도 Shoot 이후 회전을 최소 3회 수행한다.
+    # 라인이 계속 보여도 Shoot 이후 회전을 최소 4회 수행한다.
     harness.line_status = Motion.Forward_4step
     for _ in range(harness.post_shoot_min_turn_count - 1):
         MainDecision.TurnAfterShoot(harness)

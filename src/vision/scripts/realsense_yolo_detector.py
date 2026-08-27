@@ -38,6 +38,7 @@ import math
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -152,6 +153,7 @@ def load_config(ini_path: str) -> Dict[str, object]:
     defaults: Dict[str, object] = {
         "model": "/home/rnd/realsense_goal_backboard_ball_best.engine",
         "conf": 0.20,
+        "ball_diagnostic_conf": 0.10,
         "backboard_conf": 0.30,
         "ball_conf": 0.25,
         "imgsz": 640,
@@ -170,6 +172,7 @@ def load_config(ini_path: str) -> Dict[str, object]:
         "min_valid_depth_pixels": 5,
         "publish_debug_image": True,
         "print_every_n_frames": 10,
+        "ball_loss_log_interval_seconds": 1.0,
     }
 
     p = Path(ini_path).expanduser()
@@ -202,6 +205,7 @@ def load_config(ini_path: str) -> Dict[str, object]:
         {
             "model": gs("model"),
             "conf": gf("conf"),
+            "ball_diagnostic_conf": gf("ball_diagnostic_conf"),
             "backboard_conf": gf("backboard_conf"),
             "ball_conf": gf("ball_conf"),
             "imgsz": gi("imgsz"),
@@ -224,6 +228,9 @@ def load_config(ini_path: str) -> Dict[str, object]:
             "min_valid_depth_pixels": gi("min_valid_depth_pixels"),
             "publish_debug_image": gb("publish_debug_image"),
             "print_every_n_frames": gi("print_every_n_frames"),
+            "ball_loss_log_interval_seconds": gf(
+                "ball_loss_log_interval_seconds"
+            ),
         }
     )
     return cfg
@@ -268,6 +275,14 @@ class RealSenseYoloDetector(Node):
         self.last_valid_ball_state: Optional[Dict[str, object]] = None
         self.last_valid_ball_detection: Optional[Detection] = None
         self.last_valid_ball_time = 0.0
+        self.latest_raw_ball_candidate: Optional[Detection] = None
+        self.ball_loss_started_mono: Optional[float] = None
+        self.ball_loss_started_at: Optional[str] = None
+        self.ball_loss_last_log_mono = 0.0
+        self.ball_loss_last_reason: Optional[str] = None
+        self.ball_loss_missed_frames = 0
+        self.ball_loss_latest_state: Optional[Dict[str, object]] = None
+        self.ball_loss_last_valid: Optional[Dict[str, object]] = None
         self.last_valid_backboard_state: Optional[Dict[str, object]] = None
         self.last_valid_backboard_detection: Optional[Detection] = None
         self.last_valid_backboard_time = 0.0
@@ -289,6 +304,19 @@ class RealSenseYoloDetector(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
+        self.ready_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.yolo_ready = False
+        self.yolo_ready_pub = self.create_publisher(
+            Bool,
+            "/vision/realsense_yolo_ready",
+            self.ready_qos,
+        )
+        # 노드 재시작 시 이전 인스턴스의 latched READY를 제거한다.
+        self.yolo_ready_pub.publish(Bool(data=False))
 
         self.ball_state_pub = self.create_publisher(
             String, "/realsense_yolo/ball_state", self.state_qos
@@ -397,6 +425,13 @@ class RealSenseYoloDetector(Node):
             self.display_mode = "ball"
         if requested == self.ball_active:
             return
+        now_sec = time.monotonic()
+        if not requested:
+            self._finish_ball_loss_event(
+                now_sec,
+                self._wall_time_iso(),
+                "tracking_disabled",
+            )
         self.ball_active = requested
         self.get_logger().info(
             f"RS YOLO ball {'ON' if requested else 'OFF'}"
@@ -404,6 +439,8 @@ class RealSenseYoloDetector(Node):
         if not requested:
             self._reset_ball_detection_hold()
             self._publish_ball_state(self._empty_ball_state(False))
+        else:
+            self._reset_ball_loss_tracking(clear_last_valid=True)
 
     def cb_hoop_active(self, msg: Bool) -> None:
         requested = bool(msg.data)
@@ -430,14 +467,23 @@ class RealSenseYoloDetector(Node):
             return str(cls_id)
 
     def _run_yolo(self, frame: np.ndarray) -> List[Detection]:
+        configured_conf = float(self.cfg["conf"])
+        diagnostic_conf = float(
+            self.cfg.get("ball_diagnostic_conf", configured_conf)
+        )
+        inference_conf = configured_conf
+        if getattr(self, "ball_active", True):
+            inference_conf = min(configured_conf, diagnostic_conf)
+        inference_conf = max(0.001, inference_conf)
         result = self.model.predict(
             source=frame,
             imgsz=int(self.cfg["imgsz"]),
-            conf=float(self.cfg["conf"]),
+            conf=inference_conf,
             device=str(self.cfg["device"]),
             verbose=False,
         )[0]
 
+        self.latest_raw_ball_candidate = None
         if result.boxes is None:
             return []
 
@@ -456,6 +502,12 @@ class RealSenseYoloDetector(Node):
             x1, y1, x2, y2 = [
                 float(v) for v in box.xyxy[0].tolist()
             ]
+            detection = Detection(name, cls_id, conf, x1, y1, x2, y2)
+
+            if name == str(self.cfg["ball_class"]):
+                current = self.latest_raw_ball_candidate
+                if current is None or detection.conf > current.conf:
+                    self.latest_raw_ball_candidate = detection
 
             threshold = float(self.cfg["conf"])
             if name == str(self.cfg["ball_class"]):
@@ -466,9 +518,7 @@ class RealSenseYoloDetector(Node):
             if conf < threshold:
                 continue
 
-            dets.append(
-                Detection(name, cls_id, conf, x1, y1, x2, y2)
-            )
+            dets.append(detection)
         return dets
 
     @staticmethod
@@ -544,9 +594,35 @@ class RealSenseYoloDetector(Node):
         det: Optional[Detection],
         depth_m: np.ndarray,
         process_ms: float,
+        raw_candidate: Optional[Detection] = None,
     ) -> Dict[str, object]:
         if det is None:
             state = self._empty_ball_state(self.ball_active)
+            diagnostic_conf = float(
+                self.cfg.get("ball_diagnostic_conf", self.cfg["conf"])
+            )
+            if raw_candidate is not None:
+                state["raw_ball_conf"] = raw_candidate.conf
+                state["raw_ball_bbox"] = [
+                    raw_candidate.x1,
+                    raw_candidate.y1,
+                    raw_candidate.x2,
+                    raw_candidate.y2,
+                ]
+                state["raw_candidate_detected"] = True
+                state["realsense_diagnostic"] = {
+                    "category": "confidence",
+                    "detail": "ball_conf_below_accept_threshold",
+                    "candidate_conf": raw_candidate.conf,
+                    "accept_threshold": float(self.cfg["ball_conf"]),
+                    "diagnostic_threshold": diagnostic_conf,
+                }
+            else:
+                state["realsense_diagnostic"] = {
+                    "category": "detection",
+                    "detail": "no_ball_candidate_above_diagnostic_threshold",
+                    "diagnostic_threshold": diagnostic_conf,
+                }
             state["process_ms"] = process_ms
             return state
 
@@ -559,9 +635,11 @@ class RealSenseYoloDetector(Node):
             state = self._empty_ball_state(self.ball_active)
             state["raw_ball_conf"] = det.conf
             state["raw_ball_bbox"] = [det.x1, det.y1, det.x2, det.y2]
+            state["raw_candidate_detected"] = True
             state["realsense_diagnostic"] = {
                 "category": "depth",
                 "detail": "yolo_ball_detected_but_depth_invalid",
+                "candidate_conf": det.conf,
             }
             state["process_ms"] = process_ms
             return state
@@ -585,6 +663,7 @@ class RealSenseYoloDetector(Node):
             "raw_ball_y": det.cy,
             "raw_ball_conf": det.conf,
             "raw_ball_bbox": [det.x1, det.y1, det.x2, det.y2],
+            "raw_candidate_detected": True,
             "raw_detected": True,
             "held_previous_detection": False,
             "ball_hold_elapsed_sec": 0.0,
@@ -597,6 +676,198 @@ class RealSenseYoloDetector(Node):
             "source": "realsense_yolo",
             "process_ms": process_ms,
         }
+
+    @staticmethod
+    def _wall_time_iso() -> str:
+        return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    @staticmethod
+    def _ball_loss_reason(state: Dict[str, object]) -> str:
+        diagnostic = state.get("realsense_diagnostic")
+        if not isinstance(diagnostic, dict):
+            return "unknown:missing_diagnostic"
+        return (
+            f"{diagnostic.get('category', 'unknown')}:"
+            f"{diagnostic.get('detail', 'unknown')}"
+        )
+
+    @staticmethod
+    def _ball_candidate_summary(
+        state: Optional[Dict[str, object]],
+    ) -> Dict[str, object]:
+        if not isinstance(state, dict):
+            return {}
+        diagnostic = state.get("realsense_diagnostic")
+        summary: Dict[str, object] = {
+            "detected": bool(state.get("raw_candidate_detected", False)),
+            "confidence": state.get("raw_ball_conf"),
+            "bbox": state.get("raw_ball_bbox", []),
+        }
+        if isinstance(diagnostic, dict):
+            for key in (
+                "category",
+                "detail",
+                "accept_threshold",
+                "diagnostic_threshold",
+            ):
+                if key in diagnostic:
+                    summary[key] = diagnostic[key]
+        return summary
+
+    def _reset_ball_loss_tracking(
+        self, *, clear_last_valid: bool = False
+    ) -> None:
+        self.ball_loss_started_mono = None
+        self.ball_loss_started_at = None
+        self.ball_loss_last_log_mono = 0.0
+        self.ball_loss_last_reason = None
+        self.ball_loss_missed_frames = 0
+        self.ball_loss_latest_state = None
+        if clear_last_valid:
+            self.ball_loss_last_valid = None
+
+    def _emit_ball_loss_event(
+        self,
+        event: str,
+        observed_at: str,
+        now_sec: float,
+        state: Optional[Dict[str, object]],
+        **extra: object,
+    ) -> None:
+        started_mono = self.ball_loss_started_mono
+        duration_sec = (
+            max(0.0, now_sec - started_mono)
+            if started_mono is not None
+            else 0.0
+        )
+        payload: Dict[str, object] = {
+            "event": event,
+            "observed_at": observed_at,
+            "loss_started_at": self.ball_loss_started_at,
+            "duration_sec": round(duration_sec, 3),
+            "missed_inference_frames": self.ball_loss_missed_frames,
+            "reason": self._ball_loss_reason(state or {}),
+            "candidate": self._ball_candidate_summary(state),
+            "last_valid": self.ball_loss_last_valid,
+        }
+        payload.update(extra)
+        self.get_logger().warning(
+            "[RealSenseBallLoss] "
+            + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        )
+
+    def _finish_ball_loss_event(
+        self,
+        now_sec: float,
+        observed_at: str,
+        outcome: str,
+        recovered_state: Optional[Dict[str, object]] = None,
+    ) -> None:
+        if getattr(self, "ball_loss_started_mono", None) is None:
+            return
+        extra: Dict[str, object] = {"outcome": outcome}
+        if recovered_state is not None:
+            extra["recovered"] = {
+                "confidence": recovered_state.get("raw_ball_conf"),
+                "distance_cm": recovered_state.get(
+                    "realsense_ball_distance_cm"
+                ),
+                "angle_deg": recovered_state.get(
+                    "realsense_ball_angle_error"
+                ),
+            }
+        self._emit_ball_loss_event(
+            "end",
+            observed_at,
+            now_sec,
+            self.ball_loss_latest_state,
+            **extra,
+        )
+        self._reset_ball_loss_tracking(clear_last_valid=False)
+
+    def _update_ball_loss_event(
+        self,
+        raw_state: Dict[str, object],
+        now_sec: float,
+        observed_at: str,
+    ) -> None:
+        if not self.ball_active:
+            return
+
+        if bool(raw_state.get("realsense_ball_detected", False)):
+            self._finish_ball_loss_event(
+                now_sec,
+                observed_at,
+                "reacquired",
+                raw_state,
+            )
+            self.ball_loss_last_valid = {
+                "observed_at": observed_at,
+                "confidence": raw_state.get("raw_ball_conf"),
+                "distance_cm": raw_state.get(
+                    "realsense_ball_distance_cm"
+                ),
+                "angle_deg": raw_state.get(
+                    "realsense_ball_angle_error"
+                ),
+            }
+            return
+
+        # Ball mode can be enabled before the first ball enters the image.
+        # That state is an initial search, not a loss event.
+        if (
+            self.ball_loss_started_mono is None
+            and self.ball_loss_last_valid is None
+        ):
+            diagnostic = raw_state.get("realsense_diagnostic")
+            if isinstance(diagnostic, dict):
+                diagnostic["observed_at"] = observed_at
+                diagnostic["tracking_state"] = "awaiting_first_acquisition"
+            return
+
+        reason = self._ball_loss_reason(raw_state)
+        self.ball_loss_missed_frames += 1
+        self.ball_loss_latest_state = dict(raw_state)
+        event = "ongoing"
+        should_log = False
+        if self.ball_loss_started_mono is None:
+            self.ball_loss_started_mono = now_sec
+            self.ball_loss_started_at = observed_at
+            event = "start"
+            should_log = True
+        elif reason != self.ball_loss_last_reason:
+            event = "reason_changed"
+            should_log = True
+        else:
+            interval = max(
+                0.1,
+                float(
+                    self.cfg.get("ball_loss_log_interval_seconds", 1.0)
+                ),
+            )
+            should_log = now_sec - self.ball_loss_last_log_mono >= interval
+
+        self.ball_loss_last_reason = reason
+        diagnostic = raw_state.get("realsense_diagnostic")
+        if isinstance(diagnostic, dict):
+            diagnostic["observed_at"] = observed_at
+            diagnostic["loss_started_at"] = self.ball_loss_started_at
+            diagnostic["loss_elapsed_sec"] = round(
+                max(0.0, now_sec - self.ball_loss_started_mono), 3
+            )
+            diagnostic["missed_inference_frames"] = (
+                self.ball_loss_missed_frames
+            )
+            diagnostic["last_valid"] = self.ball_loss_last_valid
+
+        if should_log:
+            self._emit_ball_loss_event(
+                event,
+                observed_at,
+                now_sec,
+                raw_state,
+            )
+            self.ball_loss_last_log_mono = now_sec
 
     def _reset_ball_detection_hold(self) -> None:
         self.last_valid_ball_state = None
@@ -806,6 +1077,7 @@ class RealSenseYoloDetector(Node):
             "raw_ball_y": None,
             "raw_ball_conf": 0.0,
             "raw_ball_bbox": [],
+            "raw_candidate_detected": False,
             "raw_detected": False,
             "held_previous_detection": False,
             "ball_hold_elapsed_sec": 0.0,
@@ -1142,6 +1414,14 @@ class RealSenseYoloDetector(Node):
             frame = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
         except Exception as exc:
             self.get_logger().warning(f"Color conversion failed: {exc}")
+            failure = self._empty_ball_state(self.ball_active)
+            failure["realsense_diagnostic"] = {
+                "category": "pipeline",
+                "detail": "color_conversion_failed",
+            }
+            self._update_ball_loss_event(
+                failure, now, self._wall_time_iso()
+            )
             return
 
         if not should_infer:
@@ -1156,6 +1436,14 @@ class RealSenseYoloDetector(Node):
             )
         except Exception as exc:
             self.get_logger().warning(f"Depth conversion failed: {exc}")
+            failure = self._empty_ball_state(self.ball_active)
+            failure["realsense_diagnostic"] = {
+                "category": "pipeline",
+                "detail": "depth_conversion_failed",
+            }
+            self._update_ball_loss_event(
+                failure, now, self._wall_time_iso()
+            )
             self._publish_cached_debug(frame, color_msg)
             return
 
@@ -1168,6 +1456,14 @@ class RealSenseYoloDetector(Node):
             self.get_logger().warning(
                 "Color/depth mismatch; aligned_depth_to_color is required"
             )
+            failure = self._empty_ball_state(self.ball_active)
+            failure["realsense_diagnostic"] = {
+                "category": "pipeline",
+                "detail": "color_depth_shape_mismatch",
+            }
+            self._update_ball_loss_event(
+                failure, now, self._wall_time_iso()
+            )
             self._publish_cached_debug(frame, color_msg)
             return
 
@@ -1175,6 +1471,14 @@ class RealSenseYoloDetector(Node):
             dets = self._run_yolo(frame)
         except Exception as exc:
             self.get_logger().error(f"YOLO inference failed: {exc}")
+            failure = self._empty_ball_state(self.ball_active)
+            failure["realsense_diagnostic"] = {
+                "category": "pipeline",
+                "detail": "yolo_inference_failed",
+            }
+            self._update_ball_loss_event(
+                failure, now, self._wall_time_iso()
+            )
             self._publish_cached_debug(frame, color_msg)
             return
 
@@ -1186,7 +1490,17 @@ class RealSenseYoloDetector(Node):
         # 추론은 한 번만 수행한다. 두 상태를 같은 결과에서 계산해 별도/통합
         # rqt 화면이 모드 전환 중에도 같은 프레임을 보여 주게 한다. 실제 판단용
         # 상태 토픽은 아래에서 활성 모드일 때만 발행한다.
-        raw_ball_state = self._make_ball_state(ball, depth_m, process_ms)
+        raw_ball_state = self._make_ball_state(
+            ball,
+            depth_m,
+            process_ms,
+            self.latest_raw_ball_candidate,
+        )
+        self._update_ball_loss_event(
+            raw_ball_state,
+            now,
+            self._wall_time_iso(),
+        )
         ball_state, displayed_ball = self._apply_ball_detection_hold(
             raw_ball_state,
             ball,
@@ -1205,6 +1519,12 @@ class RealSenseYoloDetector(Node):
                 now,
             )
         )
+        if not self.yolo_ready:
+            self.yolo_ready = True
+            self.yolo_ready_pub.publish(Bool(data=True))
+            self.get_logger().info(
+                "[VisionStartup] RealSense YOLO first inference READY"
+            )
         self.latest_ball_detection = displayed_ball
         self.latest_backboard_detection = displayed_backboard
         self.latest_ball_state = ball_state

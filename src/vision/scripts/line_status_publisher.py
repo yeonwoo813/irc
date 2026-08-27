@@ -57,29 +57,30 @@ class LineDecision:
     def __init__(self):
         # 직진, 미세회전, 중간회전, 회전 각도 기준
         self.forward_angle = 7.0
-        self.fine_turn_angle = 22.5
+        self.fine_turn_angle = 25.0
         self.half_turn_angle = 30.0
         self.large_turn_angle = 45.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
-        self.curve_a = 1.2e-4
+        self.curve_a = 2.0e-4
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
         self.move_distance = 90.0
-        self.steering_distance_max = 150.0
+        self.steering_distance_max = 130.0
 
-        # 직선에서 90~150px 구간은 거리와 각도가 서로 반대 방향일 때만
-        # 조향각을 사용하고, 150px 이상에서는 방향과 관계없이 사용한다.
-        self.steering_scale_px = 600.0
+        # 직선에서 90~130px 구간은 거리와 각도가 서로 반대 방향이고
+        # 원본 각도가 7~30도일 때만 조향각을 사용한다. 130px 이상은
+        # 원본 각도 크기와 방향에 관계없이 항상 거리 보정각을 결합한다.
+        self.steering_scale_px = 1200.0
         self.steering_limit = 10.0
 
         # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
         self.curve_forward_angle = 7.0
-        self.curve_fine_turn_angle = 22.5
-        self.curve_turn_angle = 30.0
+        self.curve_fine_turn_angle = 25.0
+        self.curve_turn_angle = 35.0
 
         self.curve_move_distance = 90.0
-        self.curve_steering_distance_max = 150.0
+        self.curve_steering_distance_max = 130.0
         self.curve_steering_scale_px = 600.0
         self.curve_steering_limit = 10.0
 
@@ -132,22 +133,25 @@ class LineDecision:
                 and angle_status == LineStatus.Left_Half_Forward
             )
         )
-        steering_inputs_valid = bool(
+        steering_inputs_present = bool(
             line_angle is not None
             and line_distance is not None
+        )
+        near_steering_inputs_valid = bool(
+            steering_inputs_present
             and self.forward_angle
             < abs(line_angle)
             <= self.half_turn_angle
         )
         use_near_conflict_steering = bool(
-            steering_inputs_valid
+            near_steering_inputs_valid
             and self.move_distance
             <= abs(line_distance)
             < self.steering_distance_max
             and opposite_half
         )
         use_far_steering = bool(
-            steering_inputs_valid
+            steering_inputs_present
             and abs(line_distance) >= self.steering_distance_max
         )
         use_steering = use_near_conflict_steering or use_far_steering
@@ -196,22 +200,25 @@ class LineDecision:
                 and angle_status == LineStatus.Left_Half_Forward
             )
         )
-        steering_inputs_valid = bool(
+        steering_inputs_present = bool(
             tangent_angle is not None
             and line_distance is not None
+        )
+        near_steering_inputs_valid = bool(
+            steering_inputs_present
             and self.curve_forward_angle
             < abs(tangent_angle)
             <= self.curve_turn_angle
         )
         use_near_conflict_steering = bool(
-            steering_inputs_valid
+            near_steering_inputs_valid
             and self.curve_move_distance
             <= abs(line_distance)
             < self.curve_steering_distance_max
             and opposite_half
         )
         use_far_steering = bool(
-            steering_inputs_valid
+            steering_inputs_present
             and abs(line_distance) >= self.curve_steering_distance_max
         )
         if use_near_conflict_steering or use_far_steering:

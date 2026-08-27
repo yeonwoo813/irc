@@ -651,7 +651,7 @@ def make_line_payload(
             payload["line_angle"] = fitted_angle
 
     # 점 4개 이상이면 검출점 전체로 2차함수를 피팅한다. 곡선으로
-    # 판별되면 세 번째로 가까운 점을 접선과 픽셀 거리의 공통 기준점으로
+    # 판별되면 두 번째로 가까운 점을 접선과 픽셀 거리의 공통 기준점으로
     # 사용한다. 직선이면 위에서 계산한 첫 번째 점 거리를 유지한다.
     if point_count >= 4:
         coeffs = fit_poly2(line_points)
@@ -659,13 +659,13 @@ def make_line_payload(
             a, b, _c = coeffs
             payload["curve_a"] = float(a)
 
-            third_x, tangent_y = line_points[2]
+            second_x, tangent_y = line_points[1]
             slope_dx_dy_down = 2.0 * a * tangent_y + b
             # 이미지 y는 아래로 증가하므로, 로봇 진행 방향인 위쪽 기준으로 부호 반전
             payload["tangent_angle"] = float(math.degrees(math.atan2(-slope_dx_dy_down, 1.0)))
             payload["line_angle"] = payload["tangent_angle"]
             if abs(a) > LINE_CURVE_A_THRESHOLD:
-                payload["line_distance"] = float(third_x - robot_x)
+                payload["line_distance"] = float(second_x - robot_x)
 
     return payload
 
@@ -1217,6 +1217,19 @@ def main_ros2(ini_path: str = "settings.ini"):
                 Image, "/camera/image_raw", self.cb_image, qos_profile_sensor_data
             )
             self.pub_state = self.create_publisher(String, "/line_tracker/state", 10)
+            ready_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.yolo_ready = False
+            self.pub_yolo_ready = self.create_publisher(
+                Bool,
+                "/vision/webcam_yolo_ready",
+                ready_qos,
+            )
+            # 노드가 재시작되면 이전 인스턴스의 latched READY를 즉시 지운다.
+            self.pub_yolo_ready.publish(Bool(data=False))
             self.pub_raw_ball_in_hand = self.create_publisher(
                 Bool,
                 "/raw_ball_in_hand",
@@ -1332,6 +1345,12 @@ def main_ros2(ini_path: str = "settings.ini"):
                             + traceback.format_exc()
                         )
                 return
+            if not self.yolo_ready:
+                self.yolo_ready = True
+                self.pub_yolo_ready.publish(Bool(data=True))
+                self.get_logger().info(
+                    "[VisionStartup] webcam YOLO first inference READY"
+                )
             self.publish_hurdle_status(payload)
             self.pub_raw_ball_in_hand.publish(
                 Bool(data=bool(payload.get("raw_ball_in_hand", False)))

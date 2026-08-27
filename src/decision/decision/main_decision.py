@@ -86,7 +86,7 @@ class MainDecision(Node):
         self.declare_parameter('test_mode', False)
         self.declare_parameter('ball_lost_timeout_sec', 0.8)
         self.declare_parameter('goal_lost_timeout_sec', 0.5)
-        self.declare_parameter('post_shoot_min_turn_count', 3)
+        self.declare_parameter('post_shoot_min_turn_count', 4)
         test_mode_param = self.get_parameter('test_mode').value
         if isinstance(test_mode_param, str):
             self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
@@ -117,6 +117,11 @@ class MainDecision(Node):
         #test mode true/false에 따라 초기값 조정
         self.motion_end = self.test_mode
         self.motion_ready = self.test_mode
+        # 실제 경기에서는 두 카메라의 YOLO가 첫 추론을 성공하기 전까지
+        # 판단과 모션 발행을 모두 막는다. test_mode는 하드웨어 없이 판단
+        # 로직만 검증하는 용도이므로 이 시작 게이트를 우회한다.
+        self.webcam_yolo_ready = False
+        self.realsense_yolo_ready = False
         #3개의 비전 데이터가 모두 준비되었는지 확인
         self.line_data = False
         self.ball_data = False
@@ -201,6 +206,24 @@ class MainDecision(Node):
         self.ball_result_sub = self.create_subscription(BallResult, 'ball_result', self.BallResultCallback, 10)
         self.hurdle_result_sub = self.create_subscription(HurdleResult, 'hurdle_result', self.HurdleResultCallback, 10)
 
+        vision_ready_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.webcam_yolo_ready_sub = self.create_subscription(
+            Bool,
+            '/vision/webcam_yolo_ready',
+            self.WebcamYoloReadyCallback,
+            vision_ready_qos,
+        )
+        self.realsense_yolo_ready_sub = self.create_subscription(
+            Bool,
+            '/vision/realsense_yolo_ready',
+            self.RealSenseYoloReadyCallback,
+            vision_ready_qos,
+        )
+
         #motion_ready 명령을 못 받는 상황 방지
         motion_state_qos = QoSProfile(
             depth=1,
@@ -249,6 +272,55 @@ class MainDecision(Node):
             0.05,
             self._check_goal_loss_timeout,
         )
+
+    def _vision_stack_ready(self):
+        """Return true only after both camera YOLO pipelines have inferred."""
+        if getattr(self, 'test_mode', False):
+            return True
+        return bool(
+            getattr(self, 'webcam_yolo_ready', True)
+            and getattr(self, 'realsense_yolo_ready', True)
+        )
+
+    def _set_yolo_readiness(self, source, ready):
+        attr_name = f'{source}_yolo_ready'
+        ready = bool(ready)
+        previous_stack_ready = MainDecision._vision_stack_ready(self)
+        previous_source_ready = bool(getattr(self, attr_name, False))
+        setattr(self, attr_name, ready)
+        stack_ready = MainDecision._vision_stack_ready(self)
+
+        if previous_source_ready != ready:
+            self.get_logger().info(
+                f'[VisionStartup] {source}_yolo='
+                f'{"READY" if ready else "NOT_READY"}'
+            )
+
+        # 재시작이나 장애로 어느 한쪽 준비 신호가 내려가면, 그 전에
+        # 쌓인 결과가 재준비 직후 의사결정에 섞이지 않게 즉시 버린다.
+        if not stack_ready:
+            MainDecision._reset_vision_decision_cycle(self)
+            if previous_stack_ready or previous_source_ready != ready:
+                self.get_logger().info(
+                    '[VisionStartup] 보행 잠금: webcam/RealSense YOLO의 '
+                    '첫 정상 추론을 기다립니다.'
+                )
+            return False
+
+        if not previous_stack_ready:
+            MainDecision._reset_vision_decision_cycle(self)
+            self.get_logger().info(
+                '[VisionStartup] webcam/RealSense YOLO READY: '
+                '새 비전 프레임 3개를 모은 뒤 보행을 시작합니다.'
+            )
+        return True
+
+    def WebcamYoloReadyCallback(self, msg: Bool):
+        self._set_yolo_readiness('webcam', msg.data)
+
+    def RealSenseYoloReadyCallback(self, msg: Bool):
+        self._set_yolo_readiness('realsense', msg.data)
+
     def _set_vision_activity(
         self,
         ball_active,
@@ -347,7 +419,12 @@ class MainDecision(Node):
             f"motion_ready: {self.motion_ready}, motion_end: {self.motion_end}"
         )
         if self.motion_ready and not was_ready:
-            self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
+            if MainDecision._vision_stack_ready(self):
+                self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
+            else:
+                self.get_logger().info(
+                    "초기자세 완료 확인: 두 YOLO 준비 전이므로 보행을 대기합니다."
+                )
 
         # 모션 실행 중 쌓인 최신 비전 결과를 모션 종료 즉시 집계합니다.
         # 다음 line/ball/hurdle 콜백을 기다리지 않도록 모션이 실제로 종료되는 전환 시점에 한 번만 판단
@@ -367,7 +444,10 @@ class MainDecision(Node):
         self.latest_line_angle = line_msg.angle
         self.latest_line_follow_point = line_msg.follow_point
 
-        if not self.motion_ready:
+        if (
+            not self.motion_ready
+            or not MainDecision._vision_stack_ready(self)
+        ):
             return
 
         #최신 데이터 갱신
@@ -433,7 +513,10 @@ class MainDecision(Node):
                     self._consume_pre_shoot_verified_result()
             return
 
-        if not self.motion_ready:
+        if (
+            not self.motion_ready
+            or not MainDecision._vision_stack_ready(self)
+        ):
             return
 
         # Pick 전에 공이 보이면 마지막 검출 시간을 갱신한다.
@@ -492,7 +575,10 @@ class MainDecision(Node):
         self.latest_hurdle_angle = hurdle_msg.angle
         self.latest_hurdle_ready = hurdle_msg.hurdle_ready
 
-        if not self.motion_ready:
+        if (
+            not self.motion_ready
+            or not MainDecision._vision_stack_ready(self)
+        ):
             return
 
         #허들이 검출되고, 허들이 2번 이내 실행되었다면 hurdle mode 유지
@@ -524,7 +610,11 @@ class MainDecision(Node):
         # BallStatusPublisher가 표시한 verified 결과 하나만 사용한다.
         if getattr(self, 'pre_shoot_result_waiting', False):
             return False
-        if not self.motion_ready or not self.motion_end:
+        if (
+            not self.motion_ready
+            or not self.motion_end
+            or not MainDecision._vision_stack_ready(self)
+        ):
             return False
 
         # 이미 현재 종료 사이클의 판단을 시작했다면 중복 명령을 막습니다.
@@ -694,7 +784,10 @@ class MainDecision(Node):
 
 ###### 판단 로직 시작 #######
     def Decision(self):
-        if not self.motion_ready:
+        if (
+            not self.motion_ready
+            or not MainDecision._vision_stack_ready(self)
+        ):
             return
 
         if not (self.line_data == True and self.ball_data == True and self.hurdle_data == True):   
@@ -861,10 +954,10 @@ class MainDecision(Node):
 
             self.goal_count += 1
 
-        # Shoot 이후에는 짧은 30/31번 회전을 최소 3회 수행한다.
+        # Shoot 이후에는 짧은 30/31번 회전을 최소 4회 수행한다.
         # 그 뒤부터 라인이 보이면 회전을 끝내고 보행 자세로 복귀한다.
         min_turn_count = int(
-            getattr(self, 'post_shoot_min_turn_count', 3)
+            getattr(self, 'post_shoot_min_turn_count', 4)
         )
         if (
             self.turn_count >= min_turn_count
@@ -1406,6 +1499,12 @@ class MainDecision(Node):
     def MotionCommand(self):
         if not self.motion_ready:
             self.get_logger().info("motion_ready=false: 모션 명령을 보내지 않습니다.")
+            return
+        if not MainDecision._vision_stack_ready(self):
+            self.get_logger().info(
+                "vision_startup=false: webcam/RealSense YOLO 준비 전이라 "
+                "모션 명령을 보내지 않습니다."
+            )
             return
 
         motion_msg = MotionCommand()

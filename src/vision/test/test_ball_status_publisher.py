@@ -95,15 +95,27 @@ class BallDecisionTest(unittest.TestCase):
                     (BallStatus.Ball_None, 0.0),
                 )
 
-    def test_realsense_decision_is_unchanged(self) -> None:
-        result = self.decision.decide(
-            BallFeatures(
-                realsense_ball_detected=True,
-                realsense_ball_distance_cm=50.0,
-                realsense_ball_angle_error=-5.0,
-            )
+    def test_realsense_center_range_is_minus_10_to_plus_10(self) -> None:
+        cases = (
+            (-10.01, BallStatus.Left_Half_Forward, -10.01),
+            (-10.0, BallStatus.Forward_4step, 0.0),
+            (10.0, BallStatus.Forward_4step, 0.0),
+            (10.01, BallStatus.Right_Half_Forward, 10.01),
         )
-        self.assertEqual(result, (BallStatus.Forward_3step, 0.0))
+
+        for input_angle, expected_status, expected_angle in cases:
+            with self.subTest(angle=input_angle):
+                result = self.decision.decide(
+                    BallFeatures(
+                        realsense_ball_detected=True,
+                        realsense_ball_distance_cm=50.0,
+                        realsense_ball_angle_error=input_angle,
+                    )
+                )
+                self.assertEqual(
+                    result,
+                    (expected_status, expected_angle),
+                )
 
     def test_goal_pre_shoot_range_extends_through_80_cm(self) -> None:
         at_boundary = self.decision.decide(

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -46,8 +47,10 @@ publish_debug_image = true
     assert config["backboard_class"] == "backboard"
     assert config["ball_class"] == "ball"
     assert config["max_fps"] == 30.0
+    assert config["ball_diagnostic_conf"] == 0.10
     assert config["ball_detection_hold_seconds"] == 0.5
     assert config["backboard_detection_hold_seconds"] == 0.5
+    assert config["ball_loss_log_interval_seconds"] == 1.0
     assert config["publish_debug_image"] is True
 
 
@@ -404,6 +407,158 @@ def test_goal_detections_are_discarded_before_state_or_visualization():
     detections = detector._run_yolo(np.zeros((120, 160, 3), dtype=np.uint8))
 
     assert [detection.name for detection in detections] == ["backboard", "ball"]
+
+
+def test_weak_ball_candidate_is_logged_but_not_accepted():
+    class Value:
+        def __init__(self, value):
+            self.value = value
+
+        def item(self):
+            return self.value
+
+    class Coordinates:
+        def __init__(self, values):
+            self.values = values
+
+        def tolist(self):
+            return self.values
+
+    class Box:
+        def __init__(self, cls_id, confidence, coordinates):
+            self.cls = [Value(cls_id)]
+            self.conf = [Value(confidence)]
+            self.xyxy = [Coordinates(coordinates)]
+
+    class Result:
+        names = {1: "backboard", 2: "ball"}
+        boxes = [Box(2, 0.22, [30, 40, 70, 80])]
+
+    class Model:
+        def __init__(self):
+            self.kwargs = None
+
+        def predict(self, **kwargs):
+            self.kwargs = kwargs
+            return [Result()]
+
+    detector = MODULE.RealSenseYoloDetector.__new__(
+        MODULE.RealSenseYoloDetector
+    )
+    detector.model = Model()
+    detector.ball_active = True
+    detector.cfg = {
+        "imgsz": 640,
+        "conf": 0.30,
+        "ball_diagnostic_conf": 0.10,
+        "device": "0",
+        "ball_class": "ball",
+        "ball_conf": 0.35,
+        "backboard_class": "backboard",
+        "backboard_conf": 0.30,
+        "goal_class": "goal",
+    }
+
+    detections = detector._run_yolo(
+        np.zeros((120, 160, 3), dtype=np.uint8)
+    )
+    state = detector._make_ball_state(
+        None,
+        np.zeros((120, 160), dtype=np.float32),
+        12.0,
+        detector.latest_raw_ball_candidate,
+    )
+
+    assert detector.model.kwargs["conf"] == 0.10
+    assert detections == []
+    assert state["realsense_ball_detected"] is False
+    assert state["raw_candidate_detected"] is True
+    assert state["raw_ball_conf"] == 0.22
+    assert state["realsense_diagnostic"]["category"] == "confidence"
+    assert (
+        state["realsense_diagnostic"]["detail"]
+        == "ball_conf_below_accept_threshold"
+    )
+
+
+def test_ball_loss_event_records_start_duration_reason_and_recovery():
+    class Logger:
+        def __init__(self):
+            self.warnings = []
+
+        def warning(self, message):
+            self.warnings.append(message)
+
+    detector = MODULE.RealSenseYoloDetector.__new__(
+        MODULE.RealSenseYoloDetector
+    )
+    detector.cfg = {"ball_loss_log_interval_seconds": 1.0}
+    detector.ball_active = True
+    logger = Logger()
+    detector.get_logger = lambda: logger
+    detector._reset_ball_loss_tracking(clear_last_valid=True)
+
+    accepted = detector._empty_ball_state(True)
+    accepted.update(
+        {
+            "realsense_ball_detected": True,
+            "raw_ball_conf": 0.91,
+            "realsense_ball_distance_cm": 81.2,
+            "realsense_ball_angle_error": -4.3,
+        }
+    )
+    detector._update_ball_loss_event(
+        accepted, 10.0, "2026-08-27T19:33:15.000+09:00"
+    )
+
+    missing = detector._empty_ball_state(True)
+    missing.update(
+        {
+            "raw_ball_conf": 0.22,
+            "raw_ball_bbox": [30, 40, 70, 80],
+            "raw_candidate_detected": True,
+            "realsense_diagnostic": {
+                "category": "confidence",
+                "detail": "ball_conf_below_accept_threshold",
+                "accept_threshold": 0.35,
+                "diagnostic_threshold": 0.10,
+            },
+        }
+    )
+    detector._update_ball_loss_event(
+        missing, 10.1, "2026-08-27T19:33:15.100+09:00"
+    )
+    detector._update_ball_loss_event(
+        missing, 10.5, "2026-08-27T19:33:15.500+09:00"
+    )
+    detector._update_ball_loss_event(
+        missing, 11.2, "2026-08-27T19:33:16.200+09:00"
+    )
+    detector._update_ball_loss_event(
+        accepted, 12.0, "2026-08-27T19:33:17.000+09:00"
+    )
+
+    events = [
+        json.loads(message.split("] ", 1)[1])
+        for message in logger.warnings
+    ]
+    assert [event["event"] for event in events] == [
+        "start",
+        "ongoing",
+        "end",
+    ]
+    assert events[0]["loss_started_at"] == (
+        "2026-08-27T19:33:15.100+09:00"
+    )
+    assert events[0]["reason"] == (
+        "confidence:ball_conf_below_accept_threshold"
+    )
+    assert events[0]["candidate"]["confidence"] == 0.22
+    assert events[0]["last_valid"]["distance_cm"] == 81.2
+    assert events[-1]["duration_sec"] == 1.9
+    assert events[-1]["missed_inference_frames"] == 3
+    assert events[-1]["outcome"] == "reacquired"
+    assert events[-1]["recovered"]["confidence"] == 0.91
 
 
 def test_ball_and_backboard_views_have_yellow_boxes_and_information_panels():

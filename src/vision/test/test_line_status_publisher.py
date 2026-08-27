@@ -20,6 +20,13 @@ class CurveDistancePriorityTest(unittest.TestCase):
     def setUp(self) -> None:
         self.decision = LineDecision()
 
+    def test_straight_and_curve_far_steering_thresholds_are_130px(self) -> None:
+        self.assertEqual(self.decision.steering_distance_max, 130.0)
+        self.assertEqual(
+            self.decision.curve_steering_distance_max,
+            130.0,
+        )
+
     def _curve_features(self, distance: float) -> LineFeatures:
         return LineFeatures(
             point_count=5,
@@ -120,6 +127,28 @@ class CurveDistancePriorityTest(unittest.TestCase):
 
         self.assertEqual(status, LineStatus.Forward_4step)
         self.assertEqual(angle, 0.0)
+
+    def test_curve_far_above_30_degrees_uses_combined_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.curve_steering_distance_max
+        )
+        features.tangent_angle = 35.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Turn_Curve)
+        self.assertEqual(angle, 45.0)
+
+    def test_curve_far_zero_angle_still_uses_distance_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.curve_steering_distance_max
+        )
+        features.tangent_angle = 0.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 10.0)
 
     def test_curve_thresholds_are_independent_from_straight_thresholds(
         self,
@@ -271,6 +300,30 @@ class CurveDistancePriorityTest(unittest.TestCase):
 
         self.assertEqual(status, LineStatus.Right_Turn_Half)
         self.assertEqual(angle, 25.0)
+
+    def test_straight_far_above_30_degrees_uses_combined_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.steering_distance_max
+        )
+        features.curve_a = 0.0
+        features.line_angle = 35.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Turn)
+        self.assertEqual(angle, 45.0)
+
+    def test_straight_far_zero_angle_still_uses_distance_steering(self) -> None:
+        features = self._curve_features(
+            self.decision.steering_distance_max
+        )
+        features.curve_a = 0.0
+        features.line_angle = 0.0
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Half_Forward)
+        self.assertEqual(angle, 10.0)
 
     def test_straight_turn_half_does_not_use_steering(self) -> None:
         features = self._curve_features(118.0)
