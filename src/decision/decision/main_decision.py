@@ -86,8 +86,7 @@ class MainDecision(Node):
         self.declare_parameter('test_mode', False)
         self.declare_parameter('ball_lost_timeout_sec', 0.8)
         self.declare_parameter('goal_lost_timeout_sec', 0.5)
-        self.declare_parameter('shoot_fresh_vision_distance_cm', 80.0)
-        self.declare_parameter('shoot_fresh_vision_settle_sec', 0.5)
+        self.declare_parameter('post_shoot_min_turn_count', 3)
         test_mode_param = self.get_parameter('test_mode').value
         if isinstance(test_mode_param, str):
             self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
@@ -101,23 +100,17 @@ class MainDecision(Node):
             0.0,
             float(self.get_parameter('goal_lost_timeout_sec').value),
         )
-        self.shoot_fresh_vision_distance_cm = max(
-            0.0,
-            float(
-                self.get_parameter(
-                    'shoot_fresh_vision_distance_cm'
-                ).value
+        self.post_shoot_min_turn_count = max(
+            1,
+            min(
+                10,
+                int(
+                    self.get_parameter(
+                        'post_shoot_min_turn_count'
+                    ).value
+                ),
             ),
         )
-        self.shoot_fresh_vision_settle_sec = max(
-            0.0,
-            float(
-                self.get_parameter(
-                    'shoot_fresh_vision_settle_sec'
-                ).value
-            ),
-        )
-
         #초기값 설정
         self.status = 0
         self.current_mode = "WaitingMode"
@@ -180,12 +173,11 @@ class MainDecision(Node):
         # 완료 시점이 아니라 이후 강제회전이 끝난 시점에 시작한다.
         self.shoot_in_progress = False
         self.shoot_motion_started = False
-        # 골대가 설정 거리 이내로 들어오면 Shoot 명령 전까지 유지한다.
-        # Shoot 발행 후에는 다음 Pick 성공 전까지 재활성화하지 않는다.
-        self.shoot_fresh_vision_active = False
-        self.shoot_fresh_vision_armed = True
-        self.shoot_fresh_vision_settle_until = 0.0
-
+        # Pre-Shoot의 거리·각도 판단은 BallStatusPublisher가 담당한다.
+        # MainDecision은 Back_To_Initial 이후 verified BallResult를
+        # 기다렸다가 전달받은 모션 상태만 실행한다.
+        self.pre_shoot_result_waiting = False
+        self.pre_shoot_verified_result = None
         #hurdle
         self.hurdle_step = 0
         self.hurdle_done = False
@@ -257,7 +249,6 @@ class MainDecision(Node):
             0.05,
             self._check_goal_loss_timeout,
         )
-
     def _set_vision_activity(
         self,
         ball_active,
@@ -358,38 +349,17 @@ class MainDecision(Node):
         if self.motion_ready and not was_ready:
             self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
 
-        # 골대 근거리 구간에서는 모션 중 쌓인 ball 결과를 버리고,
-        # motion_end 이후 0.5초간 자세가 안정되기를 기다린 다음
-        # 새로 수신되는 결과 3개를 사용합니다.
-        if (
-            self.motion_end
-            and not was_motion_end
-            and getattr(self, 'shoot_fresh_vision_active', False)
-        ):
-            self.ball_data = False
-            self.ball_buffer.clear()
-            settle_sec = max(
-                0.0,
-                float(
-                    getattr(
-                        self,
-                        'shoot_fresh_vision_settle_sec',
-                        0.5,
-                    )
-                ),
-            )
-            self.shoot_fresh_vision_settle_until = (
-                self._now_seconds() + settle_sec
-            )
-            self.get_logger().info(
-                "[ShootFreshVision] motion_end 이후 ball_buffer를 "
-                f"초기화하고 {settle_sec:.1f}초 안정화를 기다립니다."
-            )
-            return
-
         # 모션 실행 중 쌓인 최신 비전 결과를 모션 종료 즉시 집계합니다.
         # 다음 line/ball/hurdle 콜백을 기다리지 않도록 모션이 실제로 종료되는 전환 시점에 한 번만 판단
         if self.motion_end and not was_motion_end:
+            if getattr(self, 'pre_shoot_result_waiting', False):
+                self._reset_vision_decision_cycle()
+                if not self._consume_pre_shoot_verified_result():
+                    self.get_logger().info(
+                        "[PreShoot] Back_To_Initial MotionEnd: "
+                        "BallStatusPublisher의 verified 결과를 기다립니다."
+                    )
+                return
             self._try_decision_from_cached_results()
         
         
@@ -450,48 +420,20 @@ class MainDecision(Node):
                     "재검출: BallMode를 계속 유지합니다."
                 )
 
-        fresh_vision_distance = getattr(
-            self,
-            'shoot_fresh_vision_distance_cm',
-            80.0,
-        )
-        if (
-            not getattr(self, 'shoot_fresh_vision_active', False)
-            and getattr(self, 'shoot_fresh_vision_armed', True)
-            and getattr(self, 'has_ball', False)
-            and 0.0 < self.latest_goal_distance_cm <= fresh_vision_distance
-        ):
-            self.shoot_fresh_vision_active = True
-            # 모션이 이미 끝난 상태에서 Fresh Vision이 켜진 경우에도
-            # 현재 프레임을 버리고 동일한 안정화 대기를 적용한다.
-            if getattr(self, 'motion_end', False):
-                self.ball_data = False
-                self.ball_buffer.clear()
-                settle_sec = max(
-                    0.0,
-                    float(
-                        getattr(
-                            self,
-                            'shoot_fresh_vision_settle_sec',
-                            0.5,
-                        )
-                    ),
-                )
-                self.shoot_fresh_vision_settle_until = (
-                    self._now_seconds() + settle_sec
-                )
-            self.get_logger().info(
-                "[ShootFreshVision] 활성화: "
-                f"goal_distance={self.latest_goal_distance_cm:.1f}cm "
-                f"(기준 {fresh_vision_distance:.1f}cm 이하)"
-            )
-
-        if not self.motion_ready:
+        if getattr(self, 'pre_shoot_result_waiting', False):
+            if bool(getattr(ball_msg, 'pre_shoot_verified', False)):
+                status = int(ball_msg.status)
+                if status not in (Ball.Ball_None, Motion.Back_To_Initial):
+                    self.pre_shoot_verified_result = (
+                        status,
+                        float(ball_msg.angle),
+                        bool(getattr(ball_msg, 'ball_in_hand', False)),
+                        float(getattr(ball_msg, 'goal_distance_cm', 0.0)),
+                    )
+                    self._consume_pre_shoot_verified_result()
             return
 
-        # Fresh Vision 구간에서는 motion_end 직후 안정화 시간 동안
-        # 들어온 골대 상태를 판단 버퍼에 넣지 않는다.
-        if MainDecision._shoot_fresh_vision_is_settling(self):
+        if not self.motion_ready:
             return
 
         # Pick 전에 공이 보이면 마지막 검출 시간을 갱신한다.
@@ -514,7 +456,38 @@ class MainDecision(Node):
             self._try_decision_from_cached_results()
         else:
             self.get_logger().info(f"ball: motion not ended yet")
-            
+
+    def _consume_pre_shoot_verified_result(self):
+        result = getattr(self, 'pre_shoot_verified_result', None)
+        if (
+            not getattr(self, 'pre_shoot_result_waiting', False)
+            or result is None
+            or not self.motion_ready
+            or not self.motion_end
+        ):
+            return False
+
+        status, angle, ball_in_hand, goal_distance_cm = result
+        self.pre_shoot_result_waiting = False
+        self.pre_shoot_verified_result = None
+        self._reset_vision_decision_cycle()
+        self.latest_ball_angle = angle
+        self.latest_ball_in_hand = ball_in_hand
+        self.latest_goal_distance_cm = goal_distance_cm
+        self.ball_status = status
+        self.ball_angle = angle
+        self.ball_in_hand = ball_in_hand
+        self.goal_last_seen_time = self._now_seconds()
+        self.goal_loss_waiting = False
+        self.current_mode = "BallMode"
+        self.get_logger().info(
+            "[PreShoot] BallStatusPublisher verified result: "
+            f"status={MOTION_NAME.get(status, 'Unknown')}, "
+            f"distance={goal_distance_cm:.1f}cm, angle={angle:+.1f}deg"
+        )
+        self.BallMode()
+        return True
+
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
         self.latest_hurdle_angle = hurdle_msg.angle
         self.latest_hurdle_ready = hurdle_msg.hurdle_ready
@@ -547,10 +520,11 @@ class MainDecision(Node):
 
     #모션 종료 후 저장된 비전값으로 다음 행동 결정
     def _try_decision_from_cached_results(self):
-        if not self.motion_ready or not self.motion_end:
+        # Pre-Shoot Back_To_Initial 뒤에는 일반 투표 대신
+        # BallStatusPublisher가 표시한 verified 결과 하나만 사용한다.
+        if getattr(self, 'pre_shoot_result_waiting', False):
             return False
-
-        if MainDecision._shoot_fresh_vision_is_settling(self):
+        if not self.motion_ready or not self.motion_end:
             return False
 
         # 이미 현재 종료 사이클의 판단을 시작했다면 중복 명령을 막습니다.
@@ -800,14 +774,6 @@ class MainDecision(Node):
             self.has_ball = True
             self.goal_last_seen_time = self._now_seconds()
             self.goal_loss_waiting = False
-            self.shoot_fresh_vision_active = False
-            self.shoot_fresh_vision_settle_until = 0.0
-            was_fresh_vision_armed = getattr(
-                self,
-                'shoot_fresh_vision_armed',
-                True,
-            )
-            self.shoot_fresh_vision_armed = True
             MainDecision._set_vision_activity(
                 self,
                 ball_active=False,
@@ -815,17 +781,6 @@ class MainDecision(Node):
                 reason='ball possession confirmed',
             )
             self.get_logger().info("pick success: ball is in hand")
-            if not was_fresh_vision_armed:
-                fresh_vision_distance = getattr(
-                    self,
-                    'shoot_fresh_vision_distance_cm',
-                    80.0,
-                )
-                self.get_logger().info(
-                    "[ShootFreshVision] 다음 Shoot을 위해 재무장: "
-                    "Pick 성공 후 골대 "
-                    f"{fresh_vision_distance:.1f}cm 이내 검출을 기다립니다."
-                )
         else:
             self.has_ball = False
             self._reset_goal_loss_state()
@@ -906,8 +861,15 @@ class MainDecision(Node):
 
             self.goal_count += 1
 
-        # 최소 한 번 회전한 뒤, 라인이 보이면 회전 종료
-        if self.turn_count > 0 and self.line_status != Line.Line_None:
+        # Shoot 이후에는 짧은 30/31번 회전을 최소 3회 수행한다.
+        # 그 뒤부터 라인이 보이면 회전을 끝내고 보행 자세로 복귀한다.
+        min_turn_count = int(
+            getattr(self, 'post_shoot_min_turn_count', 3)
+        )
+        if (
+            self.turn_count >= min_turn_count
+            and self.line_status != Line.Line_None
+        ):
             self.turn_after_shoot = False
             self.turn_count = 0
             self.back_to_walk_after_shoot = True
@@ -1019,9 +981,6 @@ class MainDecision(Node):
             if self.ball_status in (Ball.Shoot, Ball.Shoot_Close):
                 self.status = self.ball_status
                 #shoot 이후 처리
-                self.shoot_fresh_vision_active = False
-                self.shoot_fresh_vision_armed = False
-                self.shoot_fresh_vision_settle_until = 0.0
                 self.has_ball = False
                 self._reset_goal_loss_state()
                 self.neck_down_pending = True
@@ -1230,17 +1189,6 @@ class MainDecision(Node):
 
     def _now_seconds(self):
         return time.monotonic()
-
-    def _shoot_fresh_vision_is_settling(self):
-        if not getattr(self, 'shoot_fresh_vision_active', False):
-            return False
-        if not getattr(self, 'motion_end', False):
-            return False
-
-        settle_until = float(
-            getattr(self, 'shoot_fresh_vision_settle_until', 0.0)
-        )
-        return self._now_seconds() < settle_until
 
     # 공 없음(99)과 공 놓침(45)이 아닌 공 동작 상태인지 확인
     @staticmethod
@@ -1560,6 +1508,17 @@ class MainDecision(Node):
 
         elif self.status == 32:
             motion_msg.command = Motion.Shoot_Close
+
+        if (
+            motion_msg.command == Motion.Back_To_Initial
+            and getattr(self, 'has_ball', False)
+        ):
+            self.pre_shoot_result_waiting = True
+            self.pre_shoot_verified_result = None
+            self.get_logger().info(
+                "[PreShoot] 80cm 이내 Back_To_Initial 실행: "
+                "MotionEnd 이후 BallStatusPublisher 결과를 기다립니다."
+            )
         
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')

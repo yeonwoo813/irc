@@ -25,6 +25,9 @@ Expected model classes:
 - goal
 - backboard
 - ball
+
+The model may still emit the ``goal`` class, but this application deliberately
+ignores it. Hoop detection and visualization use ``backboard`` only.
 """
 
 from __future__ import annotations
@@ -149,12 +152,13 @@ def load_config(ini_path: str) -> Dict[str, object]:
     defaults: Dict[str, object] = {
         "model": "/home/rnd/realsense_goal_backboard_ball_best.engine",
         "conf": 0.20,
-        "goal_conf": 0.30,
         "backboard_conf": 0.30,
         "ball_conf": 0.25,
         "imgsz": 640,
         "device": "0",
         "max_fps": 10.0,
+        "ball_detection_hold_seconds": 0.5,
+        "backboard_detection_hold_seconds": 0.5,
         "goal_class": "goal",
         "backboard_class": "backboard",
         "ball_class": "ball",
@@ -198,12 +202,17 @@ def load_config(ini_path: str) -> Dict[str, object]:
         {
             "model": gs("model"),
             "conf": gf("conf"),
-            "goal_conf": gf("goal_conf"),
             "backboard_conf": gf("backboard_conf"),
             "ball_conf": gf("ball_conf"),
             "imgsz": gi("imgsz"),
             "device": gs("device"),
             "max_fps": gf("max_fps"),
+            "ball_detection_hold_seconds": gf(
+                "ball_detection_hold_seconds"
+            ),
+            "backboard_detection_hold_seconds": gf(
+                "backboard_detection_hold_seconds"
+            ),
             "goal_class": gs("goal_class"),
             "backboard_class": gs("backboard_class"),
             "ball_class": gs("ball_class"),
@@ -253,10 +262,15 @@ class RealSenseYoloDetector(Node):
         self.frame_count = 0
         self.latest_ball_detection: Optional[Detection] = None
         self.latest_backboard_detection: Optional[Detection] = None
-        self.latest_goal_detection: Optional[Detection] = None
         self.latest_ball_state = self._empty_ball_state(True)
         self.latest_hoop_state = self._empty_hoop_state(False)
         self.latest_process_ms = 0.0
+        self.last_valid_ball_state: Optional[Dict[str, object]] = None
+        self.last_valid_ball_detection: Optional[Detection] = None
+        self.last_valid_ball_time = 0.0
+        self.last_valid_backboard_state: Optional[Dict[str, object]] = None
+        self.last_valid_backboard_detection: Optional[Detection] = None
+        self.last_valid_backboard_time = 0.0
 
         self.image_qos = QoSProfile(
             depth=1,
@@ -388,6 +402,7 @@ class RealSenseYoloDetector(Node):
             f"RS YOLO ball {'ON' if requested else 'OFF'}"
         )
         if not requested:
+            self._reset_ball_detection_hold()
             self._publish_ball_state(self._empty_ball_state(False))
 
     def cb_hoop_active(self, msg: Bool) -> None:
@@ -401,6 +416,7 @@ class RealSenseYoloDetector(Node):
             f"RS YOLO hoop {'ON' if requested else 'OFF'}"
         )
         if not requested:
+            self._reset_backboard_detection_hold()
             self._publish_hoop_state(self._empty_hoop_state(False))
 
     @staticmethod
@@ -430,6 +446,13 @@ class RealSenseYoloDetector(Node):
             cls_id = int(box.cls[0].item())
             conf = float(box.conf[0].item())
             name = self._result_name(result, cls_id)
+
+            # Hoop logic is intentionally backboard-only. The TensorRT model
+            # may contain a legacy `goal` class, but never let that detection
+            # reach state calculation, caching, or debug visualization.
+            if name == str(self.cfg["goal_class"]):
+                continue
+
             x1, y1, x2, y2 = [
                 float(v) for v in box.xyxy[0].tolist()
             ]
@@ -439,8 +462,6 @@ class RealSenseYoloDetector(Node):
                 threshold = float(self.cfg["ball_conf"])
             elif name == str(self.cfg["backboard_class"]):
                 threshold = float(self.cfg["backboard_conf"])
-            elif name == str(self.cfg["goal_class"]):
-                threshold = float(self.cfg["goal_conf"])
 
             if conf < threshold:
                 continue
@@ -564,7 +585,10 @@ class RealSenseYoloDetector(Node):
             "raw_ball_y": det.cy,
             "raw_ball_conf": det.conf,
             "raw_ball_bbox": [det.x1, det.y1, det.x2, det.y2],
+            "raw_detected": True,
             "held_previous_detection": False,
+            "ball_hold_elapsed_sec": 0.0,
+            "ball_hold_remaining_sec": 0.0,
             "realsense_diagnostic": {
                 "category": "accepted",
                 "detail": "yolo_ball_with_valid_depth",
@@ -573,6 +597,65 @@ class RealSenseYoloDetector(Node):
             "source": "realsense_yolo",
             "process_ms": process_ms,
         }
+
+    def _reset_ball_detection_hold(self) -> None:
+        self.last_valid_ball_state = None
+        self.last_valid_ball_detection = None
+        self.last_valid_ball_time = 0.0
+
+    def _apply_ball_detection_hold(
+        self,
+        raw_state: Dict[str, object],
+        raw_detection: Optional[Detection],
+        now_sec: float,
+    ) -> Tuple[Dict[str, object], Optional[Detection]]:
+        """Keep the last valid RealSense ball result during a short dropout."""
+        if not self.ball_active:
+            return raw_state, raw_detection
+
+        if bool(raw_state.get("realsense_ball_detected", False)):
+            raw_state["raw_detected"] = True
+            raw_state["held_previous_detection"] = False
+            raw_state["ball_hold_elapsed_sec"] = 0.0
+            raw_state["ball_hold_remaining_sec"] = 0.0
+            self.last_valid_ball_state = dict(raw_state)
+            self.last_valid_ball_detection = raw_detection
+            self.last_valid_ball_time = now_sec
+            return raw_state, raw_detection
+
+        hold_seconds = max(
+            0.0,
+            float(self.cfg.get("ball_detection_hold_seconds", 0.5)),
+        )
+        elapsed = max(0.0, now_sec - self.last_valid_ball_time)
+        if (
+            self.last_valid_ball_state is not None
+            and self.last_valid_ball_detection is not None
+            and elapsed < hold_seconds
+        ):
+            held_state = dict(self.last_valid_ball_state)
+            held_state["realsense_ball_detected"] = True
+            held_state["raw_detected"] = bool(
+                raw_state.get("raw_detected", False)
+            )
+            held_state["held_previous_detection"] = True
+            held_state["ball_hold_elapsed_sec"] = elapsed
+            held_state["ball_hold_remaining_sec"] = max(
+                0.0, hold_seconds - elapsed
+            )
+            held_state["active"] = self.ball_active
+            held_state["process_ms"] = raw_state.get("process_ms", 0.0)
+            held_state["realsense_diagnostic"] = {
+                "category": "held",
+                "detail": "recent_valid_ball_detection_hold",
+                "current_frame": raw_state.get("realsense_diagnostic"),
+            }
+            return held_state, self.last_valid_ball_detection
+
+        self._reset_ball_detection_hold()
+        raw_state["ball_hold_elapsed_sec"] = 0.0
+        raw_state["ball_hold_remaining_sec"] = 0.0
+        return raw_state, raw_detection
 
     def _make_hoop_state(
         self,
@@ -594,6 +677,7 @@ class RealSenseYoloDetector(Node):
         )
         if z_m is None:
             state = self._empty_hoop_state(self.hoop_active)
+            state["raw_detected"] = True
             state["confidence"] = det.conf
             state["target_class"] = det.name
             state["diagnostic"] = "yolo_hoop_detected_but_depth_invalid"
@@ -615,6 +699,8 @@ class RealSenseYoloDetector(Node):
             "detected": True,
             "raw_detected": True,
             "held_previous_detection": False,
+            "backboard_hold_elapsed_sec": 0.0,
+            "backboard_hold_remaining_sec": 0.0,
             "center_x": det.cx,
             "center_y": det.cy,
             "realsense_goal_distance_cm": float(distance_cm),
@@ -633,6 +719,80 @@ class RealSenseYoloDetector(Node):
             "stamp_sec": time.monotonic(),
         }
 
+    def _reset_backboard_detection_hold(self) -> None:
+        self.last_valid_backboard_state = None
+        self.last_valid_backboard_detection = None
+        self.last_valid_backboard_time = 0.0
+
+    def _apply_backboard_detection_hold(
+        self,
+        raw_state: Dict[str, object],
+        raw_detection: Optional[Detection],
+        now_sec: float,
+    ) -> Tuple[Dict[str, object], Optional[Detection]]:
+        """Keep the last valid backboard result during a short dropout."""
+        if not self.hoop_active:
+            return raw_state, raw_detection
+
+        if bool(raw_state.get("detected", False)):
+            raw_state["raw_detected"] = True
+            raw_state["held_previous_detection"] = False
+            raw_state["backboard_hold_elapsed_sec"] = 0.0
+            raw_state["backboard_hold_remaining_sec"] = 0.0
+            self.last_valid_backboard_state = dict(raw_state)
+            self.last_valid_backboard_detection = raw_detection
+            self.last_valid_backboard_time = now_sec
+            return raw_state, raw_detection
+
+        hold_seconds = max(
+            0.0,
+            float(
+                self.cfg.get("backboard_detection_hold_seconds", 0.5)
+            ),
+        )
+        elapsed = max(0.0, now_sec - self.last_valid_backboard_time)
+        try:
+            last_distance_cm = float(
+                self.last_valid_backboard_state.get(
+                    "realsense_goal_distance_cm"
+                )
+            )
+        except (AttributeError, TypeError, ValueError):
+            last_distance_cm = math.nan
+        hold_distance_allowed = bool(
+            math.isfinite(last_distance_cm)
+            and 80.0 <= last_distance_cm <= 120.0
+        )
+        if (
+            self.last_valid_backboard_state is not None
+            and self.last_valid_backboard_detection is not None
+            and hold_distance_allowed
+            and elapsed < hold_seconds
+        ):
+            held_state = dict(self.last_valid_backboard_state)
+            held_state["detected"] = True
+            held_state["backboard_detected"] = True
+            held_state["raw_detected"] = bool(
+                raw_state.get("raw_detected", False)
+            )
+            held_state["held_previous_detection"] = True
+            held_state["backboard_hold_elapsed_sec"] = elapsed
+            held_state["backboard_hold_remaining_sec"] = max(
+                0.0, hold_seconds - elapsed
+            )
+            held_state["active"] = self.hoop_active
+            held_state["process_ms"] = raw_state.get("process_ms", 0.0)
+            held_state["stamp_sec"] = now_sec
+            held_state["diagnostic"] = (
+                "recent_valid_backboard_detection_hold"
+            )
+            return held_state, self.last_valid_backboard_detection
+
+        self._reset_backboard_detection_hold()
+        raw_state["backboard_hold_elapsed_sec"] = 0.0
+        raw_state["backboard_hold_remaining_sec"] = 0.0
+        return raw_state, raw_detection
+
     @staticmethod
     def _empty_ball_state(active: bool) -> Dict[str, object]:
         return {
@@ -646,7 +806,10 @@ class RealSenseYoloDetector(Node):
             "raw_ball_y": None,
             "raw_ball_conf": 0.0,
             "raw_ball_bbox": [],
+            "raw_detected": False,
             "held_previous_detection": False,
+            "ball_hold_elapsed_sec": 0.0,
+            "ball_hold_remaining_sec": 0.0,
             "realsense_diagnostic": {
                 "category": "waiting" if active else "inactive",
                 "detail": "no_yolo_ball_detection" if active else "ball_mode_off",
@@ -662,6 +825,8 @@ class RealSenseYoloDetector(Node):
             "detected": False,
             "raw_detected": False,
             "held_previous_detection": False,
+            "backboard_hold_elapsed_sec": 0.0,
+            "backboard_hold_remaining_sec": 0.0,
             "center_x": None,
             "center_y": None,
             "realsense_goal_distance_cm": None,
@@ -741,7 +906,6 @@ class RealSenseYoloDetector(Node):
         mode: str,
         ball: Optional[Detection],
         backboard: Optional[Detection],
-        goal: Optional[Detection],
         ball_state: Dict[str, object],
         hoop_state: Dict[str, object],
         process_ms: float,
@@ -766,15 +930,27 @@ class RealSenseYoloDetector(Node):
         show_ball = mode in {"ball", "combined"}
         show_hoop = mode in {"hoop", "combined"}
         if show_ball:
-            self._draw_detection(debug, ball, "BALL")
+            ball_held = bool(
+                ball_state.get("held_previous_detection", False)
+            )
+            self._draw_detection(
+                debug,
+                ball,
+                "BALL HOLD" if ball_held else "BALL",
+            )
             self._draw_target_guide(debug, ball)
             ball_depth_valid = bool(
                 ball_state.get("realsense_ball_detected", False)
             )
             ball_mode = "ACTIVE" if self.ball_active else "PREVIEW"
+            detect_status = (
+                "HOLD"
+                if ball_held
+                else ("YES" if ball is not None else "NO")
+            )
             ball_lines = [
                 f"REALSENSE YOLO / BALL {ball_mode}",
-                f"detect:{'YES' if ball is not None else 'NO'} "
+                f"detect:{detect_status} "
                 f"conf:{_display_number(ball.conf if ball else None, digits=2)}",
                 (
                     "distance:"
@@ -795,21 +971,38 @@ class RealSenseYoloDetector(Node):
                     f"{_display_number(ball_state.get('raw_z_m'), 'm', 3)} "
                     f"depth:{'OK' if ball_depth_valid else 'INVALID'}"
                 ),
+                (
+                    "hold:"
+                    f"{_display_number(ball_state.get('ball_hold_remaining_sec'), 's', 2)}"
+                    " remaining"
+                    if ball_held
+                    else "hold:OFF"
+                ),
                 f"inference:{process_ms:.1f}ms",
             ]
             draw_info_panel(debug, ball_lines, align="left")
 
         if show_hoop:
-            # backboard가 거리/각도 기준이고 goal은 모델의 추가 검출 정보다.
-            self._draw_detection(debug, backboard, "BACKBOARD")
-            if goal is not None:
-                self._draw_detection(debug, goal, "GOAL")
+            # Hoop 판단과 화면 표시는 backboard만 사용한다.
+            backboard_held = bool(
+                hoop_state.get("held_previous_detection", False)
+            )
+            self._draw_detection(
+                debug,
+                backboard,
+                "BACKBOARD HOLD" if backboard_held else "BACKBOARD",
+            )
             self._draw_target_guide(debug, backboard)
             hoop_depth_valid = bool(hoop_state.get("detected", False))
             hoop_mode = "ACTIVE" if self.hoop_active else "PREVIEW"
+            backboard_detect_status = (
+                "HOLD"
+                if backboard_held
+                else ("YES" if backboard is not None else "NO")
+            )
             hoop_lines = [
                 f"REALSENSE YOLO / HOOP {hoop_mode}",
-                f"detect:{'YES' if backboard is not None else 'NO'} "
+                f"detect:{backboard_detect_status} "
                 f"conf:{_display_number(backboard.conf if backboard else None, digits=2)}",
                 (
                     "distance:"
@@ -828,6 +1021,13 @@ class RealSenseYoloDetector(Node):
                     "depth:"
                     f"{_display_number(hoop_state.get('center_depth_cm'), 'cm')} "
                     f"{'OK' if hoop_depth_valid else 'INVALID'}"
+                ),
+                (
+                    "hold:"
+                    f"{_display_number(hoop_state.get('backboard_hold_remaining_sec'), 's', 2)}"
+                    " remaining"
+                    if backboard_held
+                    else "hold:OFF"
                 ),
                 f"inference:{process_ms:.1f}ms",
             ]
@@ -863,7 +1063,6 @@ class RealSenseYoloDetector(Node):
         color_msg: Image,
         ball: Optional[Detection],
         backboard: Optional[Detection],
-        goal: Optional[Detection],
         ball_state: Dict[str, object],
         hoop_state: Dict[str, object],
         process_ms: float,
@@ -894,7 +1093,6 @@ class RealSenseYoloDetector(Node):
                 mode,
                 ball,
                 backboard,
-                goal,
                 ball_state,
                 hoop_state,
                 process_ms,
@@ -915,7 +1113,6 @@ class RealSenseYoloDetector(Node):
             color_msg,
             self.latest_ball_detection,
             self.latest_backboard_detection,
-            self.latest_goal_detection,
             self.latest_ball_state,
             self.latest_hoop_state,
             self.latest_process_ms,
@@ -983,23 +1180,33 @@ class RealSenseYoloDetector(Node):
 
         ball = self._best(dets, str(self.cfg["ball_class"]))
         backboard = self._best(dets, str(self.cfg["backboard_class"]))
-        goal = self._best(dets, str(self.cfg["goal_class"]))
 
         process_ms = (time.perf_counter() - start) * 1000.0
 
         # 추론은 한 번만 수행한다. 두 상태를 같은 결과에서 계산해 별도/통합
         # rqt 화면이 모드 전환 중에도 같은 프레임을 보여 주게 한다. 실제 판단용
         # 상태 토픽은 아래에서 활성 모드일 때만 발행한다.
-        ball_state = self._make_ball_state(ball, depth_m, process_ms)
-        hoop_state = self._make_hoop_state(
+        raw_ball_state = self._make_ball_state(ball, depth_m, process_ms)
+        ball_state, displayed_ball = self._apply_ball_detection_hold(
+            raw_ball_state,
+            ball,
+            now,
+        )
+        raw_hoop_state = self._make_hoop_state(
             backboard,
             depth_m,
             frame.shape[0],
             process_ms,
         )
-        self.latest_ball_detection = ball
-        self.latest_backboard_detection = backboard
-        self.latest_goal_detection = goal
+        hoop_state, displayed_backboard = (
+            self._apply_backboard_detection_hold(
+                raw_hoop_state,
+                backboard,
+                now,
+            )
+        )
+        self.latest_ball_detection = displayed_ball
+        self.latest_backboard_detection = displayed_backboard
         self.latest_ball_state = ball_state
         self.latest_hoop_state = hoop_state
         self.latest_process_ms = process_ms
@@ -1012,9 +1219,8 @@ class RealSenseYoloDetector(Node):
         self._publish_debug_views(
             frame,
             color_msg,
-            ball,
-            backboard,
-            goal,
+            displayed_ball,
+            displayed_backboard,
             ball_state,
             hoop_state,
             process_ms,
@@ -1026,7 +1232,9 @@ class RealSenseYoloDetector(Node):
             self.get_logger().info(
                 f"RS-YOLO process={process_ms:.1f}ms "
                 f"ball={int(bool(ball_state.get('realsense_ball_detected', False)))} "
-                f"hoop={int(bool(hoop_state.get('detected', False)))}"
+                f"ball_hold={int(bool(ball_state.get('held_previous_detection', False)))} "
+                f"hoop={int(bool(hoop_state.get('detected', False)))} "
+                f"hoop_hold={int(bool(hoop_state.get('held_previous_detection', False)))}"
             )
 
 

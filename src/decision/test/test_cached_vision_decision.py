@@ -13,6 +13,15 @@ class _Logger:
         self.messages.append(message)
 
 
+class _Publisher:
+
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
 def _make_harness():
     clock = SimpleNamespace(now=10.0)
     harness = SimpleNamespace(
@@ -40,14 +49,11 @@ def _make_harness():
         hurdle_detected=False,
         hurdle_go_active=False,
         hurdle_go_started=False,
-        shoot_fresh_vision_active=False,
-        shoot_fresh_vision_armed=True,
-        shoot_fresh_vision_distance_cm=80.0,
-        shoot_fresh_vision_settle_sec=0.5,
-        shoot_fresh_vision_settle_until=0.0,
         goal_lost_timeout_sec=0.5,
         goal_last_seen_time=None,
         goal_loss_waiting=False,
+        pre_shoot_result_waiting=False,
+        pre_shoot_verified_result=None,
     )
     harness.logger = _Logger()
     harness.clock = clock
@@ -70,6 +76,14 @@ def _make_harness():
     )
     harness._try_decision_from_cached_results = MethodType(
         MainDecision._try_decision_from_cached_results,
+        harness,
+    )
+    harness._reset_vision_decision_cycle = MethodType(
+        MainDecision._reset_vision_decision_cycle,
+        harness,
+    )
+    harness._consume_pre_shoot_verified_result = MethodType(
+        MainDecision._consume_pre_shoot_verified_result,
         harness,
     )
     return harness
@@ -128,114 +142,109 @@ def test_line_status_uses_latest_when_latest_three_are_all_different():
     assert harness.line_status == 7
 
 
-def test_goal_at_80cm_clears_only_ball_buffer_at_motion_end():
+def test_hoop_approach_motion_end_uses_cached_results_immediately():
     harness = _make_harness()
     harness.current_mode = "BallMode"
     harness.has_ball = True
+    harness.ball_buffer = deque(
+        [Motion.Forward_3step, Motion.Forward_half,
+         Motion.Forward_3step, Motion.Forward_3step],
+        maxlen=5,
+    )
 
     MainDecision.BallResultCallback(
         harness,
         SimpleNamespace(
-            status=Ball.Ball_None,
+            status=Motion.Forward_3step,
             angle=0.0,
             ball_in_hand=True,
-            goal_distance_cm=80.0,
+            goal_distance_cm=70.0,
         ),
     )
 
-    assert harness.shoot_fresh_vision_active is True
-
     MainDecision.MotionEndCallback(
         harness,
         SimpleNamespace(motion_ready=True, motion_end=True),
     )
 
-    assert harness.decision_count == 0
-    assert list(harness.ball_buffer) == []
-    assert harness.shoot_fresh_vision_settle_until == 10.5
-    assert list(harness.line_buffer) == [1, 2, 2, 2, 3]
-    assert list(harness.hurdle_buffer) == [99, 26, 99, 99, 26]
-
-
-def test_goal_at_80cm_waits_for_settle_then_three_fresh_results():
-    harness = _make_harness()
-    harness.current_mode = "BallMode"
-    harness.has_ball = True
-    harness.shoot_fresh_vision_active = True
-
-    MainDecision.MotionEndCallback(
-        harness,
-        SimpleNamespace(motion_ready=True, motion_end=True),
-    )
-
-    message = SimpleNamespace(
-        status=Ball.Ball_None,
-        angle=0.0,
-        ball_in_hand=True,
-        goal_distance_cm=65.0,
-    )
-    MainDecision.BallResultCallback(harness, message)
-    MainDecision.BallResultCallback(harness, message)
-    MainDecision.BallResultCallback(harness, message)
-    assert harness.decision_count == 0
-    assert list(harness.ball_buffer) == []
-
-    harness.clock.now = 10.5
-    MainDecision.BallResultCallback(harness, message)
-    MainDecision.BallResultCallback(harness, message)
-    assert harness.decision_count == 0
-    MainDecision.BallResultCallback(harness, message)
     assert harness.decision_count == 1
+    assert harness.ball_status == Motion.Forward_3step
+    assert list(harness.ball_buffer) == [
+        Motion.Forward_3step,
+        Motion.Forward_half,
+        Motion.Forward_3step,
+        Motion.Forward_3step,
+        Motion.Forward_3step,
+    ]
 
 
-def test_shoot_fresh_vision_uses_80cm_threshold():
-    harness = _make_harness()
-    harness.motion_ready = False
-    harness.has_ball = True
-
-    MainDecision.BallResultCallback(
-        harness,
-        SimpleNamespace(
-            status=Ball.Ball_None,
-            angle=0.0,
-            ball_in_hand=True,
-            goal_distance_cm=80.1,
-        ),
-    )
-    assert harness.shoot_fresh_vision_active is False
-
-    MainDecision.BallResultCallback(
-        harness,
-        SimpleNamespace(
-            status=Ball.Ball_None,
-            angle=0.0,
-            ball_in_hand=True,
-            goal_distance_cm=80.0,
-        ),
-    )
-    assert harness.shoot_fresh_vision_active is True
-
-
-def test_fresh_vision_activation_while_stopped_starts_settle_immediately():
+def test_pre_shoot_motion_end_waits_for_verified_ball_result():
     harness = _make_harness()
     harness.current_mode = "BallMode"
-    harness.motion_end = True
     harness.has_ball = True
+    harness.pre_shoot_result_waiting = True
+    harness.ball_mode_calls = 0
+    harness.BallMode = lambda: setattr(
+        harness,
+        "ball_mode_calls",
+        harness.ball_mode_calls + 1,
+    )
 
     MainDecision.BallResultCallback(
         harness,
         SimpleNamespace(
-            status=Ball.Ball_None,
+            status=Motion.Shoot,
             angle=0.0,
             ball_in_hand=True,
-            goal_distance_cm=80.0,
+            goal_distance_cm=70.0,
+            pre_shoot_verified=False,
+        ),
+    )
+    assert harness.ball_mode_calls == 0
+
+    MainDecision.MotionEndCallback(
+        harness,
+        SimpleNamespace(motion_ready=True, motion_end=True),
+    )
+    assert harness.pre_shoot_result_waiting is True
+    assert harness.ball_mode_calls == 0
+    assert list(harness.ball_buffer) == []
+
+    MainDecision.BallResultCallback(
+        harness,
+        SimpleNamespace(
+            status=Motion.Shoot_Close,
+            angle=-1.5,
+            ball_in_hand=True,
+            goal_distance_cm=60.0,
+            pre_shoot_verified=True,
         ),
     )
 
-    assert harness.shoot_fresh_vision_active is True
-    assert harness.shoot_fresh_vision_settle_until == 10.5
-    assert list(harness.ball_buffer) == []
-    assert harness.decision_count == 0
+    assert harness.pre_shoot_result_waiting is False
+    assert harness.pre_shoot_verified_result is None
+    assert harness.ball_status == Motion.Shoot_Close
+    assert harness.ball_angle == -1.5
+    assert harness.latest_goal_distance_cm == 60.0
+    assert harness.ball_mode_calls == 1
+
+
+def test_has_ball_back_to_initial_arms_verified_result_wait():
+    publisher = _Publisher()
+    harness = _make_harness()
+    harness.status = Motion.Back_To_Initial
+    harness.has_ball = True
+    harness.current_mode = "BallMode"
+    harness.motion_pub = publisher
+    harness.pre_shoot_result_waiting = False
+    harness.pre_shoot_verified_result = (Motion.Shoot, 0.0, True, 70.0)
+
+    MainDecision.MotionCommand(harness)
+
+    assert publisher.messages[-1].command == Motion.Back_To_Initial
+    assert harness.pre_shoot_result_waiting is True
+    assert harness.pre_shoot_verified_result is None
+    assert harness.motion_end is False
 
 
 def test_ball_mode_uses_mode_of_latest_three_ball_statuses():
@@ -956,8 +965,6 @@ def test_confirmed_ball_is_not_checked_again_before_shoot():
         ball_in_hand=False,
         ball_status=Ball.Shoot,
         turn_count=3,
-        shoot_fresh_vision_active=True,
-        shoot_fresh_vision_armed=True,
         goal_last_seen_time=12.0,
         goal_loss_waiting=True,
     )
@@ -983,81 +990,3 @@ def test_confirmed_ball_is_not_checked_again_before_shoot():
     assert harness.neck_down_pending is True
     assert harness.turn_after_shoot is True
     assert harness.turn_count == 0
-    assert harness.shoot_fresh_vision_active is False
-    assert harness.shoot_fresh_vision_armed is False
-
-
-def test_shoot_disarms_fresh_vision_until_next_successful_pick():
-    harness = SimpleNamespace(
-        current_mode="BallMode",
-        pick_done=False,
-        turn_after_pick=False,
-        back_to_walk_after_pick=False,
-        backward_after_pick=False,
-        neck_down_pending=False,
-        turn_after_shoot=False,
-        has_ball=True,
-        ball_in_hand=True,
-        ball_status=Ball.Shoot_Close,
-        turn_count=0,
-        shoot_fresh_vision_active=True,
-        shoot_fresh_vision_armed=True,
-        shoot_fresh_vision_distance_cm=80.0,
-        shoot_fresh_vision_settle_sec=0.5,
-        shoot_fresh_vision_settle_until=0.0,
-        goal_lost_timeout_sec=0.5,
-        goal_last_seen_time=15.0,
-        goal_loss_waiting=True,
-        motion_ready=False,
-    )
-    harness.logger = _Logger()
-    harness.get_logger = lambda: harness.logger
-    harness.commands = []
-    harness.MotionCommand = lambda: harness.commands.append(harness.status)
-    harness._now_seconds = lambda: 20.0
-    harness._ball_status_is_detected = MainDecision._ball_status_is_detected
-    harness._reset_goal_loss_state = MethodType(
-        MainDecision._reset_goal_loss_state,
-        harness,
-    )
-
-    MainDecision.BallMode(harness)
-
-    assert harness.commands == [Motion.Shoot_Close]
-    assert harness.shoot_fresh_vision_active is False
-    assert harness.shoot_fresh_vision_armed is False
-
-    # Shoot 직후에는 publisher의 ball_in_hand/goal 값이 잠시 남아도
-    # FreshVision이 다시 켜지면 안 된다.
-    MainDecision.BallResultCallback(
-        harness,
-        SimpleNamespace(
-            status=Ball.Ball_None,
-            angle=0.0,
-            ball_in_hand=True,
-            goal_distance_cm=53.6,
-        ),
-    )
-    assert harness.shoot_fresh_vision_active is False
-
-    # 다음 Pick 성공이 확인되면 재무장하고, 그 뒤 골대가 80cm 이내로
-    # 검출될 때 두 번째 Shoot용 FreshVision을 다시 활성화한다.
-    harness.ball_in_hand = True
-    harness.turn_after_shoot = False
-    harness.neck_down_pending = False
-    harness.shoot_in_progress = False
-    MainDecision.CheckBall(harness)
-    assert harness.has_ball is True
-    assert harness.shoot_fresh_vision_armed is True
-    assert harness.shoot_fresh_vision_active is False
-
-    MainDecision.BallResultCallback(
-        harness,
-        SimpleNamespace(
-            status=Ball.Shoot_Close,
-            angle=0.0,
-            ball_in_hand=True,
-            goal_distance_cm=80.0,
-        ),
-    )
-    assert harness.shoot_fresh_vision_active is True

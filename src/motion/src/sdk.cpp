@@ -786,7 +786,7 @@ void SDK_Motion::define_motions()
 
     motion_webcam_ball_mode_walk.durations.insert(
         motion_webcam_ball_mode_walk.durations.end(),
-        {0.04, 0.04, 0.04, 0.5});
+        {0.04, 0.04, 0.04, 0.8});
     motion_webcam_ball_mode_walk.blends.insert(
         motion_webcam_ball_mode_walk.blends.end(),
         {BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Smooth});

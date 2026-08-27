@@ -46,6 +46,11 @@ from line_status_publisher import (
 )
 from hurdle_status_publisher import HurdleStatusPublisher
 
+
+# LineDecision과 같은 기준으로 곡선 여부를 판별해, 곡선 거리의
+# 기준점만 로봇에서 세 번째로 가까운 점으로 바꾼다.
+LINE_CURVE_A_THRESHOLD = LineDecision().curve_a
+
 try:
     from ultralytics import YOLO
 except ImportError :
@@ -596,7 +601,8 @@ def make_line_payload(
     robot_x = robot_center_x(frame_w, robot_center_offset_x_px)
     robot_y = float(frame_h)
 
-    # 가장 가까운 점 기준. 음수면 라인이 왼쪽, 양수면 오른쪽.
+    # 기본(직선) 거리는 가장 가까운 점 기준이다.
+    # 음수면 라인이 왼쪽, 양수면 오른쪽.
     nearest_x, nearest_y = line_points[0]
     payload["line_distance"] = float(nearest_x - robot_x)
 
@@ -644,19 +650,22 @@ def make_line_payload(
             payload["tangent_angle"] = fitted_angle
             payload["line_angle"] = fitted_angle
 
-    # 점 4개 이상이면 검출점 전체로 2차함수를 피팅한다. 세 번째로 가까운
-    # 점에서 구한 접선각을 line_angle에도 넣어 실제 주행 모드 판단에 사용한다.
+    # 점 4개 이상이면 검출점 전체로 2차함수를 피팅한다. 곡선으로
+    # 판별되면 세 번째로 가까운 점을 접선과 픽셀 거리의 공통 기준점으로
+    # 사용한다. 직선이면 위에서 계산한 첫 번째 점 거리를 유지한다.
     if point_count >= 4:
         coeffs = fit_poly2(line_points)
         if coeffs is not None:
             a, b, _c = coeffs
             payload["curve_a"] = float(a)
 
-            tangent_y = line_points[2][1]
+            third_x, tangent_y = line_points[2]
             slope_dx_dy_down = 2.0 * a * tangent_y + b
             # 이미지 y는 아래로 증가하므로, 로봇 진행 방향인 위쪽 기준으로 부호 반전
             payload["tangent_angle"] = float(math.degrees(math.atan2(-slope_dx_dy_down, 1.0)))
             payload["line_angle"] = payload["tangent_angle"]
+            if abs(a) > LINE_CURVE_A_THRESHOLD:
+                payload["line_distance"] = float(third_x - robot_x)
 
     return payload
 

@@ -105,6 +105,28 @@ class BallDecisionTest(unittest.TestCase):
         )
         self.assertEqual(result, (BallStatus.Forward_3step, 0.0))
 
+    def test_goal_pre_shoot_range_extends_through_80_cm(self) -> None:
+        at_boundary = self.decision.decide(
+            BallFeatures(
+                ball_in_hand=True,
+                realsense_goal_distance_cm=80.0,
+                realsense_goal_angle=0.0,
+            )
+        )
+        outside_boundary = self.decision.decide(
+            BallFeatures(
+                ball_in_hand=True,
+                realsense_goal_distance_cm=80.01,
+                realsense_goal_angle=0.0,
+            )
+        )
+
+        self.assertEqual(at_boundary, (BallStatus.Shoot, 0.0))
+        self.assertEqual(
+            outside_boundary,
+            (BallStatus.Forward_4step, 0.0),
+        )
+
 
 class BallVisionFusionWebcamTest(unittest.TestCase):
     def test_webcam_state_passes_signed_x_and_positive_y_distance(self) -> None:
@@ -190,6 +212,11 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
             SimpleNamespace(command=command)
         )
 
+    def _send_motion_end(self, motion_end):
+        self.node.callbacks["motion_end"](
+            SimpleNamespace(motion_end=motion_end)
+        )
+
     def _confirm_webcam_ball(self):
         return [
             self._publish(detected)
@@ -243,6 +270,60 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
             self.node.recorder.messages[-1].goal_distance_cm,
             89.5,
         )
+
+    def test_goal_pre_shoot_requests_initial_pose_once_within_80_cm(self):
+        self.publisher.ball_in_hand = True
+
+        first = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=80.0,
+            realsense_goal_angle=0.0,
+        )
+        self.assertEqual(first, (BallStatus.Back_To_Initial, 0.0))
+
+        self._send_motion(BallStatus.Back_To_Initial)
+        after_initial = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=80.0,
+            realsense_goal_angle=0.0,
+        )
+        self.assertEqual(after_initial, (BallStatus.Shoot, 0.0))
+        self.assertFalse(
+            self.node.recorder.messages[-1].pre_shoot_verified
+        )
+
+        self._send_motion_end(False)
+        self._send_motion_end(True)
+        verified = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=80.0,
+            realsense_goal_angle=0.0,
+        )
+        self.assertEqual(verified, (BallStatus.Shoot, 0.0))
+        self.assertTrue(
+            self.node.recorder.messages[-1].pre_shoot_verified
+        )
+
+        self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=80.0,
+            realsense_goal_angle=0.0,
+        )
+        self.assertFalse(
+            self.node.recorder.messages[-1].pre_shoot_verified
+        )
+
+    def test_too_close_goal_still_sets_pose_before_backward(self):
+        self.publisher.ball_in_hand = True
+
+        first = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=50.0,
+            realsense_goal_angle=0.0,
+        )
+        self.assertEqual(first, (BallStatus.Back_To_Initial, 0.0))
+
+        self._send_motion(BallStatus.Back_To_Initial)
+        after_initial = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=50.0,
+            realsense_goal_angle=0.0,
+        )
+        self.assertEqual(after_initial, (BallStatus.Backward_half, 0.0))
 
     def test_initial_pose_is_locked_after_motion_command_confirmation(self):
         self._confirm_webcam_ball()

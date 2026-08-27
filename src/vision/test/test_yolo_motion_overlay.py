@@ -177,6 +177,36 @@ class LineGeometryTest(unittest.TestCase):
         self.assertEqual(payload["line_distance"], 65.0)
         self.assertEqual(payload["status"], LineStatus.Forward_4step)
 
+    def test_curve_distance_uses_third_closest_point(self) -> None:
+        payload = make_line_payload(
+            line_points=[
+                (400.0, 450.0),
+                (370.0, 350.0),
+                (360.0, 250.0),
+                (370.0, 150.0),
+            ],
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertGreater(abs(payload["curve_a"]), 1.0e-4)
+        self.assertEqual(payload["line_distance"], 15.0)
+
+    def test_straight_with_four_points_keeps_nearest_point_distance(self) -> None:
+        payload = make_line_payload(
+            line_points=[
+                (410.0, 470.0),
+                (400.0, 380.0),
+                (390.0, 290.0),
+                (380.0, 200.0),
+            ],
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertLessEqual(abs(payload["curve_a"]), 1.0e-4)
+        self.assertEqual(payload["line_distance"], 65.0)
+
     def test_turn_half_status_name_is_exposed(self) -> None:
         payload = apply_line_status(
             {

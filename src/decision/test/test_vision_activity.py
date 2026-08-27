@@ -207,6 +207,7 @@ def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
     harness.turn_after_shoot = True
     harness.back_to_walk_after_shoot = False
     harness.turn_count = 0
+    harness.post_shoot_min_turn_count = 3
     harness.goal_count = 0
     harness.line_status = 99
     harness.ball_data = True
@@ -227,17 +228,26 @@ def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
     assert events == []
     assert list(harness.ball_buffer) == [32, 32, 32]
 
-    # 회전 후 라인을 찾으면 바로 라인트래킹하지 않고 보행 자세로 복귀한다.
+    # 라인이 계속 보여도 Shoot 이후 회전을 최소 3회 수행한다.
     harness.line_status = Motion.Forward_4step
+    for _ in range(harness.post_shoot_min_turn_count - 1):
+        MainDecision.TurnAfterShoot(harness)
+
+    expected_turns = [
+        Motion.Right_Turn_Afterpick,
+    ] * harness.post_shoot_min_turn_count
+    assert harness.commands == expected_turns
+    assert harness.turn_count == harness.post_shoot_min_turn_count
+    assert harness.back_to_walk_after_shoot is False
+
+    # 최소 회전 이후 라인이 보이면 라인트래킹 명령을 바로 보내지 않고
+    # 보행 자세로 먼저 복귀한다.
     MainDecision.TurnAfterShoot(harness)
 
     assert harness.turn_after_shoot is False
     assert harness.back_to_walk_after_shoot is True
     assert harness.turn_count == 0
-    assert harness.commands == [
-        Motion.Right_Turn_Afterpick,
-        Motion.Back_To_Walk,
-    ]
+    assert harness.commands == expected_turns + [Motion.Back_To_Walk]
     assert list(harness.ball_buffer) == [32, 32, 32]
     assert events == []
     assert harness.ball_vision_active is False

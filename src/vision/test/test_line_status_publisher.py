@@ -29,6 +29,29 @@ class CurveDistancePriorityTest(unittest.TestCase):
             line_distance=distance,
         )
 
+    def test_curve_a_threshold_rejects_borderline_straight_fit(self) -> None:
+        features = self._curve_features(0.0)
+        features.curve_a = 1.03e-4
+        features.line_angle = 34.1
+        features.tangent_angle = 34.1
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(self.decision.curve_a, 1.2e-4)
+        self.assertEqual(status, LineStatus.Right_Turn)
+        self.assertAlmostEqual(angle, 34.1)
+
+    def test_curve_a_above_new_threshold_is_curve(self) -> None:
+        features = self._curve_features(0.0)
+        features.curve_a = 1.21e-4
+        features.line_angle = 34.1
+        features.tangent_angle = 34.1
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Right_Turn_Curve)
+        self.assertAlmostEqual(angle, 34.1)
+
     def test_curve_far_right_prioritizes_right_distance_correction(self) -> None:
         status, angle = self.decision.decide(
             self._curve_features(self.decision.curve_move_distance)

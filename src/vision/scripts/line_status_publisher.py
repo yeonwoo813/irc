@@ -62,7 +62,7 @@ class LineDecision:
         self.large_turn_angle = 45.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
-        self.curve_a = 1e-4
+        self.curve_a = 1.2e-4
 
         #거리기준 - 픽셀 단위로 맞춰서 수정하기
         self.move_distance = 90.0
@@ -201,7 +201,7 @@ class LineDecision:
             and line_distance is not None
             and self.curve_forward_angle
             < abs(tangent_angle)
-            <= self.curve_half_turn_angle
+            <= self.curve_turn_angle
         )
         use_near_conflict_steering = bool(
             steering_inputs_valid
@@ -290,7 +290,7 @@ class LineDecision:
 
         if (
             status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
-            and abs(tangent_angle) <= self.curve_half_turn_angle
+            and abs(tangent_angle) <= self.curve_turn_angle
         ):
             if steering_angle < 0.0:
                 return LineStatus.Left_Turn_Half, abs(steering_angle)
@@ -363,7 +363,7 @@ class LineDecision:
                 return LineStatus.Left_Turn, abs_angle
             return LineStatus.Right_Turn, abs_angle
 
-        # 30도 이상: curve 회전
+        # 30도 초과: curve 회전
         if angle < 0:
             return LineStatus.Left_Turn_Curve, abs_angle
         return LineStatus.Right_Turn_Curve, abs_angle

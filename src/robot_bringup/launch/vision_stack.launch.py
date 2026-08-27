@@ -198,7 +198,11 @@ def generate_launch_description() -> LaunchDescription:
                 "enable_sync": True,
                 "align_depth.enable": True,
                 "pointcloud.enable": False,
-                "initial_reset": False,
+                # Hot-plugged D4xx cameras can enumerate correctly while their
+                # streaming pipeline remains stale (typically reported as a
+                # transient "Depth stream start failure"). Reset once when the
+                # driver starts so color/depth publishers recover reliably.
+                "initial_reset": True,
                 # UVC power-line-frequency: 0=off, 1=50 Hz, 2=60 Hz,
                 # 3=auto. 이 RealSense는 [0, 2]만 지원하므로 한국 실내
                 # 조명에서는 auto(3)가 아니라 60 Hz(2)를 명시한다.
@@ -314,6 +318,14 @@ def generate_launch_description() -> LaunchDescription:
         actions=[realsense_viewer_node],
     )
 
+    # initial_reset disconnects the USB device for roughly 6-7 seconds. Wait
+    # until the camera node has recreated its dynamic RGB parameters before
+    # reading and locking the settled exposure/white-balance values.
+    delayed_rgb_stabilizer = TimerAction(
+        period=8.0,
+        actions=[rgb_stabilizer_process],
+    )
+
     delayed_vision = TimerAction(
         period=2.0,
         actions=[
@@ -327,7 +339,7 @@ def generate_launch_description() -> LaunchDescription:
         declarations
         + [
             realsense_node,
-            rgb_stabilizer_process,
+            delayed_rgb_stabilizer,
             webcam_node,
             yolo_process,
             delayed_realsense_yolo,

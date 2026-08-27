@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from rclpy.node import Node
-from msgs.msg import BallResult, MotionCommand
+from msgs.msg import BallResult, MotionCommand, MotionEnd
 
 
 class BallStatus:
@@ -68,7 +68,10 @@ class BallDecision:
 
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
-        self.goal_shoot_max_distance_cm = 73.0
+        # 80cm 이내에서 Pre-Shoot로 전환해 Back_To_Initial을 먼저
+        # 실행한다. 해당 모션의 MotionEnd 이후 최신 골대 판단 결과를
+        # pre_shoot_verified BallResult로 구분해 보낸다.
+        self.goal_shoot_max_distance_cm = 80.0
         self.goal_normal_shoot_min_distance_cm = 64.0
         self.goal_too_close_distance_cm = 55.0
 
@@ -262,11 +265,21 @@ class BallStatusPublisher:
         self.shoot_initial_waiting = False
         self.shoot_initial_done = False
         self.shoot_command_seen = False
+        self.pre_shoot_motion_active = False
+        self.pre_shoot_motion_started = False
+        self.pre_shoot_verified_pending = False
+        self._latest_motion_end = None
         self.ball_pub = self.node.create_publisher(BallResult, topic_name, 10)
         self.motion_command_sub = self.node.create_subscription(
             MotionCommand,
             'motion_command',
             self._motion_command_callback,
+            10,
+        )
+        self.motion_end_sub = self.node.create_subscription(
+            MotionEnd,
+            'motion_end',
+            self._motion_end_callback,
             10,
         )
 
@@ -290,6 +303,9 @@ class BallStatusPublisher:
         self.shoot_initial_waiting = False
         self.shoot_initial_done = False
         self.shoot_command_seen = False
+        self.pre_shoot_motion_active = False
+        self.pre_shoot_motion_started = False
+        self.pre_shoot_verified_pending = False
 
     def _motion_command_callback(self, msg: MotionCommand) -> None:
         command = int(msg.command)
@@ -311,9 +327,14 @@ class BallStatusPublisher:
         ):
             self.shoot_initial_waiting = False
             self.shoot_initial_done = True
+            self.pre_shoot_motion_active = True
+            self.pre_shoot_motion_started = (
+                self._latest_motion_end is False
+            )
+            self.pre_shoot_verified_pending = False
             self._log_info(
                 "Shoot Back_To_Initial execution confirmed; "
-                "shoot initial-pose trigger locked."
+                "wait for its MotionEnd before verified goal result."
             )
 
         if command in (BallStatus.Shoot, BallStatus.Shoot_Close):
@@ -349,6 +370,26 @@ class BallStatusPublisher:
                 "Pick result check completed; webcam ball detection "
                 "lock released."
             )
+
+    def _motion_end_callback(self, msg: MotionEnd) -> None:
+        motion_ended = bool(msg.motion_end)
+        self._latest_motion_end = motion_ended
+
+        if not self.pre_shoot_motion_active:
+            return
+        if not motion_ended:
+            self.pre_shoot_motion_started = True
+            return
+        if not self.pre_shoot_motion_started:
+            return
+
+        self.pre_shoot_motion_active = False
+        self.pre_shoot_motion_started = False
+        self.pre_shoot_verified_pending = True
+        self._log_info(
+            "Shoot Back_To_Initial MotionEnd confirmed; the next valid "
+            "goal BallResult will be marked pre_shoot_verified."
+        )
 
     def publish_ball_status(
         self,
@@ -433,8 +474,7 @@ class BallStatusPublisher:
             self.ball_in_hand
             and realsense_goal_distance_cm is not None
             and math.isfinite(realsense_goal_distance_cm)
-            and self.ball_decision.goal_too_close_distance_cm
-            < realsense_goal_distance_cm
+            and 0.0 < realsense_goal_distance_cm
             <= self.ball_decision.goal_shoot_max_distance_cm
         )
         if self.shoot_command_seen:
@@ -450,6 +490,15 @@ class BallStatusPublisher:
         msg = BallResult()
         msg.status = int(status)
         msg.angle = float(angle)
+        pre_shoot_verified = bool(
+            self.pre_shoot_verified_pending
+            and self.ball_in_hand
+            and status not in (
+                BallStatus.Ball_None,
+                BallStatus.Back_To_Initial,
+            )
+        )
+        msg.pre_shoot_verified = pre_shoot_verified
         if hasattr(msg, 'ball_in_hand'):
             msg.ball_in_hand = self.ball_in_hand
         if self.ball_in_hand and realsense_goal_angle is not None:
@@ -472,5 +521,12 @@ class BallStatusPublisher:
             )
 
         self.ball_pub.publish(msg)
+
+        if pre_shoot_verified:
+            self.pre_shoot_verified_pending = False
+            self._log_info(
+                "Published pre_shoot_verified BallResult: "
+                f"status={status}, angle={angle:+.1f}."
+            )
 
         return status, angle
