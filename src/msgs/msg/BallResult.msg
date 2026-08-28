@@ -4,5 +4,9 @@ bool ball_in_hand
 float32 detected_angle
 float32 x_distance_px
 float32 y_distance_px
+float32 ball_x_px
+float32 ball_y_px
+float32 goal_x_px
+float32 goal_y_px
 float32 goal_distance_cm
 bool pre_shoot_verified

@@ -29,9 +29,7 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
         self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
         self.declare_parameter("active_topic", "/vision/ball_active")
-        self.declare_parameter("hoop_active_topic", "/vision/hoop_active")
         self.declare_parameter("active_on_start", True)
-        self.declare_parameter("manage_activity_from_ball_in_hand", True)
         self.declare_parameter("raw_ball_in_hand_topic", "/raw_ball_in_hand")
         self.declare_parameter("vision_state_topic", "/ball/vision_state")
         self.declare_parameter("ball_result_topic", "ball_result")
@@ -57,13 +55,9 @@ class BallVisionFusionNode(Node):
         self.webcam_state_topic = text_param("webcam_state_topic")
         self.hoop_state_topic = text_param("hoop_state_topic")
         self.active_topic = text_param("active_topic")
-        self.hoop_active_topic = text_param("hoop_active_topic")
         self.raw_ball_in_hand_topic = text_param("raw_ball_in_hand_topic")
         self.vision_state_topic = text_param("vision_state_topic")
         self.ball_result_topic = text_param("ball_result_topic")
-        self.manage_activity_from_ball_in_hand = bool(
-            self.get_parameter("manage_activity_from_ball_in_hand").value
-        )
         self.webcam_frame_width = float_param("webcam_frame_width")
         self.webcam_robot_center_x = float_param("webcam_robot_center_x")
         self.webcam_robot_center_y = float_param("webcam_robot_center_y")
@@ -88,7 +82,6 @@ class BallVisionFusionNode(Node):
         self.ball_detection_active = bool(
             self.get_parameter("active_on_start").value
         )
-        self.managed_hoop_active: Optional[bool] = None
 
         activity_qos = QoSProfile(
             depth=1,
@@ -102,12 +95,6 @@ class BallVisionFusionNode(Node):
         )
         self.sub_active = self.create_subscription(
             Bool, self.active_topic, self.cb_ball_active, activity_qos
-        )
-        self.pub_ball_active = self.create_publisher(
-            Bool, self.active_topic, activity_qos
-        )
-        self.pub_hoop_active = self.create_publisher(
-            Bool, self.hoop_active_topic, activity_qos
         )
         self.sub_realsense_yolo_state = self.create_subscription(
             String,
@@ -134,8 +121,6 @@ class BallVisionFusionNode(Node):
             String, self.vision_state_topic, 10
         )
 
-        if self.manage_activity_from_ball_in_hand:
-            self._set_vision_mode_from_ball_in_hand(False, force=True)
         self.timer = self.create_timer(
             1.0 / max(self.publish_hz, 1.0), self.publish_ball_features
         )
@@ -159,32 +144,6 @@ class BallVisionFusionNode(Node):
         self.get_logger().info(
             f"Ball YOLO state processing {'ON' if requested else 'OFF'}"
         )
-
-    def _set_vision_mode_from_ball_in_hand(
-        self, ball_in_hand: bool, *, force: bool = False
-    ) -> bool:
-        """노드를 재시작하지 않고 공/hoop 표시 및 판단 모드만 전환한다."""
-        if not getattr(self, "manage_activity_from_ball_in_hand", True):
-            return False
-        hoop_active = bool(ball_in_hand)
-        if self.managed_hoop_active == hoop_active and not force:
-            return False
-
-        if hoop_active:
-            self.cb_ball_active(Bool(data=False))
-            self.pub_ball_active.publish(Bool(data=False))
-            self.pub_hoop_active.publish(Bool(data=True))
-        else:
-            self.pub_hoop_active.publish(Bool(data=False))
-            self.cb_ball_active(Bool(data=True))
-            self.pub_ball_active.publish(Bool(data=True))
-        self.managed_hoop_active = hoop_active
-        self.get_logger().info(
-            "[VisionMode] "
-            f"ball={'OFF' if hoop_active else 'ON'}, "
-            f"hoop={'ON' if hoop_active else 'OFF'} (detectors kept alive)"
-        )
-        return True
 
     def cb_realsense_yolo_state(self, msg: String) -> None:
         if not getattr(self, "ball_detection_active", True):
@@ -355,6 +314,8 @@ class BallVisionFusionNode(Node):
                 "hoop_detected": True,
                 "realsense_goal_distance_cm": distance,
                 "realsense_goal_angle": angle,
+                "realsense_goal_x_px": self._finite(payload, "center_x"),
+                "realsense_goal_y_px": self._finite(payload, "center_y"),
             }
         self.latest_hoop_time = now
 
@@ -364,6 +325,8 @@ class BallVisionFusionNode(Node):
             "hoop_detected": False,
             "realsense_goal_distance_cm": None,
             "realsense_goal_angle": None,
+            "realsense_goal_x_px": None,
+            "realsense_goal_y_px": None,
         }
 
     def cb_raw_ball_in_hand(self, msg: Bool) -> None:
@@ -455,9 +418,13 @@ class BallVisionFusionNode(Node):
             "webcam_ball_y_distance": None,
             "webcam_ball_angle_error": None,
             "webcam_ball_distance_px": None,
+            "webcam_ball_x_px": None,
+            "webcam_ball_y_px": None,
             "ball_in_hand": bool(self.ball_in_hand),
             "realsense_goal_distance_cm": None,
             "realsense_goal_angle": None,
+            "realsense_goal_x_px": None,
+            "realsense_goal_y_px": None,
         }
         if rs_valid:
             for key in (
@@ -475,8 +442,15 @@ class BallVisionFusionNode(Node):
                 "webcam_ball_distance_px",
             ):
                 features[key] = self.latest_webcam[key]
+            features["webcam_ball_x_px"] = self.latest_webcam["raw_ball_x"]
+            features["webcam_ball_y_px"] = self.latest_webcam["raw_ball_y"]
         if hoop_valid:
-            for key in ("realsense_goal_distance_cm", "realsense_goal_angle"):
+            for key in (
+                "realsense_goal_distance_cm",
+                "realsense_goal_angle",
+                "realsense_goal_x_px",
+                "realsense_goal_y_px",
+            ):
                 features[key] = self.latest_hoop[key]
 
         diagnostic = self._published_realsense_diagnostic(
@@ -485,9 +459,6 @@ class BallVisionFusionNode(Node):
         self._log_diagnostic(diagnostic)
         status, angle = self.ball_status_publisher.publish_ball_status(
             **features
-        )
-        self._set_vision_mode_from_ball_in_hand(
-            self.ball_status_publisher.ball_in_hand
         )
         source = (
             "webcam"

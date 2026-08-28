@@ -143,10 +143,13 @@ class BallDecisionTest(unittest.TestCase):
 class BallVisionFusionWebcamTest(unittest.TestCase):
     def test_webcam_state_passes_signed_x_and_positive_y_distance(self) -> None:
         harness = SimpleNamespace(
+            ball_detection_active=True,
             webcam_robot_center_x=320.0,
             webcam_robot_center_y=420.0,
             webcam_fov_x_deg=60.0,
             webcam_frame_width=640.0,
+            _finite=BallVisionFusionNode._finite,
+            _empty_webcam_state=BallVisionFusionNode._empty_webcam_state,
         )
         message = String(
             data=json.dumps(
@@ -165,8 +168,36 @@ class BallVisionFusionWebcamTest(unittest.TestCase):
 
         BallVisionFusionNode.cb_webcam_state(harness, message)
 
-        self.assertEqual(harness.latest_webcam["webcam_ball_x_distance"], -40.0)
-        self.assertEqual(harness.latest_webcam["webcam_ball_y_distance"], 78.0)
+        self.assertEqual(
+            harness.latest_webcam["webcam_ball_x_distance"], -40.0
+        )
+        self.assertEqual(
+            harness.latest_webcam["webcam_ball_y_distance"], 78.0
+        )
+        self.assertEqual(harness.latest_webcam["raw_ball_x"], 280.0)
+        self.assertEqual(harness.latest_webcam["raw_ball_y"], 342.0)
+
+    def test_hoop_state_keeps_raw_goal_center_pixels(self) -> None:
+        harness = SimpleNamespace(
+            _finite=BallVisionFusionNode._finite,
+            _empty_hoop_state=BallVisionFusionNode._empty_hoop_state,
+        )
+        message = String(
+            data=json.dumps(
+                {
+                    "detected": True,
+                    "center_x": 415.5,
+                    "center_y": 128.25,
+                    "realsense_goal_distance_cm": 72.0,
+                    "realsense_goal_angle": -1.75,
+                }
+            )
+        )
+
+        BallVisionFusionNode.cb_hoop_state(harness, message)
+
+        self.assertEqual(harness.latest_hoop["realsense_goal_x_px"], 415.5)
+        self.assertEqual(harness.latest_hoop["realsense_goal_y_px"], 128.25)
 
 
 class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
@@ -276,11 +307,36 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         self.publisher.publish_ball_status(
             realsense_goal_distance_cm=89.5,
             realsense_goal_angle=0.0,
+            realsense_goal_x_px=401.25,
+            realsense_goal_y_px=122.75,
         )
 
         self.assertAlmostEqual(
             self.node.recorder.messages[-1].goal_distance_cm,
             89.5,
+        )
+        self.assertAlmostEqual(
+            self.node.recorder.messages[-1].goal_x_px,
+            401.25,
+        )
+        self.assertAlmostEqual(
+            self.node.recorder.messages[-1].goal_y_px,
+            122.75,
+        )
+
+    def test_ball_raw_pixel_coordinates_are_published(self):
+        self.publisher.publish_ball_status(
+            webcam_ball_x_px=400.0,
+            webcam_ball_y_px=300.0,
+        )
+
+        self.assertAlmostEqual(
+            self.node.recorder.messages[-1].ball_x_px,
+            400.0,
+        )
+        self.assertAlmostEqual(
+            self.node.recorder.messages[-1].ball_y_px,
+            300.0,
         )
 
     def test_goal_pre_shoot_requests_initial_pose_once_within_80_cm(self):

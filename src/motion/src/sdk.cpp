@@ -221,10 +221,10 @@ void SDK_Motion::define_motions()
     motion_fine_left_2.poses =
     {
         {
-            R(2022), R(1325), R(2331), R(2290), R(2028), R(2034),
-            R(2922), R(1746), R(1656), R(2012), R(2030), R(2112),
-            R(2072), R(1658), R(1089), R(1981), R(2128), R(2427),
-            R(3029), R(2138), R(1968), R(1961)
+            R(2031), R(1323), R(2325), R(2290), R(2027), R(2026),
+            R(2915), R(1766), R(1650), R(2014), R(2060), R(2118),
+            R(2064), R(1658), R(1081), R(1979), R(2126), R(2428),
+            R(3037), R(2141), R(1970), R(1962)
         },
         {
             R(2051), R(1336), R(2304), R(2276), R(2040), R(2041),
@@ -312,12 +312,12 @@ void SDK_Motion::define_motions()
 
     motion_fine_left_2.blends =
     {
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
-        BlendType::Smooth,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Stop,
+        BlendType::Stop,
         BlendType::Stop,
         BlendType::Stop,
         BlendType::Stop,
@@ -470,7 +470,7 @@ void SDK_Motion::define_motions()
     motion_medium_left.durations =
     {
         0.04, 0.04, 0.04, 0.8,
-        0.045, 0.045, 0.02, 0.045, 0.06, 0.5,
+        0.045, 0.045, 0.02, 0.045, 0.06, 0.8,
         0.08, 0.08, 0.08
     };
 
@@ -510,7 +510,7 @@ void SDK_Motion::define_motions()
     motion_medium_right.durations =
     {
         0.04, 0.04, 0.04, 0.8,
-        0.04, 0.04, 0.02, 0.04, 0.06, 0.5,
+        0.04, 0.04, 0.02, 0.04, 0.06, 0.8,
         0.08, 0.08, 0.08
     };
 
@@ -570,7 +570,7 @@ void SDK_Motion::define_motions()
         0.02,
         0.045,
         0.06,
-        0.5,
+        0.8,
         0.08,
         0.08,
         0.08
@@ -729,7 +729,7 @@ void SDK_Motion::define_motions()
     {
         0.04, 0.04, 0.04, 0.8,
         0.04, 0.04, 0.02, 0.04, 0.06, 0.3,
-        0.04, 0.04, 0.02, 0.04, 0.06, 0.5,
+        0.04, 0.04, 0.02, 0.04, 0.06, 0.8,
         0.08, 0.08, 0.08
     };
 
@@ -979,7 +979,7 @@ void SDK_Motion::define_motions()
         0.75,
         0.7,
         0.25,
-        0.4,
+        0.8,
         0.3,
         0.5
     };
@@ -1244,7 +1244,7 @@ void SDK_Motion::define_motions()
         0.02,
         0.045,
         0.06,
-        0.5,
+        0.8,
         0.08,
         0.08,
         0.08
@@ -1320,7 +1320,7 @@ void SDK_Motion::define_motions()
         0.04, 0.04, 0.04, 0.8,
         0.04, 0.04, 0.02, 0.04, 0.06, 0.3,
         0.04, 0.04, 0.02, 0.04, 0.06, 0.3,
-        0.04, 0.04, 0.02, 0.04, 0.06, 0.5,
+        0.04, 0.04, 0.02, 0.04, 0.06, 0.8,
         0.08, 0.08, 0.08
     };
 

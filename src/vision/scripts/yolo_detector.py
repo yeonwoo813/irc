@@ -339,6 +339,7 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "line_conf": 0.35,
         "line_display_conf": 0.40,
         "ball_conf": 0.20,
+        "ball_detection_hold_seconds": 0.5,
         "hurdle_conf": 0.35,
         "yolo_imgsz": 640,
         "yolo_device": "0",
@@ -405,6 +406,11 @@ def load_config(ini_path: str = "settings.ini") -> dict:
             "yolo", "line_display_conf", defaults["line_display_conf"]
         ),
         "ball_conf": gf("yolo", "ball_conf", defaults["ball_conf"]),
+        "ball_detection_hold_seconds": gf(
+            "yolo",
+            "ball_detection_hold_seconds",
+            defaults["ball_detection_hold_seconds"],
+        ),
         "hurdle_conf": gf("yolo", "hurdle_conf", defaults["hurdle_conf"]),
         "yolo_imgsz": gi("yolo", "imgsz", defaults["yolo_imgsz"]),
         "yolo_device": gs("yolo", "device", defaults["yolo_device"]),
@@ -860,6 +866,78 @@ class ContinuousTrueGate:
         return current_time - self.started_at >= max(0.0, self.hold_seconds)
 
 
+BALL_DETECTION_PAYLOAD_KEYS = (
+    "ball_detected",
+    "ball_x",
+    "ball_y",
+    "ball_conf",
+    "ball_bbox",
+)
+
+
+@dataclass
+class BallDetectionHold:
+    """짧은 웹캠 공 미검출 동안 마지막 실제 공 검출값을 유지한다."""
+
+    hold_seconds: float = 0.5
+    last_valid_payload: Optional[dict] = None
+    last_detected_at: Optional[float] = None
+
+    def reset(self) -> None:
+        self.last_valid_payload = None
+        self.last_detected_at = None
+
+    def apply(
+        self,
+        payload: dict,
+        *,
+        active: bool = True,
+        now: Optional[float] = None,
+    ) -> dict:
+        """현재 프레임 payload에 홀드를 적용하고 홀드 상태 필드를 추가한다."""
+        result = dict(payload)
+        raw_detected = bool(result.get("ball_detected", False))
+        result["ball_raw_detected"] = raw_detected
+        result["ball_hold_active"] = False
+        result["ball_hold_elapsed_sec"] = 0.0
+        result["ball_hold_remaining_sec"] = 0.0
+
+        if not active:
+            self.reset()
+            return result
+
+        current_time = time.monotonic() if now is None else float(now)
+        if raw_detected:
+            self.last_valid_payload = {
+                key: (
+                    list(result[key])
+                    if key == "ball_bbox" and isinstance(result.get(key), list)
+                    else result.get(key)
+                )
+                for key in BALL_DETECTION_PAYLOAD_KEYS
+            }
+            self.last_detected_at = current_time
+            return result
+
+        hold_seconds = max(0.0, float(self.hold_seconds))
+        if self.last_detected_at is not None:
+            elapsed = max(0.0, current_time - self.last_detected_at)
+        else:
+            elapsed = hold_seconds
+
+        if self.last_valid_payload is not None and elapsed < hold_seconds:
+            result.update(self.last_valid_payload)
+            result["ball_detected"] = True
+            result["ball_raw_detected"] = False
+            result["ball_hold_active"] = True
+            result["ball_hold_elapsed_sec"] = elapsed
+            result["ball_hold_remaining_sec"] = max(0.0, hold_seconds - elapsed)
+            return result
+
+        self.reset()
+        return result
+
+
 def make_vision_payload(dets: list[ObjectDetection], line_points: list[tuple[float, float]], frame_w: int, frame_h: int, cfg: dict) -> dict:
     center_offset_x = float(cfg.get("robot_center_offset_x_px", 25.0))
     payload = make_line_payload(
@@ -946,6 +1024,25 @@ def visualize_yolo(
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
         cv2.putText(vis, f"{d.name} {d.conf:.2f}", (x1, max(15, y1 - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    # 현재 프레임에서는 공을 놓쳤지만 홀드 중이면 마지막 실제 박스를 표시한다.
+    if bool(payload.get("ball_hold_active", False)):
+        held_bbox = payload.get("ball_bbox")
+        if isinstance(held_bbox, list) and len(held_bbox) == 4:
+            x1, y1, x2, y2 = map(int, held_bbox)
+            hold_color = (255, 0, 255)
+            remaining = float(payload.get("ball_hold_remaining_sec", 0.0))
+            cv2.rectangle(vis, (x1, y1), (x2, y2), hold_color, 2)
+            cv2.putText(
+                vis,
+                f"ball HOLD {remaining:.2f}s",
+                (x1, max(15, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                hold_color,
+                1,
+                cv2.LINE_AA,
+            )
 
     # raw line bbox centers
     for cx, cy in display_line_points:
@@ -1083,8 +1180,16 @@ def visualize_yolo(
         ball_angle = payload.get("ball_angle_deg")
         ball_dx = payload.get("ball_x_distance_px")
         ball_dy = payload.get("ball_y_distance_px")
+        ball_hold_active = bool(payload.get("ball_hold_active", False))
+        ball_status_text = (
+            "BALL:YES "
+            f"HOLD:{float(payload.get('ball_hold_remaining_sec', 0.0)):.2f}s "
+            f"conf:{float(payload.get('ball_conf', 0.0)):.2f}"
+            if ball_hold_active
+            else f"BALL:YES conf:{float(payload.get('ball_conf', 0.0)):.2f}"
+        )
         ball_lines = [
-            f"BALL:YES conf:{float(payload.get('ball_conf', 0.0)):.2f}",
+            ball_status_text,
             (
                 f"ang:{float(ball_angle):+.1f} x:{float(ball_dx):+.0f} y:{float(ball_dy):.0f}px"
                 if ball_angle is not None and ball_dx is not None and ball_dy is not None
@@ -1149,18 +1254,44 @@ def analyze_frame_yolo(
     line_status_publisher: Optional[LineStatusPublisher] = None,
     motion_state: Optional[MotionDisplayState] = None,
     raw_ball_in_hand_gate: Optional[ContinuousTrueGate] = None,
+    ball_detection_active: bool = True,
+    ball_detection_hold: Optional[BallDetectionHold] = None,
 ) -> tuple[dict, np.ndarray]:
     h, w = frame.shape[:2]
     dets = yolo_detect(model, frame, cfg)
+    if not ball_detection_active:
+        # Webcam YOLO는 라인/공/허들을 한 모델에서 추론하므로 전체
+        # 추론을 멈출 수는 없다. OFF 구간에는 공 클래스만 결과와
+        # 디버그 화면에서 제거해 현재 프레임의 공이 어떤 상태에도
+        # 영향을 주지 않게 한다.
+        ball_class = str(cfg.get("ball_class", "ball"))
+        dets = [d for d in dets if d.name != ball_class]
     raw_line_points, roi_box = get_yolo_line_points(dets, w, h, cfg)
 
     # 주행용 직선/이차 피팅에는 검출된 모든 라인 중심점을 사용한다.
     line_points = raw_line_points
     payload = make_vision_payload(dets, line_points, w, h, cfg)
-    if raw_ball_in_hand_gate is not None:
+    if ball_detection_hold is not None:
+        payload = ball_detection_hold.apply(
+            payload,
+            active=ball_detection_active,
+        )
+        # 홀드가 마지막 공 x/y를 복원했을 수 있으므로 기하값을 다시 계산한다.
+        payload = add_ball_geometry(
+            payload,
+            w,
+            h,
+            float(cfg.get("robot_center_offset_x_px", 25.0)),
+        )
+        # raw_ball_in_hand는 이름 그대로 현재 프레임의 실제 검출만 사용한다.
+        # 홀드된 과거 좌표가 손 안 공 판정까지 유지시키지는 않는다.
+    if raw_ball_in_hand_gate is not None and ball_detection_active:
         payload["raw_ball_in_hand"] = raw_ball_in_hand_gate.update(
             bool(payload.get("raw_ball_in_hand", False))
         )
+    elif raw_ball_in_hand_gate is not None:
+        raw_ball_in_hand_gate.reset()
+        payload["raw_ball_in_hand"] = False
     payload = LINE_SMOOTHER.smooth(payload, w, h)
     payload = apply_line_status(payload, w, h, line_status_publisher)
 
@@ -1203,9 +1334,15 @@ def main_ros2(ini_path: str = "settings.ini"):
             self.inference_failures = 0
             self.last_model_reload = 0.0
             self.motion_display_state = MotionDisplayState()
+            self.ball_detection_active = True
             self.raw_ball_in_hand_gate = ContinuousTrueGate(
                 hold_seconds=float(
                     self.cfg.get("raw_ball_in_hand_hold_seconds", 0.3)
+                )
+            )
+            self.ball_detection_hold = BallDetectionHold(
+                hold_seconds=float(
+                    self.cfg.get("ball_detection_hold_seconds", 0.5)
                 )
             )
             self.model = load_yolo_model(self.cfg)
@@ -1226,6 +1363,12 @@ def main_ros2(ini_path: str = "settings.ini"):
             self.pub_yolo_ready = self.create_publisher(
                 Bool,
                 "/vision/webcam_yolo_ready",
+                ready_qos,
+            )
+            self.ball_active_sub = self.create_subscription(
+                Bool,
+                "/vision/ball_active",
+                self.cb_ball_active,
                 ready_qos,
             )
             # 노드가 재시작되면 이전 인스턴스의 latched READY를 즉시 지운다.
@@ -1268,9 +1411,26 @@ def main_ros2(ini_path: str = "settings.ini"):
                 "YOLO direct hurdle_result publish="
                 f"{bool(self.hurdle_status_publisher is not None)}"
             )
+            self.get_logger().info(
+                "Webcam ball detection hold="
+                f"{self.ball_detection_hold.hold_seconds:.2f}s"
+            )
 
         def cb_motion_command(self, msg: MotionCommand):
             self.motion_display_state.on_command(msg.command)
+
+        def cb_ball_active(self, msg: Bool):
+            requested = bool(msg.data)
+            if requested == self.ball_detection_active:
+                return
+            self.ball_detection_active = requested
+            if not requested:
+                self.raw_ball_in_hand_gate.reset()
+                self.ball_detection_hold.reset()
+            self.get_logger().info(
+                "Webcam YOLO ball "
+                f"{'ON' if requested else 'OFF'}"
+            )
 
         def cb_motion_end(self, msg: MotionEnd):
             self.motion_display_state.on_motion_state(
@@ -1314,9 +1474,11 @@ def main_ros2(ini_path: str = "settings.ini"):
                     frame,
                     self.model,
                     self.cfg,
-                    self.line_status_publisher,
-                    self.motion_display_state,
-                    self.raw_ball_in_hand_gate,
+                    line_status_publisher=self.line_status_publisher,
+                    motion_state=self.motion_display_state,
+                    raw_ball_in_hand_gate=self.raw_ball_in_hand_gate,
+                    ball_detection_active=self.ball_detection_active,
+                    ball_detection_hold=self.ball_detection_hold,
                 )
                 self.inference_failures = 0
             except Exception:
@@ -1375,7 +1537,10 @@ def main_ros2(ini_path: str = "settings.ini"):
                     f"dist={payload['line_distance']:+.0f}px "
                     f"ang={payload['line_angle']:+.1f} "
                     f"a={payload['curve_a']:+.2e} "
-                    f"ball={payload['ball_detected']} hurdle={payload['hurdle_detected']} "
+                    f"ball={payload['ball_detected']} "
+                    f"ball_raw={payload.get('ball_raw_detected')} "
+                    f"ball_hold={payload.get('ball_hold_active')} "
+                    f"hurdle={payload['hurdle_detected']} "
                     f"h_dist={payload.get('line_second_point_distance_px')} "
                     f"h_line_ang={payload.get('hurdle_line_angle_deg')}"
                 )
@@ -1398,6 +1563,9 @@ def main_standalone(ini_path: str = "settings.ini"):
     model = load_yolo_model(cfg)
     raw_ball_in_hand_gate = ContinuousTrueGate(
         hold_seconds=float(cfg.get("raw_ball_in_hand_hold_seconds", 0.3))
+    )
+    ball_detection_hold = BallDetectionHold(
+        hold_seconds=float(cfg.get("ball_detection_hold_seconds", 0.5))
     )
 
     cap = cv2.VideoCapture(cfg["cam_index"])
@@ -1427,6 +1595,7 @@ def main_standalone(ini_path: str = "settings.ini"):
             model,
             cfg,
             raw_ball_in_hand_gate=raw_ball_in_hand_gate,
+            ball_detection_hold=ball_detection_hold,
         )
         process_ms = (time.perf_counter() - t0) * 1000.0
         payload["process_ms"] = float(process_ms)

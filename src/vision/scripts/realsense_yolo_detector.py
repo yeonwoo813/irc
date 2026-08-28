@@ -159,8 +159,8 @@ def load_config(ini_path: str) -> Dict[str, object]:
         "imgsz": 640,
         "device": "0",
         "max_fps": 10.0,
-        "ball_detection_hold_seconds": 0.5,
-        "backboard_detection_hold_seconds": 0.5,
+        "ball_detection_hold_seconds": 1.0,
+        "backboard_detection_hold_seconds": 1.0,
         "goal_class": "goal",
         "backboard_class": "backboard",
         "ball_class": "ball",
@@ -896,7 +896,7 @@ class RealSenseYoloDetector(Node):
 
         hold_seconds = max(
             0.0,
-            float(self.cfg.get("ball_detection_hold_seconds", 0.5)),
+            float(self.cfg.get("ball_detection_hold_seconds", 1.0)),
         )
         elapsed = max(0.0, now_sec - self.last_valid_ball_time)
         if (
@@ -1018,7 +1018,7 @@ class RealSenseYoloDetector(Node):
         hold_seconds = max(
             0.0,
             float(
-                self.cfg.get("backboard_detection_hold_seconds", 0.5)
+                self.cfg.get("backboard_detection_hold_seconds", 1.0)
             ),
         )
         elapsed = max(0.0, now_sec - self.last_valid_backboard_time)

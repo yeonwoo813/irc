@@ -93,38 +93,11 @@ def test_realsense_yolo_state_is_accepted_without_legacy_hsv_vote():
     assert harness.latest_realsense_time > 0.0
 
 
-def test_mode_switch_publishes_flags_without_restarting_detector():
-    logger = _Logger()
-    ball_pub = _Publisher()
-    hoop_pub = _Publisher()
-    harness = SimpleNamespace(
-        manage_activity_from_ball_in_hand=True,
-        managed_hoop_active=False,
-        ball_detection_active=True,
-        latest_realsense=None,
-        latest_realsense_time=0.0,
-        latest_webcam=None,
-        latest_webcam_time=0.0,
-        pub_ball_active=ball_pub,
-        pub_hoop_active=hoop_pub,
-        get_logger=lambda: logger,
-        ball_status_publisher=SimpleNamespace(
-            set_detection_enabled=lambda enabled: None
-        ),
+def test_fusion_does_not_override_detector_activity_from_ball_in_hand():
+    # 검출기 ON/OFF의 단일 제어자는 MainDecision이다. Fusion이
+    # ball_in_hand 변화로 /vision/ball_active를 다시 켜면 Shoot 후
+    # 검출금지 구간을 깨므로 자동 전환 메서드 자체가 없어야 한다.
+    assert not hasattr(
+        BallVisionFusionNode,
+        "_set_vision_mode_from_ball_in_hand",
     )
-    harness._clear_ball_detection_state = MethodType(
-        BallVisionFusionNode._clear_ball_detection_state, harness
-    )
-    harness.cb_ball_active = MethodType(
-        BallVisionFusionNode.cb_ball_active, harness
-    )
-
-    changed = BallVisionFusionNode._set_vision_mode_from_ball_in_hand(
-        harness, True
-    )
-
-    assert changed is True
-    assert harness.ball_detection_active is False
-    assert ball_pub.values == [False]
-    assert hoop_pub.values == [True]
-    assert harness.managed_hoop_active is True

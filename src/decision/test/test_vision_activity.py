@@ -83,13 +83,8 @@ def _activity_harness(ball_active=True, hoop_active=False):
         ball_active_pub=_Publisher("ball", events),
         hoop_active_pub=_Publisher("hoop", events),
         get_logger=lambda: logger,
-        goal_last_seen_time=None,
-        goal_loss_waiting=False,
         ball_data=True,
         ball_buffer=deque([12, 12, 12], maxlen=5),
-        ball_tracking_active=True,
-        ball_last_seen_time=9.0,
-        ball_loss_waiting=False,
         post_pick_failure_ball_suppressed=False,
         current_mode="BallMode",
         line_data=True,
@@ -97,16 +92,19 @@ def _activity_harness(ball_active=True, hoop_active=False):
         line_buffer=deque([1, 1, 1], maxlen=5),
         hurdle_buffer=deque([99, 99, 99], maxlen=5),
         hurdle_ready_buffer=deque([False, False, False], maxlen=5),
-    )
-    harness._now_seconds = lambda: 10.0
-    harness._reset_goal_loss_state = lambda: (
-        MainDecision._reset_goal_loss_state(harness)
+        post_shoot_detection_suppressed=False,
     )
     harness._finish_turn_after_shoot = lambda reason: (
         MainDecision._finish_turn_after_shoot(harness, reason)
     )
     harness._reset_vision_decision_cycle = lambda: (
         MainDecision._reset_vision_decision_cycle(harness)
+    )
+    harness._finish_post_shoot_detection_suppression = lambda reason: (
+        MainDecision._finish_post_shoot_detection_suppression(
+            harness,
+            reason,
+        )
     )
     return harness, events, logger
 
@@ -258,6 +256,7 @@ def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
         hoop_active=False,
     )
     harness.turn_after_shoot = True
+    harness.post_shoot_detection_suppressed = True
     harness.back_to_walk_after_shoot = False
     harness.turn_count = 0
     harness.post_shoot_min_turn_count = 4
@@ -353,6 +352,7 @@ def test_post_shoot_turn_allows_tenth_rotation_before_lost_mode():
         hoop_active=False,
     )
     harness.turn_after_shoot = True
+    harness.post_shoot_detection_suppressed = True
     harness.back_to_walk_after_shoot = False
     harness.turn_count = 9
     harness.goal_count = 1
@@ -378,4 +378,5 @@ def test_post_shoot_turn_allows_tenth_rotation_before_lost_mode():
     assert harness.turn_after_shoot is False
     assert harness.turn_count == 0
     assert harness.lost_mode_calls == 1
-    assert events == [("ball", True)]
+    assert events == []
+    assert harness.post_shoot_detection_suppressed is True

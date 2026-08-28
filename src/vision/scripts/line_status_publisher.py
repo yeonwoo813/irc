@@ -72,7 +72,7 @@ class LineDecision:
         # 원본 각도가 7~30도일 때만 조향각을 사용한다. 130px 이상은
         # 원본 각도 크기와 방향에 관계없이 항상 거리 보정각을 결합한다.
         self.steering_scale_px = 1200.0
-        self.steering_limit = 10.0
+        self.steering_limit = 10.0 
 
         # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
         self.curve_forward_angle = 7.0
@@ -81,8 +81,8 @@ class LineDecision:
 
         self.curve_move_distance = 90.0
         self.curve_steering_distance_max = 130.0
-        self.curve_steering_scale_px = 600.0
-        self.curve_steering_limit = 10.0
+        self.curve_steering_scale_px = 700.0
+        self.curve_steering_limit = 16.0
 
 
     def decide(self, features: LineFeatures) -> Tuple[int, float]:
@@ -264,18 +264,7 @@ class LineDecision:
             min(self.steering_limit, distance_angle),
         )
         steering_angle = line_angle + distance_angle
-        status, angle = self._status_from_line_angle(steering_angle)
-
-        # 거리 보정만으로 중간회전이 full turn으로 승격되지 않게 한다.
-        if (
-            status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
-            and abs(line_angle) <= self.half_turn_angle
-        ):
-            if steering_angle < 0.0:
-                return LineStatus.Left_Turn_Half, abs(steering_angle)
-            return LineStatus.Right_Turn_Half, abs(steering_angle)
-
-        return status, angle
+        return self._status_from_line_angle(steering_angle)
 
     def _status_from_conflicting_curve_errors(
         self,
@@ -293,17 +282,7 @@ class LineDecision:
             min(self.curve_steering_limit, distance_angle),
         )
         steering_angle = tangent_angle + distance_angle
-        status, angle = self._status_from_curve_angle(steering_angle)
-
-        if (
-            status in (LineStatus.Left_Turn, LineStatus.Right_Turn)
-            and abs(tangent_angle) <= self.curve_turn_angle
-        ):
-            if steering_angle < 0.0:
-                return LineStatus.Left_Turn_Half, abs(steering_angle)
-            return LineStatus.Right_Turn_Half, abs(steering_angle)
-
-        return status, angle
+        return self._status_from_curve_angle(steering_angle)
 
     def _status_from_follow_angle(self, angle: Optional[float]) -> Tuple[int, float]:
         if angle is None:

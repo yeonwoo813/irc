@@ -78,7 +78,7 @@ class BallDecision:
         self.goal_approach_center_tol = 5.0
         self.goal_approach_large_angle = 60.0
         self.goal_shoot_close_min = -11.0
-        self.goal_shoot_close_max = 2.0
+        self.goal_shoot_close_max = 0.0
         self.goal_shoot_far_min = -5.0
         self.goal_shoot_far_max = 5.0
         self.goal_shoot_large_angle = 20.0
@@ -86,7 +86,7 @@ class BallDecision:
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
         self.webcam_pick_y_max_px = 90.0
-        self.webcam_pick_x_min_px = -35.0
+        self.webcam_pick_x_min_px = -30.0
         self.webcam_pick_x_max_px = 30.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
@@ -398,11 +398,15 @@ class BallStatusPublisher:
         realsense_ball_angle_error: Optional[float] = None,
         realsense_goal_distance_cm: Optional[float] = None,
         realsense_goal_angle: Optional[float] = None,
+        realsense_goal_x_px: Optional[float] = None,
+        realsense_goal_y_px: Optional[float] = None,
         webcam_ball_detected: bool = False,
         webcam_ball_x_distance: Optional[float] = None,
         webcam_ball_y_distance: Optional[float] = None,
         webcam_ball_angle_error: Optional[float] = None,
         webcam_ball_distance_px: Optional[float] = None,
+        webcam_ball_x_px: Optional[float] = None,
+        webcam_ball_y_px: Optional[float] = None,
         ball_in_hand: bool = False,
     ) -> Tuple[int, float]:
         # 함수 인자는 비전의 원본 값이고, self.ball_in_hand는
@@ -515,6 +519,30 @@ class BallStatusPublisher:
             msg.x_distance_px = float(webcam_ball_x_distance or 0.0)
         if hasattr(msg, 'y_distance_px'):
             msg.y_distance_px = float(webcam_ball_y_distance or 0.0)
+        if hasattr(msg, 'ball_x_px'):
+            msg.ball_x_px = float(
+                webcam_ball_x_px
+                if webcam_ball_x_px is not None
+                else math.nan
+            )
+        if hasattr(msg, 'ball_y_px'):
+            msg.ball_y_px = float(
+                webcam_ball_y_px
+                if webcam_ball_y_px is not None
+                else math.nan
+            )
+        if hasattr(msg, 'goal_x_px'):
+            msg.goal_x_px = float(
+                realsense_goal_x_px
+                if realsense_goal_x_px is not None
+                else math.nan
+            )
+        if hasattr(msg, 'goal_y_px'):
+            msg.goal_y_px = float(
+                realsense_goal_y_px
+                if realsense_goal_y_px is not None
+                else math.nan
+            )
         if hasattr(msg, 'goal_distance_cm'):
             msg.goal_distance_cm = float(
                 realsense_goal_distance_cm or 0.0

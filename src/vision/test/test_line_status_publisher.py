@@ -2,6 +2,7 @@
 """Focused tests for line status distance and curve priority."""
 
 from pathlib import Path
+import math
 import sys
 import unittest
 
@@ -107,15 +108,25 @@ class CurveDistancePriorityTest(unittest.TestCase):
         self.assertEqual(angle, 0.0)
 
     def test_curve_far_same_direction_uses_combined_steering(self) -> None:
-        features = self._curve_features(
-            self.decision.curve_steering_distance_max
-        )
-        features.tangent_angle = 15.0
+        features = self._curve_features(187.0)
+        features.tangent_angle = 21.0
 
         status, angle = self.decision.decide(features)
 
-        self.assertEqual(status, LineStatus.Right_Turn_Half)
-        self.assertEqual(angle, 25.0)
+        self.assertEqual(status, LineStatus.Right_Turn)
+        self.assertAlmostEqual(
+            angle,
+            features.tangent_angle
+            + min(
+                self.decision.curve_steering_limit,
+                math.degrees(
+                    math.atan(
+                        features.line_distance
+                        / self.decision.curve_steering_scale_px
+                    )
+                ),
+            ),
+        )
 
     def test_curve_far_opposite_direction_uses_combined_steering(self) -> None:
         features = self._curve_features(
@@ -290,16 +301,26 @@ class CurveDistancePriorityTest(unittest.TestCase):
         self.assertEqual(angle, 0.0)
 
     def test_straight_far_same_direction_uses_combined_steering(self) -> None:
-        features = self._curve_features(
-            self.decision.steering_distance_max
-        )
+        features = self._curve_features(200.0)
         features.curve_a = 0.0
-        features.line_angle = 15.0
+        features.line_angle = 25.0
 
         status, angle = self.decision.decide(features)
 
-        self.assertEqual(status, LineStatus.Right_Turn_Half)
-        self.assertEqual(angle, 25.0)
+        self.assertEqual(status, LineStatus.Right_Turn)
+        self.assertAlmostEqual(
+            angle,
+            features.line_angle
+            + min(
+                self.decision.steering_limit,
+                math.degrees(
+                    math.atan(
+                        features.line_distance
+                        / self.decision.steering_scale_px
+                    )
+                ),
+            ),
+        )
 
     def test_straight_far_above_30_degrees_uses_combined_steering(self) -> None:
         features = self._curve_features(

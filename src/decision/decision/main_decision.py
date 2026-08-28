@@ -1,6 +1,5 @@
 import rclpy
 import math
-import time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from collections import deque, Counter
@@ -84,22 +83,12 @@ class MainDecision(Node):
 
         #test_mode 파라미터 선언 및 초기화
         self.declare_parameter('test_mode', False)
-        self.declare_parameter('ball_lost_timeout_sec', 0.8)
-        self.declare_parameter('goal_lost_timeout_sec', 0.5)
         self.declare_parameter('post_shoot_min_turn_count', 4)
         test_mode_param = self.get_parameter('test_mode').value
         if isinstance(test_mode_param, str):
             self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
         else:
             self.test_mode = bool(test_mode_param)
-        self.ball_lost_timeout_sec = max(
-            0.0,
-            float(self.get_parameter('ball_lost_timeout_sec').value),
-        )
-        self.goal_lost_timeout_sec = max(
-            0.0,
-            float(self.get_parameter('goal_lost_timeout_sec').value),
-        )
         self.post_shoot_min_turn_count = max(
             1,
             min(
@@ -147,11 +136,6 @@ class MainDecision(Node):
         self.pick_try_count = 0
         self.pick_done = False
         self.ball_in_hand = False
-        # 공 접근을 시작한 뒤의 짧은 미검출은 라인 모드 전환으로 처리하지 않는다.
-        # 이 latch는 Pick 명령 전 접근 구간에서만 사용한다.
-        self.ball_tracking_active = False
-        self.ball_last_seen_time = None
-        self.ball_loss_waiting = False
         #pick이후 회전
         self.ball_count = 0
         self.turn_after_pick = False
@@ -168,14 +152,13 @@ class MainDecision(Node):
         self.lost_body_turn_count = 0
         #goal
         self.goal_count = 0
-        self.goal_last_seen_time = None
-        self.goal_loss_waiting = False
         self.neck_down_pending = False
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
-        # Shoot 모션의 실제 완료 전이를 추적한다. 다음 공 검출은 Shoot
-        # 완료 시점이 아니라 이후 강제회전이 끝난 시점에 시작한다.
+        # Shoot 명령 발행부터 LineTrackingMode 복귀까지 공/골대 검출을
+        # 모두 중지한다. 실제 Shoot 완료 전이는 강제회전 시작에만 쓴다.
+        self.post_shoot_detection_suppressed = False
         self.shoot_in_progress = False
         self.shoot_motion_started = False
         # Pre-Shoot의 거리·각도 판단은 BallStatusPublisher가 담당한다.
@@ -198,6 +181,8 @@ class MainDecision(Node):
         self.line_vote_detail_buffer = deque(maxlen=5)
         self.line_frame_sequence = 0
         self.ball_buffer = deque(maxlen=5)
+        self.ball_vote_detail_buffer = deque(maxlen=5)
+        self.ball_frame_sequence = 0
         self.hurdle_buffer = deque(maxlen=5)
         self.hurdle_ready_buffer = deque(maxlen=5)
 
@@ -261,16 +246,6 @@ class MainDecision(Node):
             ball_active=True,
             hoop_active=False,
             reason='startup: search for ball',
-        )
-
-        # 0.05초마다 ball lost 타임아웃 0.8초를 확인하는 타이머
-        self.ball_loss_grace_timer = self.create_timer(
-            0.05,
-            self._check_ball_loss_timeout,
-        )
-        self.goal_loss_grace_timer = self.create_timer(
-            0.05,
-            self._check_goal_loss_timeout,
         )
 
     def _vision_stack_ready(self):
@@ -398,8 +373,8 @@ class MainDecision(Node):
                 )
 
         # Shoot 모션의 false(실행 중) -> true(완료) 전이만 확인한다.
-        # 공 검출 전환은 골대에 걸린 공을 다시 쫓지 않도록 이후
-        # TurnAfterShoot가 끝날 때까지 미룬다.
+        # 검출은 Shoot 명령 발행 시점부터 이미 OFF이며, 여기서는
+        # 강제회전 시작 전에 OFF 상태를 한 번 더 보장한다.
         if getattr(self, 'shoot_in_progress', False):
             if not self.motion_end:
                 self.shoot_motion_started = True
@@ -484,21 +459,13 @@ class MainDecision(Node):
         self.latest_goal_distance_cm = float(
             getattr(ball_msg, 'goal_distance_cm', 0.0)
         )
-
-        # Pick 성공 후에는 BallResult가 골대 상태를 담는다. 골대가 보일
-        # 때마다 마지막 검출 시각을 갱신해 짧은 미검출에 바로
-        # LineTracking/LostMode로 빠지지 않도록 한다.
-        if (
-            getattr(self, 'has_ball', False)
-            and self._ball_status_is_detected(ball_msg.status)
-        ):
-            self.goal_last_seen_time = self._now_seconds()
-            if getattr(self, 'goal_loss_waiting', False):
-                self.goal_loss_waiting = False
-                self.get_logger().info(
-                    f"{self.goal_lost_timeout_sec:.1f}초 유예 중 골대 "
-                    "재검출: BallMode를 계속 유지합니다."
-                )
+        self.ball_frame_sequence = getattr(
+            self, 'ball_frame_sequence', 0
+        ) + 1
+        detail = MainDecision._ball_result_detail(
+            ball_msg,
+            self.ball_frame_sequence,
+        )
 
         if getattr(self, 'pre_shoot_result_waiting', False):
             if bool(getattr(ball_msg, 'pre_shoot_verified', False)):
@@ -509,6 +476,7 @@ class MainDecision(Node):
                         float(ball_msg.angle),
                         bool(getattr(ball_msg, 'ball_in_hand', False)),
                         float(getattr(ball_msg, 'goal_distance_cm', 0.0)),
+                        detail,
                     )
                     self._consume_pre_shoot_verified_result()
             return
@@ -519,21 +487,10 @@ class MainDecision(Node):
         ):
             return
 
-        # Pick 전에 공이 보이면 마지막 검출 시간을 갱신한다.
-        # 공 미검출로 대기 중이었다면 재검출됐으므로 대기를 취소한다.
-        if (
-            self._ball_status_is_detected(ball_msg.status)
-            and self._is_before_pick()
-        ):
-            self.ball_last_seen_time = self._now_seconds()
-            if self.ball_loss_waiting:
-                self.ball_loss_waiting = False
-                self.get_logger().info(
-                    f"{self.ball_lost_timeout_sec:.1f}초 유예 중 공 재검출: "
-                    "공 모드를 계속 유지합니다."
-                )
-
         self.ball_buffer.append(ball_msg.status)
+        detail_buffer = getattr(self, 'ball_vote_detail_buffer', None)
+        if detail_buffer is not None:
+            detail_buffer.append(detail)
         
         if self.motion_end == True:
             self._try_decision_from_cached_results()
@@ -550,18 +507,20 @@ class MainDecision(Node):
         ):
             return False
 
-        status, angle, ball_in_hand, goal_distance_cm = result
+        status, angle, ball_in_hand, goal_distance_cm = result[:4]
+        detail = result[4] if len(result) >= 5 else None
         self.pre_shoot_result_waiting = False
         self.pre_shoot_verified_result = None
         self._reset_vision_decision_cycle()
+        detail_buffer = getattr(self, 'ball_vote_detail_buffer', None)
+        if detail_buffer is not None and detail is not None:
+            detail_buffer.append(detail)
         self.latest_ball_angle = angle
         self.latest_ball_in_hand = ball_in_hand
         self.latest_goal_distance_cm = goal_distance_cm
         self.ball_status = status
         self.ball_angle = angle
         self.ball_in_hand = ball_in_hand
-        self.goal_last_seen_time = self._now_seconds()
-        self.goal_loss_waiting = False
         self.current_mode = "BallMode"
         self.get_logger().info(
             "[PreShoot] BallStatusPublisher verified result: "
@@ -570,6 +529,92 @@ class MainDecision(Node):
         )
         self.BallMode()
         return True
+
+    @staticmethod
+    def _ball_result_detail(ball_msg, sequence):
+        def finite_value(name, fallback=math.nan):
+            try:
+                value = float(getattr(ball_msg, name, fallback))
+            except (TypeError, ValueError):
+                return math.nan
+            return value if math.isfinite(value) else math.nan
+
+        decision_angle = finite_value('angle', 0.0)
+        return {
+            'sequence': int(sequence),
+            'status': int(ball_msg.status),
+            'decision_angle': decision_angle,
+            'measured_angle': finite_value(
+                'detected_angle', decision_angle
+            ),
+            'x_distance_px': finite_value('x_distance_px'),
+            'y_distance_px': finite_value('y_distance_px'),
+            'ball_x_px': finite_value('ball_x_px'),
+            'ball_y_px': finite_value('ball_y_px'),
+            'goal_x_px': finite_value('goal_x_px'),
+            'goal_y_px': finite_value('goal_y_px'),
+            'goal_distance_cm': finite_value('goal_distance_cm'),
+            'ball_in_hand': bool(
+                getattr(ball_msg, 'ball_in_hand', False)
+            ),
+        }
+
+    @staticmethod
+    def _log_ball_action_evidence(node, action_status):
+        details = list(
+            getattr(node, 'ball_vote_detail_buffer', [])
+        )[-3:]
+        label = (
+            'PickDecisionEvidence'
+            if action_status == Ball.Pick_Ready
+            else 'ShootDecisionEvidence'
+        )
+        action_name = MOTION_NAME.get(action_status, 'Unknown')
+
+        if not details:
+            node.get_logger().info(
+                f'[{label}] action={action_name}, frames=0, evidence=N/A'
+            )
+            return
+
+        def value_text(value, unit):
+            return (
+                f'{value:.2f}{unit}'
+                if math.isfinite(value)
+                else 'N/A'
+            )
+
+        frame_logs = []
+        for detail in details:
+            status_name = MOTION_NAME.get(
+                detail['status'], 'Unknown'
+            )
+            if action_status == Ball.Pick_Ready:
+                measurements = (
+                    f"ball_raw_x={value_text(detail['ball_x_px'], 'px')} "
+                    f"ball_raw_y={value_text(detail['ball_y_px'], 'px')} "
+                    f"x_offset={value_text(detail['x_distance_px'], 'px')} "
+                    f"y_offset={value_text(detail['y_distance_px'], 'px')}"
+                )
+            else:
+                measurements = (
+                    f"goal_raw_x={value_text(detail['goal_x_px'], 'px')} "
+                    f"goal_raw_y={value_text(detail['goal_y_px'], 'px')} "
+                    f"goal_distance="
+                    f"{value_text(detail['goal_distance_cm'], 'cm')}"
+                )
+            frame_logs.append(
+                f"seq={detail['sequence']} status={status_name} "
+                f"{measurements} measured_angle="
+                f"{value_text(detail['measured_angle'], 'deg')} "
+                f"decision_angle="
+                f"{value_text(detail['decision_angle'], 'deg')}"
+            )
+
+        node.get_logger().info(
+            f'[{label}] action={action_name}, frames={len(details)} | '
+            + ' | '.join(frame_logs)
+        )
 
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
         self.latest_hurdle_angle = hurdle_msg.angle
@@ -807,18 +852,6 @@ class MainDecision(Node):
 
             self.HurdleMode()
 
-        # Pick 전 공 접근 중에는 0.8초 미만의 일시 미검출만으로
-        # 라인트래킹에 복귀하지 않는다. 모션이 끝난 상태에서 새 비전 샘플을
-        # 다시 모아 공 재검출 또는 timeout을 확인한다.
-        elif self._hold_BallMode():
-            return
-
-        # Pick 성공 후 골대가 잠깐 사라진 경우에만 정해진 시간 동안
-        # BallMode를 유지한다. 만료 후에는 예전처럼 line/lost 판단으로
-        # 자연스럽게 복귀한다.
-        elif self._hold_goal_BallMode():
-            return
-
         # BallMode 내부에서 Pick 확인, Pick 이후 회전까지 처리
         #우선순위 2 : ball mode
         #Ball mode 활성화 조건
@@ -830,21 +863,6 @@ class MainDecision(Node):
             or getattr(self, 'back_to_walk_after_shoot', False)
             or self._ball_status_is_detected(self.ball_status)
         ):
-            # 지금 0.8초 유예를 적용할 수 있는 Pick 전 단계인지 확인
-            if (
-                self._ball_status_is_detected(self.ball_status)
-                and self._is_before_pick()
-            ):
-                if not self.ball_tracking_active:
-                    self.get_logger().info(
-                        "BallMode 진입: Pick 전 "
-                        f"{self.ball_lost_timeout_sec:.1f}초 "
-                        "미검출 유예를 활성화합니다."
-                    )
-                self.ball_tracking_active = True
-                if self.ball_last_seen_time is None:
-                    self.ball_last_seen_time = self._now_seconds()
-            self.ball_loss_waiting = False
             self.BallMode()
 
         #lostmode 진행중이면 계속 lostmode
@@ -865,8 +883,6 @@ class MainDecision(Node):
         if self.ball_in_hand == True:
             self.post_pick_failure_ball_suppressed = False
             self.has_ball = True
-            self.goal_last_seen_time = self._now_seconds()
-            self.goal_loss_waiting = False
             MainDecision._set_vision_activity(
                 self,
                 ball_active=False,
@@ -876,7 +892,6 @@ class MainDecision(Node):
             self.get_logger().info("pick success: ball is in hand")
         else:
             self.has_ball = False
-            self._reset_goal_loss_state()
             MainDecision._begin_post_pick_failure_ball_suppression(self)
             self.get_logger().info("pick failed: ball is not in hand")
 
@@ -981,13 +996,28 @@ class MainDecision(Node):
         self.MotionCommand()
 
     def _finish_turn_after_shoot(self, reason):
-        """강제회전 종료 후에만 다음 공 검출을 시작한다."""
+        """강제회전 상태만 끝내고 검출은 라인모드 진입까지 막는다."""
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
         self.turn_count = 0
 
-        # 골대 또는 Shoot 직후 결과가 다음 공 판단에 섞이지 않도록 공
-        # 검출기를 켜기 전에 기존 집계 상태를 먼저 비운다.
+        # 골대 또는 Shoot 직후 결과가 이후 판단에 섞이지 않도록 기존
+        # 공 집계 상태만 비운다. LostMode로 넘어갈 수 있으므로 여기서
+        # 검출기를 다시 켜지는 않는다.
+        self.ball_data = False
+        self.ball_buffer.clear()
+        logger = getattr(self, 'get_logger', None)
+        if callable(logger):
+            logger().info(
+                f"[PostShoot] {reason}: 공/골대 검출 OFF 유지"
+            )
+
+    def _finish_post_shoot_detection_suppression(self, reason):
+        """실제 LineTrackingMode 진입 시 새 공 검출을 다시 시작한다."""
+        if not getattr(self, 'post_shoot_detection_suppressed', False):
+            return False
+
+        self.post_shoot_detection_suppressed = False
         self.ball_data = False
         self.ball_buffer.clear()
         MainDecision._set_vision_activity(
@@ -996,6 +1026,7 @@ class MainDecision(Node):
             hoop_active=False,
             reason=reason,
         )
+        return True
 
     #Ball mission            
     def BallMode(self):
@@ -1028,6 +1059,9 @@ class MainDecision(Node):
                 'post-shoot Back_To_Walk completed'
             )
             self.current_mode = "LineTrackingMode"
+            self._finish_post_shoot_detection_suppression(
+                'post-shoot LineTrackingMode entered'
+            )
             return
 
         #Pick 이후 공 확인, 성공했을 때만 Neck Up 실행
@@ -1072,16 +1106,26 @@ class MainDecision(Node):
         if self.has_ball == True:
             #shoot 준비완료
             if self.ball_status in (Ball.Shoot, Ball.Shoot_Close):
+                MainDecision._log_ball_action_evidence(
+                    self,
+                    self.ball_status,
+                )
                 self.status = self.ball_status
                 #shoot 이후 처리
                 self.has_ball = False
-                self._reset_goal_loss_state()
                 self.neck_down_pending = True
                 self.turn_after_shoot = True
                 self.back_to_walk_after_shoot = False
                 self.turn_count = 0
                 self.shoot_in_progress = True
                 self.shoot_motion_started = False
+                self.post_shoot_detection_suppressed = True
+                MainDecision._set_vision_activity(
+                    self,
+                    ball_active=False,
+                    hoop_active=False,
+                    reason='shoot command issued: suppress until line mode',
+                )
                 self.MotionCommand()
                 return
 
@@ -1102,7 +1146,10 @@ class MainDecision(Node):
         
         #Pick 준비 완료되면 동작 실행
         if self.ball_status == Ball.Pick_Ready:
-            self._reset_ball_loss_state()
+            MainDecision._log_ball_action_evidence(
+                self,
+                self.ball_status,
+            )
             self.pick_try_count += 1
             self.backward_after_pick = False
             self.back_to_walk_after_pick = False
@@ -1269,6 +1316,9 @@ class MainDecision(Node):
     #Line tracking 
     def LineTracking(self):  
         self.current_mode = "LineTrackingMode"
+        self._finish_post_shoot_detection_suppression(
+            'post-shoot LineTrackingMode entered'
+        )
 
         #라인을 찾고 lost count 초기화
         self.lost_count = 0 
@@ -1280,36 +1330,10 @@ class MainDecision(Node):
         self.status = self.line_status
         self.MotionCommand()
 
-    def _now_seconds(self):
-        return time.monotonic()
-
     # 공 없음(99)과 공 놓침(45)이 아닌 공 동작 상태인지 확인
     @staticmethod
     def _ball_status_is_detected(status):
         return status not in (Ball.Ball_None, Ball.Ball_Lost)
-
-    # 아직 공을 잡기 전의 공 접근 단계인지 확인
-    def _is_before_pick(self):
-        return bool(
-            not getattr(self, 'has_ball', False)
-            and not getattr(self, 'pick_done', False)
-            and not getattr(self, 'turn_after_pick', False)
-            and not getattr(self, 'back_to_walk_after_pick', False)
-            and not getattr(self, 'turn_after_shoot', False)
-            and not getattr(self, 'back_to_walk_after_shoot', False)
-            and getattr(self, 'pick_try_count', 0) == 0
-        )
-
-    # Pick 전 공 미검출 유예 상태 초기화
-    def _reset_ball_loss_state(self):
-        self.ball_tracking_active = False
-        self.ball_last_seen_time = None
-        self.ball_loss_waiting = False
-
-    # Pick 성공 이후 골대 미검출 유예 상태 초기화
-    def _reset_goal_loss_state(self):
-        self.goal_last_seen_time = None
-        self.goal_loss_waiting = False
 
     # 다음 판단을 위해 비전 데이터 준비 상태와 저장 버퍼를 초기화
     def _reset_vision_decision_cycle(self):
@@ -1321,13 +1345,17 @@ class MainDecision(Node):
         if detail_buffer is not None:
             detail_buffer.clear()
         self.ball_buffer.clear()
+        ball_detail_buffer = getattr(
+            self, 'ball_vote_detail_buffer', None
+        )
+        if ball_detail_buffer is not None:
+            ball_detail_buffer.clear()
         self.hurdle_buffer.clear()
         self.hurdle_ready_buffer.clear()
 
     def _begin_post_pick_failure_ball_suppression(self):
         """Ignore the missed ball throughout the post-pick recovery."""
         self.post_pick_failure_ball_suppressed = True
-        MainDecision._reset_ball_loss_state(self)
         self.ball_data = False
         self.ball_buffer.clear()
         MainDecision._set_vision_activity(
@@ -1368,134 +1396,6 @@ class MainDecision(Node):
         )
         return True
 
-    #공이 사라진 후 0.8초 동안 BallMode를 유지
-    def _hold_BallMode(self):
-        if self._ball_status_is_detected(self.ball_status):
-            self.ball_loss_waiting = False
-            return False
-
-        if not self._is_before_pick():
-            self._reset_ball_loss_state()
-            return False
-
-        if not self.ball_tracking_active or self.ball_last_seen_time is None:
-            return False
-
-        elapsed = max(0.0, self._now_seconds() - self.ball_last_seen_time)
-        timeout = getattr(self, 'ball_lost_timeout_sec', 0.8)
-        if elapsed >= timeout:
-            self.get_logger().info(
-                f"공 미검출 {elapsed:.2f}초: 공 모드를 해제하고 "
-                "라인 판단을 허용합니다."
-            )
-            self._reset_ball_loss_state()
-            return False
-
-        self.current_mode = "BallMode"
-        if not self.ball_loss_waiting:
-            self.get_logger().info(
-                f"공 미검출 {elapsed:.2f}초/{timeout:.2f}초: "
-                "Pick 전 공 모드를 유지하고 재검출을 기다립니다."
-            )
-        self.ball_loss_waiting = True
-        self._reset_vision_decision_cycle()
-        return True
-
-    # 골대가 사라진 후 설정 시간 동안만 BallMode를 유지
-    def _hold_goal_BallMode(self):
-        if not getattr(self, 'has_ball', False):
-            self._reset_goal_loss_state()
-            return False
-
-        if self._ball_status_is_detected(self.ball_status):
-            self.goal_loss_waiting = False
-            return False
-
-        if getattr(self, 'goal_last_seen_time', None) is None:
-            return False
-
-        elapsed = max(0.0, self._now_seconds() - self.goal_last_seen_time)
-        timeout = getattr(self, 'goal_lost_timeout_sec', 0.5)
-        if elapsed >= timeout:
-            self.get_logger().info(
-                f"골대 미검출 {elapsed:.2f}초: BallMode를 해제하고 "
-                "라인 판단을 허용합니다."
-            )
-            self._reset_goal_loss_state()
-            return False
-
-        self.current_mode = "BallMode"
-        if not getattr(self, 'goal_loss_waiting', False):
-            self.get_logger().info(
-                f"골대 미검출 {elapsed:.2f}초/{timeout:.2f}초: "
-                "BallMode를 유지하고 재검출을 기다립니다."
-            )
-        self.goal_loss_waiting = True
-        self._reset_vision_decision_cycle()
-        return True
-
-    #0.05초마다 0.8초 만료 여부 확인
-    def _check_ball_loss_timeout(self):
-        """비전 콜백 유무와 관계없이 유예 만료를 정확히 처리한다."""
-        if not self.ball_tracking_active:
-            return
-
-        if not self._is_before_pick():
-            self._reset_ball_loss_state()
-            return
-
-        if self.ball_last_seen_time is None:
-            return
-
-        timeout = getattr(self, 'ball_lost_timeout_sec', 0.8)
-        elapsed = max(0.0, self._now_seconds() - self.ball_last_seen_time)
-        if elapsed < timeout:
-            return
-
-        was_waiting = self.ball_loss_waiting
-        self._reset_ball_loss_state()
-        self.get_logger().info(
-            f"공 미검출 {elapsed:.2f}초: 공 모드를 해제합니다."
-        )
-
-        # 유예 중 모션이 정지해 있었다면, 이미 모인 최신 비전값으로 즉시
-        # line/lost/hurdle 모드를 다시 판단한다.
-        if (
-            was_waiting
-            and self.motion_ready
-            and self.motion_end
-        ):
-            self.line_data = False
-            self.ball_data = False
-            self.hurdle_data = False
-            self._try_decision_from_cached_results()
-
-    #0.05초마다 골대 미검출 유예 만료 여부 확인
-    def _check_goal_loss_timeout(self):
-        if not getattr(self, 'has_ball', False):
-            self._reset_goal_loss_state()
-            return
-
-        if getattr(self, 'goal_last_seen_time', None) is None:
-            return
-
-        timeout = getattr(self, 'goal_lost_timeout_sec', 0.5)
-        elapsed = max(0.0, self._now_seconds() - self.goal_last_seen_time)
-        if elapsed < timeout:
-            return
-
-        was_waiting = getattr(self, 'goal_loss_waiting', False)
-        self._reset_goal_loss_state()
-        self.get_logger().info(
-            f"골대 미검출 {elapsed:.2f}초: BallMode를 해제합니다."
-        )
-
-        if was_waiting and self.motion_ready and self.motion_end:
-            self.line_data = False
-            self.ball_data = False
-            self.hurdle_data = False
-            self._try_decision_from_cached_results()
-                
     def MotionCommand(self):
         if not self.motion_ready:
             self.get_logger().info("motion_ready=false: 모션 명령을 보내지 않습니다.")

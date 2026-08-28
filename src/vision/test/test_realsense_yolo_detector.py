@@ -33,8 +33,8 @@ goal_class = goal
 backboard_class = backboard
 ball_class = ball
 max_fps = 30
-ball_detection_hold_seconds = 0.5
-backboard_detection_hold_seconds = 0.5
+ball_detection_hold_seconds = 1.0
+backboard_detection_hold_seconds = 1.0
 publish_debug_image = true
 """.strip(),
         encoding="utf-8",
@@ -48,8 +48,8 @@ publish_debug_image = true
     assert config["ball_class"] == "ball"
     assert config["max_fps"] == 30.0
     assert config["ball_diagnostic_conf"] == 0.10
-    assert config["ball_detection_hold_seconds"] == 0.5
-    assert config["backboard_detection_hold_seconds"] == 0.5
+    assert config["ball_detection_hold_seconds"] == 1.0
+    assert config["backboard_detection_hold_seconds"] == 1.0
     assert config["ball_loss_log_interval_seconds"] == 1.0
     assert config["publish_debug_image"] is True
 
