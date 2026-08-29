@@ -139,6 +139,25 @@ class BallDecisionTest(unittest.TestCase):
             (BallStatus.Forward_4step, 0.0),
         )
 
+    def test_goal_approach_uses_asymmetric_center_boundaries(self) -> None:
+        cases = (
+            (-60.01, BallStatus.Left_Turn, -60.01),
+            (-60.0, BallStatus.Left_Half_Forward, -60.0),
+            (-5.01, BallStatus.Left_Half_Forward, -5.01),
+            (-5.0, BallStatus.Forward_4step, 0.0),
+            (5.0, BallStatus.Forward_4step, 0.0),
+            (5.01, BallStatus.Right_Half_Forward, 5.01),
+            (60.0, BallStatus.Right_Half_Forward, 60.0),
+            (60.01, BallStatus.Right_Turn, 60.01),
+        )
+
+        for angle, expected_status, expected_angle in cases:
+            with self.subTest(angle=angle):
+                self.assertEqual(
+                    self.decision._goal_status_from_angle(angle),
+                    (expected_status, expected_angle),
+                )
+
 
 class BallVisionFusionWebcamTest(unittest.TestCase):
     def test_webcam_state_passes_signed_x_and_positive_y_distance(self) -> None:

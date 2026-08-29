@@ -17,6 +17,7 @@ publish 값:
 - line_second_point_distance_px, hurdle_line_angle_deg
 - ball / hurdle detection 정보
 - raw_ball_in_hand (/raw_ball_in_hand)
+- webcam ball result gate (/vision/webcam_ball_active)
 
 공/허들 fusion 관련 주의:
 - 이 파일은 웹캠 YOLO의 ball/hurdle 검출 필드를 /line_tracker/state로 전달합니다.
@@ -47,7 +48,7 @@ from line_status_publisher import (
 from hurdle_status_publisher import HurdleStatusPublisher
 
 
-# LineDecision과 같은 기준으로 곡선 여부를 판별해, 곡선 거리의
+# LineDecision과 같은 기준으로 곡선 여부를 판별해, 곡선 접선각의
 # 기준점만 로봇에서 세 번째로 가까운 점으로 바꾼다.
 LINE_CURVE_A_THRESHOLD = LineDecision().curve_a
 
@@ -515,6 +516,20 @@ def load_yolo_model(cfg: dict):
     return YOLO(model_path, task="detect")
 
 
+def release_cuda_cache() -> None:
+    """Release abandoned TensorRT/PyTorch allocations before a model retry."""
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as exc:
+        # CUDA may itself be in an error state after an allocation failure.
+        # The following model reload is still worth attempting in that case.
+        print(f"[YOLO] CUDA cache release skipped: {exc}")
+
+
 def yolo_detect(model, frame: np.ndarray, cfg: dict) -> list[ObjectDetection]:
     results = model.predict(
         source=frame,
@@ -656,22 +671,22 @@ def make_line_payload(
             payload["tangent_angle"] = fitted_angle
             payload["line_angle"] = fitted_angle
 
-    # 점 4개 이상이면 검출점 전체로 2차함수를 피팅한다. 곡선으로
-    # 판별되면 두 번째로 가까운 점을 접선과 픽셀 거리의 공통 기준점으로
-    # 사용한다. 직선이면 위에서 계산한 첫 번째 점 거리를 유지한다.
+    # 점 4개 이상이면 검출점 전체로 2차함수를 피팅한다. 곡선에서도
+    # 픽셀 거리는 위에서 계산한 첫 번째(로봇에 가장 가까운) 점 기준을
+    # 유지하고, 진행 방향은 세 번째로 가까운 점에서의 접선각을 사용한다.
     if point_count >= 4:
         coeffs = fit_poly2(line_points)
         if coeffs is not None:
             a, b, _c = coeffs
             payload["curve_a"] = float(a)
 
-            second_x, tangent_y = line_points[1]
+            is_curve = abs(a) > LINE_CURVE_A_THRESHOLD
+            tangent_point_index = 2 if is_curve else 1
+            _tangent_x, tangent_y = line_points[tangent_point_index]
             slope_dx_dy_down = 2.0 * a * tangent_y + b
             # 이미지 y는 아래로 증가하므로, 로봇 진행 방향인 위쪽 기준으로 부호 반전
             payload["tangent_angle"] = float(math.degrees(math.atan2(-slope_dx_dy_down, 1.0)))
             payload["line_angle"] = payload["tangent_angle"]
-            if abs(a) > LINE_CURVE_A_THRESHOLD:
-                payload["line_distance"] = float(second_x - robot_x)
 
     return payload
 
@@ -1334,7 +1349,9 @@ def main_ros2(ini_path: str = "settings.ini"):
             self.inference_failures = 0
             self.last_model_reload = 0.0
             self.motion_display_state = MotionDisplayState()
-            self.ball_detection_active = True
+            # 공 결과는 RealSense 거리가 120cm 이내가 된 뒤 별도 신호로
+            # 활성화한다. 라인/허들 YOLO 추론은 이 값과 무관하게 계속한다.
+            self.ball_detection_active = False
             self.raw_ball_in_hand_gate = ContinuousTrueGate(
                 hold_seconds=float(
                     self.cfg.get("raw_ball_in_hand_hold_seconds", 0.3)
@@ -1346,12 +1363,18 @@ def main_ros2(ini_path: str = "settings.ini"):
                 )
             )
             self.model = load_yolo_model(self.cfg)
-            # YOLO is interested in the newest camera frame only.  A deep reliable
-            # queue retains stale full-resolution images while TensorRT is busy and
-            # can exhaust Jetson's shared CPU/GPU memory.
-            from rclpy.qos import qos_profile_sensor_data
+            # Keep only the newest full-resolution webcam frame while TensorRT
+            # is busy.  The standard sensor-data profile has a deeper queue.
+            image_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+            )
             self.sub = self.create_subscription(
-                Image, "/camera/image_raw", self.cb_image, qos_profile_sensor_data
+                Image,
+                "/camera/image_raw",
+                self.cb_image,
+                image_qos,
             )
             self.pub_state = self.create_publisher(String, "/line_tracker/state", 10)
             ready_qos = QoSProfile(
@@ -1367,7 +1390,7 @@ def main_ros2(ini_path: str = "settings.ini"):
             )
             self.ball_active_sub = self.create_subscription(
                 Bool,
-                "/vision/ball_active",
+                "/vision/webcam_ball_active",
                 self.cb_ball_active,
                 ready_qos,
             )
@@ -1498,7 +1521,7 @@ def main_ros2(ini_path: str = "settings.ini"):
                     self.last_model_reload = now
                     try:
                         self.model = None
-                        gc.collect()
+                        release_cuda_cache()
                         self.model = load_yolo_model(self.cfg)
                         self.get_logger().warn("TensorRT model reloaded after inference failure")
                     except Exception:
@@ -1547,11 +1570,15 @@ def main_ros2(ini_path: str = "settings.ini"):
 
     rclpy.init()
     node = YoloVisionNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    cv2.destroyAllWindows()
-    if rclpy.ok():
-        rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        cv2.destroyAllWindows()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 # ═══════════════════════════════════════════════════════

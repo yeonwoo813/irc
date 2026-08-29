@@ -1,5 +1,6 @@
 import rclpy
 import math
+import time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from collections import deque, Counter
@@ -42,7 +43,7 @@ class Motion:
     Left_Turn_Afterpick = 30
     Right_Turn_Afterpick = 31
     Shoot_Close = 32
-
+    Shoot_Mid = 33
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -150,14 +151,19 @@ class MainDecision(Node):
         self.lost_step = 0
         self.lost_found_dir = 0
         self.lost_body_turn_count = 0
+        self.lost_initial_pose_done = False
+        self.lost_back_to_walk_pending = False
+        self.lost_left_line_seen = False
+        self.lost_right_line_seen = False
+        self.lost_neck_scan_side = 0
         #goal
         self.goal_count = 0
         self.neck_down_pending = False
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
         self.turn_shoot = Motion.Right_Turn
-        # Shoot 명령 발행부터 LineTrackingMode 복귀까지 공/골대 검출을
-        # 모두 중지한다. 실제 Shoot 완료 전이는 강제회전 시작에만 쓴다.
+        # Shoot 명령 발행부터 Shoot 이후 강제회전 종료까지 공/골대
+        # 검출을 모두 중지한다.
         self.post_shoot_detection_suppressed = False
         self.shoot_in_progress = False
         self.shoot_motion_started = False
@@ -174,6 +180,7 @@ class MainDecision(Node):
         self.hurdle_detected = False
         self.hurdle_go_active = False
         self.hurdle_go_started = False
+        self.hurdle_ignore_until = None
 
         # 최근 5개의 비전 상태를 저장하고, line과 BallMode는
         # 판단 시점의 최근 3개만 다수결에 사용합니다.
@@ -240,8 +247,18 @@ class MainDecision(Node):
             '/vision/hoop_active',
             vision_mode_qos,
         )
+        self.webcam_ball_allowed_pub = self.create_publisher(
+            Bool,
+            '/vision/webcam_ball_allowed',
+            vision_mode_qos,
+        )
         self.ball_vision_active = None
         self.hoop_vision_active = None
+        self.webcam_ball_allowed = None
+        self._set_webcam_ball_allowed(
+            True,
+            reason='startup: wait for RealSense <= 120cm',
+        )
         self._set_vision_activity(
             ball_active=True,
             hoop_active=False,
@@ -287,6 +304,24 @@ class MainDecision(Node):
             self.get_logger().info(
                 '[VisionStartup] webcam/RealSense YOLO READY: '
                 '새 비전 프레임 3개를 모은 뒤 보행을 시작합니다.'
+            )
+        return True
+
+    def _set_webcam_ball_allowed(self, allowed, reason=''):
+        """Allow webcam ball output; Fusion still applies the 120cm gate."""
+        allowed = bool(allowed)
+        if getattr(self, 'webcam_ball_allowed', None) == allowed:
+            return False
+        publisher = getattr(self, 'webcam_ball_allowed_pub', None)
+        if publisher is not None:
+            publisher.publish(Bool(data=allowed))
+        self.webcam_ball_allowed = allowed
+        logger = getattr(self, 'get_logger', None)
+        if callable(logger):
+            suffix = f' ({reason})' if reason else ''
+            logger().info(
+                '[WebcamBallGate] '
+                f'allowed={"ON" if allowed else "OFF"}{suffix}'
             )
         return True
 
@@ -429,6 +464,34 @@ class MainDecision(Node):
         line_status = int(line_msg.status)
         self.line_buffer.append(line_status)
         self.line_frame_sequence = getattr(self, 'line_frame_sequence', 0) + 1
+        neck_scan_side = getattr(self, 'lost_neck_scan_side', 0)
+        if (
+            getattr(self, 'current_mode', None) == "LostMode"
+            and not self.motion_end
+            and line_status != Line.Line_None
+        ):
+            if (
+                neck_scan_side == -1
+                and getattr(self, 'status', None) == Motion.Neck_Left
+                and not getattr(self, 'lost_left_line_seen', False)
+            ):
+                self.lost_left_line_seen = True
+                self.get_logger().info(
+                    "[LostNeckLineSeen] side=left "
+                    f"seq={self.line_frame_sequence} status={line_status} "
+                    f"point_count={int(getattr(line_msg, 'point_count', 0))}"
+                )
+            elif (
+                neck_scan_side == 1
+                and getattr(self, 'status', None) == Motion.Neck_Right
+                and not getattr(self, 'lost_right_line_seen', False)
+            ):
+                self.lost_right_line_seen = True
+                self.get_logger().info(
+                    "[LostNeckLineSeen] side=right "
+                    f"seq={self.line_frame_sequence} status={line_status} "
+                    f"point_count={int(getattr(line_msg, 'point_count', 0))}"
+                )
         detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
         if detail_buffer is not None:
             detail_buffer.append({
@@ -617,8 +680,16 @@ class MainDecision(Node):
         )
 
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
-        self.latest_hurdle_angle = hurdle_msg.angle
-        self.latest_hurdle_ready = hurdle_msg.hurdle_ready
+        ignore_until = getattr(self, 'hurdle_ignore_until', None)
+        ignore_hurdle = (
+            ignore_until is not None and time.monotonic() < ignore_until
+        )
+        hurdle_status = (
+            Hurdle.Hurdle_None if ignore_hurdle else hurdle_msg.status
+        )
+        hurdle_ready = False if ignore_hurdle else hurdle_msg.hurdle_ready
+        self.latest_hurdle_angle = 0.0 if ignore_hurdle else hurdle_msg.angle
+        self.latest_hurdle_ready = hurdle_ready
 
         if (
             not self.motion_ready
@@ -628,8 +699,7 @@ class MainDecision(Node):
 
         #허들이 검출되고, 허들이 2번 이내 실행되었다면 hurdle mode 유지
         confirmed_hurdle_detected = bool(
-            hurdle_msg.hurdle_ready
-            or hurdle_msg.status != Hurdle.Hurdle_None
+            hurdle_ready or hurdle_status != Hurdle.Hurdle_None
         )
         if (
             not self.hurdle_detected
@@ -642,8 +712,8 @@ class MainDecision(Node):
                 "Hurdle_Go 완료까지 허들 모드를 유지합니다."
             )
 
-        self.hurdle_buffer.append(hurdle_msg.status)
-        self.hurdle_ready_buffer.append(bool(hurdle_msg.hurdle_ready))
+        self.hurdle_buffer.append(hurdle_status)
+        self.hurdle_ready_buffer.append(bool(hurdle_ready))
         if self.motion_end == True:
             self._try_decision_from_cached_results()
         else:
@@ -849,6 +919,11 @@ class MainDecision(Node):
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
+            self.lost_initial_pose_done = False
+            self.lost_back_to_walk_pending = False
+            self.lost_left_line_seen = False
+            self.lost_right_line_seen = False
+            self.lost_neck_scan_side = 0
 
             self.HurdleMode()
 
@@ -866,7 +941,11 @@ class MainDecision(Node):
             self.BallMode()
 
         #lostmode 진행중이면 계속 lostmode
-        elif self.lost_step != 0:
+        elif (
+            self.lost_step != 0
+            or getattr(self, 'lost_initial_pose_done', False)
+            or getattr(self, 'lost_back_to_walk_pending', False)
+        ):
             self.LostMode()
 
         #우선순위 3 : lost mode    
@@ -883,6 +962,11 @@ class MainDecision(Node):
         if self.ball_in_hand == True:
             self.post_pick_failure_ball_suppressed = False
             self.has_ball = True
+            MainDecision._set_webcam_ball_allowed(
+                self,
+                False,
+                reason='ball possession confirmed',
+            )
             MainDecision._set_vision_activity(
                 self,
                 ball_active=False,
@@ -981,6 +1065,9 @@ class MainDecision(Node):
             self.turn_after_shoot = False
             self.turn_count = 0
             self.back_to_walk_after_shoot = True
+            self._finish_post_shoot_detection_suppression(
+                'post-shoot turn completed'
+            )
             self.status = Motion.Back_To_Walk
             self.MotionCommand()
             return
@@ -996,24 +1083,25 @@ class MainDecision(Node):
         self.MotionCommand()
 
     def _finish_turn_after_shoot(self, reason):
-        """강제회전 상태만 끝내고 검출은 라인모드 진입까지 막는다."""
+        """강제회전을 끝내고 다음 공의 RealSense 검출을 시작한다."""
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
         self.turn_count = 0
 
         # 골대 또는 Shoot 직후 결과가 이후 판단에 섞이지 않도록 기존
-        # 공 집계 상태만 비운다. LostMode로 넘어갈 수 있으므로 여기서
-        # 검출기를 다시 켜지는 않는다.
+        # 공 집계 상태를 비우고 다음 공은 RealSense부터 탐색한다.
         self.ball_data = False
         self.ball_buffer.clear()
+        self._finish_post_shoot_detection_suppression(reason)
         logger = getattr(self, 'get_logger', None)
         if callable(logger):
             logger().info(
-                f"[PostShoot] {reason}: 공/골대 검출 OFF 유지"
+                f"[PostShoot] {reason}: RealSense 공 ON, 골대 OFF, "
+                "웹캠 공은 120cm까지 OFF"
             )
 
     def _finish_post_shoot_detection_suppression(self, reason):
-        """실제 LineTrackingMode 진입 시 새 공 검출을 다시 시작한다."""
+        """Shoot 후 회전 종료 시 다음 공의 RealSense 검출을 시작한다."""
         if not getattr(self, 'post_shoot_detection_suppressed', False):
             return False
 
@@ -1026,6 +1114,11 @@ class MainDecision(Node):
             hoop_active=False,
             reason=reason,
         )
+        MainDecision._set_webcam_ball_allowed(
+            self,
+            True,
+            reason=reason,
+        )
         return True
 
     #Ball mission            
@@ -1033,7 +1126,8 @@ class MainDecision(Node):
         self.current_mode = "BallMode"
 
         # TurnAfterPick 종료 후 실행한 Back_To_Walk가 완료되면,
-        # 해당 모션 중 쌓인 비전값을 버리고 새 라인 데이터로 복귀 판단한다.
+        # 해당 모션 종료 판단에 사용한 직전 라인 결과로 즉시 복귀한다.
+        # 여기서 버퍼를 먼저 비우면 새 3프레임이 올 때까지 로봇이 멈춘다.
         if getattr(self, 'back_to_walk_after_pick', False):
             self.back_to_walk_after_pick = False
             if getattr(
@@ -1047,14 +1141,17 @@ class MainDecision(Node):
                 )
             else:
                 self.current_mode = "LineTrackingMode"
-                self._reset_vision_decision_cycle()
+                self.get_logger().info(
+                    "[LineReturn] post-pick Back_To_Walk completed: "
+                    f"cached line_status={self.line_status} 즉시 실행"
+                )
+                self.LineTracking()
             return
 
-        # TurnAfterShoot 종료 후 Back_To_Walk가 완료되면 모션 중 쌓인
-        # 비전값을 모두 버리고 motion_end 이후의 새 결과만 기다린다.
+        # TurnAfterShoot 종료 후 Back_To_Walk가 완료되면 모션 종료 판단에
+        # 사용한 직전 라인 결과를 새 프레임 대기 없이 즉시 실행한다.
         if getattr(self, 'back_to_walk_after_shoot', False):
             self.back_to_walk_after_shoot = False
-            self._reset_vision_decision_cycle()
             self._finish_turn_after_shoot(
                 'post-shoot Back_To_Walk completed'
             )
@@ -1062,6 +1159,11 @@ class MainDecision(Node):
             self._finish_post_shoot_detection_suppression(
                 'post-shoot LineTrackingMode entered'
             )
+            self.get_logger().info(
+                "[LineReturn] post-shoot Back_To_Walk completed: "
+                f"cached line_status={self.line_status} 즉시 실행"
+            )
+            self.LineTracking()
             return
 
         #Pick 이후 공 확인, 성공했을 때만 Neck Up 실행
@@ -1120,11 +1222,16 @@ class MainDecision(Node):
                 self.shoot_in_progress = True
                 self.shoot_motion_started = False
                 self.post_shoot_detection_suppressed = True
+                MainDecision._set_webcam_ball_allowed(
+                    self,
+                    False,
+                    reason='shoot command issued',
+                )
                 MainDecision._set_vision_activity(
                     self,
                     ball_active=False,
                     hoop_active=False,
-                    reason='shoot command issued: suppress until line mode',
+                    reason='shoot command issued: suppress until turn ends',
                 )
                 self.MotionCommand()
                 return
@@ -1203,12 +1310,34 @@ class MainDecision(Node):
     def LostMode(self):
         self.current_mode = "LostMode"
 
-        #step 0 
-        if self.lost_step == 0:
+        # LostMode에 처음 진입하면 기존 탐색을 시작하기 전에 기본자세로
+        # 복귀한다. 이 플래그는 LineTrackingMode 복귀 때 초기화한다.
+        if not getattr(self, 'lost_initial_pose_done', False):
+            self.lost_left_line_seen = False
+            self.lost_right_line_seen = False
+            self.lost_neck_scan_side = 0
+            self.lost_initial_pose_done = True
+            self.status = Motion.Back_To_Initial
+            self.MotionCommand()
+            return
+
+        # 라인을 발견해 실행한 Back_To_Walk가 끝난 뒤의 최신 판단으로
+        # 라인이 유지될 때만 LineTrackingMode 복귀를 완료한다.
+        if getattr(self, 'lost_back_to_walk_pending', False):
+            self.lost_back_to_walk_pending = False
             if self.line_status != Line.Line_None:
                 self.LineTracking()
                 return
+
+        #step 0 
+        if self.lost_step == 0:
+            if self.line_status != Line.Line_None:
+                MainDecision._return_from_lost_to_line_tracking(self)
+                return
             # 목 왼쪽 회전
+            self.lost_left_line_seen = False
+            self.lost_right_line_seen = False
+            self.lost_neck_scan_side = -1
             self.lost_step = 1
             self.status = Motion.Neck_Left
             self.MotionCommand()
@@ -1217,13 +1346,19 @@ class MainDecision(Node):
         #step 1 : 왼쪽에서 라인 확인 
         if self.lost_step == 1:
             #라인 발견하면 step 3 이동, 목 원점 복귀, 방향 저장
-            if self.line_status != Line.Line_None:
+            if (
+                getattr(self, 'lost_left_line_seen', False)
+                or self.line_status != Line.Line_None
+            ):
                 self.lost_found_dir = -1
                 self.lost_step = 3
+                self.lost_neck_scan_side = 0
                 self.status = Motion.Neck_Center
                 self.MotionCommand()
                 return
             #목 오른쪽 회전
+            self.lost_right_line_seen = False
+            self.lost_neck_scan_side = 1
             self.lost_step = 2
             self.status = Motion.Neck_Right
             self.MotionCommand()
@@ -1232,9 +1367,13 @@ class MainDecision(Node):
         #step 2 : 오른쪽에서 라인 확인
         if self.lost_step == 2:
             #라인 발견하면 step 3 이동, 목 원점 복귀, 방향 저장
-            if self.line_status != Line.Line_None:
+            if (
+                getattr(self, 'lost_right_line_seen', False)
+                or self.line_status != Line.Line_None
+            ):
                 self.lost_found_dir = 1
                 self.lost_step = 3
+                self.lost_neck_scan_side = 0
                 self.status = Motion.Neck_Center
                 self.MotionCommand()
                 return
@@ -1244,6 +1383,9 @@ class MainDecision(Node):
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
+            self.lost_left_line_seen = False
+            self.lost_right_line_seen = False
+            self.lost_neck_scan_side = 0
 
             self.status = Motion.Neck_Center
             self.MotionCommand()
@@ -1253,14 +1395,14 @@ class MainDecision(Node):
         if self.lost_step == 3:
             #라인 발견하면 lost mode 종료, line tracking으로 이동
             if self.line_status != Line.Line_None:
-                self.LineTracking()
+                MainDecision._return_from_lost_to_line_tracking(self)
                 return
             
             #왼쪽 회전 기억
             if self.lost_found_dir == -1:
                 self.lost_step = 4
                 self.lost_body_turn_count = 1
-                self.status = Motion.Left_Turn
+                self.status = Motion.Left_Turn_Afterpick
                 self.MotionCommand()
                 return
             
@@ -1268,7 +1410,7 @@ class MainDecision(Node):
             elif self.lost_found_dir == 1:
                 self.lost_step = 4
                 self.lost_body_turn_count = 1
-                self.status = Motion.Right_Turn
+                self.status = Motion.Right_Turn_Afterpick
                 self.MotionCommand()
                 return
 
@@ -1283,17 +1425,17 @@ class MainDecision(Node):
         #step 4 : 몸통 회전 후 라인 보이는지 판단
         if self.lost_step == 4:
             if self.line_status != Line.Line_None:
-                self.LineTracking()
+                MainDecision._return_from_lost_to_line_tracking(self)
                 return
             
             if self.lost_body_turn_count < 5:
                 self.lost_body_turn_count += 1
 
                 if self.lost_found_dir == -1:
-                    self.status = Motion.Left_Turn
+                    self.status = Motion.Left_Turn_Afterpick
 
                 elif self.lost_found_dir == 1:
-                    self.status = Motion.Right_Turn
+                    self.status = Motion.Right_Turn_Afterpick
                 else:
                     self.lost_count = 0
                     self.lost_step = 0
@@ -1308,9 +1450,16 @@ class MainDecision(Node):
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
-            self.status = Motion.Forward_3step
+            self.status = Motion.Backward_half
             self.MotionCommand()
             return
+
+    def _return_from_lost_to_line_tracking(self):
+        """Restore the walking pose before leaving LostMode."""
+        self.lost_neck_scan_side = 0
+        self.lost_back_to_walk_pending = True
+        self.status = Motion.Back_To_Walk
+        self.MotionCommand()
 
 
     #Line tracking 
@@ -1325,6 +1474,11 @@ class MainDecision(Node):
         self.lost_step = 0
         self.lost_found_dir = 0
         self.lost_body_turn_count = 0
+        self.lost_initial_pose_done = False
+        self.lost_back_to_walk_pending = False
+        self.lost_left_line_seen = False
+        self.lost_right_line_seen = False
+        self.lost_neck_scan_side = 0
 
         #vision에서 받은 명령 그대로 실행
         self.status = self.line_status
@@ -1354,20 +1508,24 @@ class MainDecision(Node):
         self.hurdle_ready_buffer.clear()
 
     def _begin_post_pick_failure_ball_suppression(self):
-        """Ignore the missed ball throughout the post-pick recovery."""
+        """Keep RealSense on but suppress webcam during failed-pick recovery."""
         self.post_pick_failure_ball_suppressed = True
         self.ball_data = False
         self.ball_buffer.clear()
+        MainDecision._set_webcam_ball_allowed(
+            self,
+            False,
+            reason='pick failed: suppress webcam during recovery',
+        )
         MainDecision._set_vision_activity(
             self,
-            ball_active=False,
+            ball_active=True,
             hoop_active=False,
-            reason='pick failed: suppress ball during recovery',
+            reason='pick failed: keep RealSense ball active',
         )
         self.get_logger().info(
-            "[PostPickFailure] 공 검출을 중지하고 ball_buffer를 "
-            "초기화했습니다. Pick 실패 복구 분기가 끝날 때까지 "
-            "같은 공을 무시합니다."
+            "[PostPickFailure] RealSense 공은 ON으로 유지하고 웹캠 공만 "
+            "OFF로 잠갔습니다."
         )
 
     def _finish_post_pick_failure_recovery(self, reason):
@@ -1388,6 +1546,11 @@ class MainDecision(Node):
             self,
             ball_active=True,
             hoop_active=False,
+            reason='post-pick failure recovery completed',
+        )
+        MainDecision._set_webcam_ball_allowed(
+            self,
+            True,
             reason='post-pick failure recovery completed',
         )
         self.get_logger().info(
@@ -1508,9 +1671,14 @@ class MainDecision(Node):
         elif self.status == 32:
             motion_msg.command = Motion.Shoot_Close
 
+        elif self.status == 33:
+                    motion_msg.command = Motion.Shoot_Mid
+        
+
         if (
             motion_msg.command == Motion.Back_To_Initial
             and getattr(self, 'has_ball', False)
+            and getattr(self, 'current_mode', None) == "BallMode"
         ):
             self.pre_shoot_result_waiting = True
             self.pre_shoot_verified_result = None
@@ -1519,6 +1687,12 @@ class MainDecision(Node):
                 "MotionEnd 이후 BallStatusPublisher 결과를 기다립니다."
             )
         
+        if (
+            motion_msg.command != Motion.Initial_Pose
+            and getattr(self, 'hurdle_ignore_until', None) is None
+        ):
+            self.hurdle_ignore_until = time.monotonic() + 3.0
+
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')
         self.get_logger().info(

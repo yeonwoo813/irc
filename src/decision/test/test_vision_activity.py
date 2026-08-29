@@ -74,14 +74,20 @@ class _Publisher:
         self.events.append((self.name, bool(message.data)))
 
 
-def _activity_harness(ball_active=True, hoop_active=False):
+def _activity_harness(
+    ball_active=True,
+    hoop_active=False,
+    webcam_ball_allowed=True,
+):
     events = []
     logger = _Logger()
     harness = SimpleNamespace(
         ball_vision_active=ball_active,
         hoop_vision_active=hoop_active,
+        webcam_ball_allowed=webcam_ball_allowed,
         ball_active_pub=_Publisher("ball", events),
         hoop_active_pub=_Publisher("hoop", events),
+        webcam_ball_allowed_pub=_Publisher("webcam", events),
         get_logger=lambda: logger,
         ball_data=True,
         ball_buffer=deque([12, 12, 12], maxlen=5),
@@ -103,6 +109,13 @@ def _activity_harness(ball_active=True, hoop_active=False):
     harness._finish_post_shoot_detection_suppression = lambda reason: (
         MainDecision._finish_post_shoot_detection_suppression(
             harness,
+            reason,
+        )
+    )
+    harness._set_webcam_ball_allowed = lambda allowed, reason='': (
+        MainDecision._set_webcam_ball_allowed(
+            harness,
+            allowed,
             reason,
         )
     )
@@ -145,25 +158,27 @@ def test_pick_result_selects_the_matching_detector():
     success.has_ball = False
 
     assert MainDecision.CheckBall(success) is True
-    assert success_events == [("ball", False), ("hoop", True)]
+    assert success_events == [
+        ("webcam", False),
+        ("ball", False),
+        ("hoop", True),
+    ]
 
-    failed, failed_events, _ = _activity_harness(
-        ball_active=False,
-        hoop_active=True,
-    )
+    failed, failed_events, _ = _activity_harness()
     failed.pick_done = True
     failed.ball_in_hand = False
     failed.has_ball = False
 
     assert MainDecision.CheckBall(failed) is False
-    assert failed_events == [("hoop", False)]
+    assert failed_events == [("webcam", False)]
     assert failed.post_pick_failure_ball_suppressed is True
     assert list(failed.ball_buffer) == []
-    assert failed.ball_vision_active is False
+    assert failed.ball_vision_active is True
     assert failed.hoop_vision_active is False
+    assert failed.webcam_ball_allowed is False
 
 
-def test_failed_pick_reenables_ball_immediately_after_recovery():
+def test_failed_pick_rearms_webcam_distance_gate_after_recovery():
     harness, events, _ = _activity_harness(
         ball_active=True,
         hoop_active=False,
@@ -173,25 +188,29 @@ def test_failed_pick_reenables_ball_immediately_after_recovery():
     harness.has_ball = False
 
     assert MainDecision.CheckBall(harness) is False
-    assert events == [("ball", False)]
+    assert events == [("webcam", False)]
+    assert harness.ball_vision_active is True
+    assert harness.webcam_ball_allowed is False
 
-    # Back_To_Walk 완료 직전까지 쌓인 OFF 상태 값도 모두 버린다.
+    # 복귀 중에는 웹캠 공 결과를 막고 RealSense 공 검출은 유지한다.
     harness.ball_buffer.extend([99, 99, 99])
     MainDecision._finish_post_pick_failure_recovery(
         harness,
         "Back_To_Walk completed",
     )
-    assert events == [("ball", False), ("ball", True)]
+    assert events == [("webcam", False), ("webcam", True)]
     assert harness.post_pick_failure_ball_suppressed is False
     assert list(harness.ball_buffer) == []
     assert harness.current_mode == "LineTrackingMode"
+    assert harness.webcam_ball_allowed is True
 
 
 def test_failed_pick_turn_limit_restores_original_lost_mode_branch():
     commands = []
     harness, events, _ = _activity_harness(
-        ball_active=False,
+        ball_active=True,
         hoop_active=False,
+        webcam_ball_allowed=False,
     )
     harness.turn_count = 10
     harness.turn_after_pick = True
@@ -208,7 +227,7 @@ def test_failed_pick_turn_limit_restores_original_lost_mode_branch():
 
     assert commands == ["lost"]
     assert Motion.Back_To_Walk not in commands
-    assert events == [("ball", True)]
+    assert events == [("webcam", True)]
     assert harness.back_to_walk_after_pick is False
     assert harness.turn_after_pick is False
     assert harness.pick_try_count == 0
@@ -219,6 +238,7 @@ def test_shoot_completion_keeps_ball_detection_disabled():
     harness, events, logger = _activity_harness(
         ball_active=False,
         hoop_active=True,
+        webcam_ball_allowed=False,
     )
     harness.test_mode = False
     harness.motion_ready = True
@@ -250,10 +270,11 @@ def test_shoot_completion_keeps_ball_detection_disabled():
     )
 
 
-def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
+def test_post_shoot_return_immediately_uses_cached_line_after_back_to_walk():
     harness, events, _ = _activity_harness(
         ball_active=False,
         hoop_active=False,
+        webcam_ball_allowed=False,
     )
     harness.turn_after_shoot = True
     harness.post_shoot_detection_suppressed = True
@@ -300,56 +321,53 @@ def test_post_shoot_return_uses_fresh_frames_after_back_to_walk():
     assert harness.back_to_walk_after_shoot is True
     assert harness.turn_count == 0
     assert harness.commands == expected_turns + [Motion.Back_To_Walk]
-    assert list(harness.ball_buffer) == [32, 32, 32]
-    assert events == []
-    assert harness.ball_vision_active is False
+    assert list(harness.ball_buffer) == []
+    assert events == [("ball", True), ("webcam", True)]
+    assert harness.ball_vision_active is True
     assert harness.hoop_vision_active is False
     assert harness.line_tracking_calls == 0
 
-    # Back_To_Walk 완료 판단에 사용된 모션 중 결과는 모두 버린다.
+    # Back_To_Walk 완료 판단에 사용한 직전 라인 결과로 즉시 복귀한다.
     MainDecision.BallMode(harness)
 
     assert harness.back_to_walk_after_shoot is False
     assert harness.current_mode == "LineTrackingMode"
-    assert list(harness.line_buffer) == []
+    assert list(harness.line_buffer) == [1, 1, 1]
     assert list(harness.ball_buffer) == []
-    assert list(harness.hurdle_buffer) == []
-    assert events == [("ball", True)]
+    assert list(harness.hurdle_buffer) == [99, 99, 99]
+    assert events == [("ball", True), ("webcam", True)]
     assert harness.ball_vision_active is True
-    assert harness.line_tracking_calls == 0
-
-    # motion_end 이후 새 결과가 3개 모이기 전에는 라인 명령을 보내지 않는다.
-    harness.motion_ready = True
-    harness.motion_end = True
-    harness.hurdle_detected = False
-    harness.latest_line_angle = 0.0
-    harness.latest_line_follow_point = False
-    harness.latest_ball_angle = 0.0
-    harness.latest_ball_in_hand = False
-    harness.latest_hurdle_angle = 0.0
-    harness.Decision = lambda: harness.LineTracking()
-
-    for _ in range(2):
-        harness.line_buffer.append(Motion.Right_Half_Forward)
-        harness.ball_buffer.append(99)
-        harness.hurdle_buffer.append(99)
-        harness.hurdle_ready_buffer.append(False)
-        assert MainDecision._try_decision_from_cached_results(harness) is False
-
-    harness.line_buffer.append(Motion.Right_Half_Forward)
-    harness.ball_buffer.append(99)
-    harness.hurdle_buffer.append(99)
-    harness.hurdle_ready_buffer.append(False)
-
-    assert MainDecision._try_decision_from_cached_results(harness) is True
-    assert harness.line_status == Motion.Right_Half_Forward
     assert harness.line_tracking_calls == 1
+
+
+def test_post_pick_return_immediately_uses_cached_line_after_back_to_walk():
+    harness, events, _ = _activity_harness(
+        ball_active=False,
+        hoop_active=True,
+    )
+    harness.back_to_walk_after_pick = True
+    harness.line_status = Motion.Left_Half_Forward
+    harness.line_tracking_statuses = []
+    harness.LineTracking = lambda: harness.line_tracking_statuses.append(
+        harness.line_status
+    )
+
+    MainDecision.BallMode(harness)
+
+    assert harness.back_to_walk_after_pick is False
+    assert harness.current_mode == "LineTrackingMode"
+    assert harness.line_tracking_statuses == [Motion.Left_Half_Forward]
+    assert list(harness.line_buffer) == [1, 1, 1]
+    assert list(harness.ball_buffer) == [12, 12, 12]
+    assert list(harness.hurdle_buffer) == [99, 99, 99]
+    assert events == []
 
 
 def test_post_shoot_turn_allows_tenth_rotation_before_lost_mode():
     harness, events, _ = _activity_harness(
         ball_active=False,
         hoop_active=False,
+        webcam_ball_allowed=False,
     )
     harness.turn_after_shoot = True
     harness.post_shoot_detection_suppressed = True
@@ -378,5 +396,5 @@ def test_post_shoot_turn_allows_tenth_rotation_before_lost_mode():
     assert harness.turn_after_shoot is False
     assert harness.turn_count == 0
     assert harness.lost_mode_calls == 1
-    assert events == []
-    assert harness.post_shoot_detection_suppressed is True
+    assert events == [("ball", True), ("webcam", True)]
+    assert harness.post_shoot_detection_suppressed is False

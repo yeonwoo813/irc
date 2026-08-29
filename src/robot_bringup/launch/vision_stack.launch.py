@@ -93,6 +93,9 @@ def generate_launch_description() -> LaunchDescription:
     realsense_yolo_script = PathJoinSubstitution(
         [scripts_dir, "realsense_yolo_detector.py"]
     )
+    ready_gate_script = PathJoinSubstitution(
+        [scripts_dir, "ready_gated_process.py"]
+    )
     ball_script = PathJoinSubstitution([scripts_dir, "ball_vision_fusion.py"])
     hurdle_script = PathJoinSubstitution(
         [scripts_dir, "hurdle_vision_fusion.py"]
@@ -198,11 +201,11 @@ def generate_launch_description() -> LaunchDescription:
                 "enable_sync": True,
                 "align_depth.enable": True,
                 "pointcloud.enable": False,
-                # Hot-plugged D4xx cameras can enumerate correctly while their
-                # streaming pipeline remains stale (typically reported as a
-                # transient "Depth stream start failure"). Reset once when the
-                # driver starts so color/depth publishers recover reliably.
-                "initial_reset": True,
+                # A hardware reset disconnects the D435 for roughly
+                # 6-7 seconds.
+                # Normal startup and hot-plug reconnect remain supported by the
+                # driver without forcing that reset on every launch.
+                "initial_reset": False,
                 # UVC power-line-frequency: 0=off, 1=50 Hz, 2=60 Hz,
                 # 3=auto. 이 RealSense는 [0, 2]만 지원하므로 한국 실내
                 # 조명에서는 auto(3)가 아니라 60 Hz(2)를 명시한다.
@@ -245,28 +248,79 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         emulate_tty=True,
         respawn=True,
-        respawn_delay=2.0,
+        # Give CUDA/TensorRT time to release allocations after an
+        # abnormal exit.
+        respawn_delay=5.0,
         condition=IfCondition(start_yolo),
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
+    # Keep the RealSense TensorRT process out of memory until webcam YOLO has
+    # completed its first inference.  If webcam YOLO later crashes, its READY
+    # publisher disappears and the supervisor stops RealSense YOLO so webcam
+    # can reload alone.  Child failures use exponential retry backoff.
     realsense_yolo_process = ExecuteProcess(
-        name="realsense_yolo_process",
-        cmd=[sys.executable, realsense_yolo_script, settings_ini],
+        name="realsense_yolo_gate_process",
+        cmd=[
+            sys.executable,
+            ready_gate_script,
+            "--node-name",
+            "realsense_yolo_gate",
+            "--gate-topic",
+            "/vision/webcam_yolo_ready",
+            "--gate-enabled",
+            start_yolo,
+            "--source-enabled",
+            LaunchConfiguration("start_webcam"),
+            # The first detector has published READY, but allowing its CUDA
+            # allocator to settle briefly avoids a transient NvMap OOM while
+            # the second TensorRT runtime is created.
+            "--gate-open-delay-seconds",
+            "3.0",
+            "--initial-backoff-seconds",
+            "5.0",
+            "--max-backoff-seconds",
+            "30.0",
+            "--restart-on-clean-exit",
+            "true",
+            "--",
+            sys.executable,
+            realsense_yolo_script,
+            settings_ini,
+        ],
         cwd=scripts_dir,
         output="screen",
         emulate_tty=True,
-        respawn=True,
-        respawn_delay=2.0,
         condition=IfCondition(start_realsense_yolo),
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
-    realsense_viewer_node = Node(
-        package="rqt_image_view",
-        executable="rqt_image_view",
+    # Do not allocate the rqt viewer while either TensorRT engine is loading.
+    # It opens immediately after RealSense publishes its first READY result.
+    realsense_viewer_process = ExecuteProcess(
         name="realsense_image_view",
-        arguments=[realsense_view_topic],
+        cmd=[
+            sys.executable,
+            ready_gate_script,
+            "--node-name",
+            "realsense_viewer_gate",
+            "--gate-topic",
+            "/vision/realsense_yolo_ready",
+            "--gate-enabled",
+            start_realsense_yolo,
+            "--source-enabled",
+            start_realsense,
+            "--initial-backoff-seconds",
+            "5.0",
+            "--max-backoff-seconds",
+            "30.0",
+            "--",
+            "ros2",
+            "run",
+            "rqt_image_view",
+            "rqt_image_view",
+            realsense_view_topic,
+        ],
         output="screen",
         condition=IfCondition(start_realsense_viewer),
     )
@@ -302,27 +356,11 @@ def generate_launch_description() -> LaunchDescription:
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
-    # YOLO는 모델/런타임 초기화에 시간이 걸리므로 카메라와 동시에 먼저
-    # 시작한다. 구독 생성 전 모델을 로드하므로 카메라 토픽이 아직 없어도
-    # 안전하며, 나머지 vision 프로세스는 기존처럼 2초 뒤 시작한다.
-    # Stagger TensorRT engine initialization to reduce peak memory.
-    delayed_realsense_yolo = TimerAction(
-        period=4.0,
-        actions=[realsense_yolo_process],
-    )
-
-    # Viewer subscribes before the detector is ready so debug-frame generation
-    # starts as soon as the TensorRT model finishes loading.
-    delayed_realsense_viewer = TimerAction(
-        period=4.0,
-        actions=[realsense_viewer_node],
-    )
-
-    # initial_reset disconnects the USB device for roughly 6-7 seconds. Wait
-    # until the camera node has recreated its dynamic RGB parameters before
-    # reading and locking the settled exposure/white-balance values.
+    # Without a forced hardware reset the camera normally declares its dynamic
+    # RGB parameters within a few seconds.  The stabilizer also waits for the
+    # parameter services, so a small launch delay is sufficient.
     delayed_rgb_stabilizer = TimerAction(
-        period=8.0,
+        period=3.0,
         actions=[rgb_stabilizer_process],
     )
 
@@ -342,8 +380,8 @@ def generate_launch_description() -> LaunchDescription:
             delayed_rgb_stabilizer,
             webcam_node,
             yolo_process,
-            delayed_realsense_yolo,
-            delayed_realsense_viewer,
+            realsense_yolo_process,
+            realsense_viewer_process,
             delayed_vision,
         ]
     )

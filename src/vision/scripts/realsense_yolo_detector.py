@@ -6,7 +6,7 @@ Inputs:
 - /camera/color/image_raw
 - /camera/aligned_depth_to_color/image_raw
 - /camera/color/camera_info
-- /vision/ball_active
+- /vision/ball_active (RealSense ball)
 - /vision/hoop_active
 
 Outputs:
@@ -1573,7 +1573,8 @@ def main() -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -29,6 +29,12 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("webcam_state_topic", "/line_tracker/state")
         self.declare_parameter("hoop_state_topic", "/hoop/vision_state")
         self.declare_parameter("active_topic", "/vision/ball_active")
+        self.declare_parameter(
+            "webcam_active_topic", "/vision/webcam_ball_active"
+        )
+        self.declare_parameter(
+            "webcam_allowed_topic", "/vision/webcam_ball_allowed"
+        )
         self.declare_parameter("active_on_start", True)
         self.declare_parameter("raw_ball_in_hand_topic", "/raw_ball_in_hand")
         self.declare_parameter("vision_state_topic", "/ball/vision_state")
@@ -55,6 +61,8 @@ class BallVisionFusionNode(Node):
         self.webcam_state_topic = text_param("webcam_state_topic")
         self.hoop_state_topic = text_param("hoop_state_topic")
         self.active_topic = text_param("active_topic")
+        self.webcam_active_topic = text_param("webcam_active_topic")
+        self.webcam_allowed_topic = text_param("webcam_allowed_topic")
         self.raw_ball_in_hand_topic = text_param("raw_ball_in_hand_topic")
         self.vision_state_topic = text_param("vision_state_topic")
         self.ball_result_topic = text_param("ball_result_topic")
@@ -77,6 +85,8 @@ class BallVisionFusionNode(Node):
         self.latest_hoop: Optional[Dict[str, Any]] = None
         self.latest_hoop_time = 0.0
         self.ball_in_hand = False
+        self.webcam_ball_active = False
+        self.webcam_ball_allowed = False
         self.frame_count = 0
         self.last_realsense_diagnostic_label: Optional[str] = None
         self.ball_detection_active = bool(
@@ -95,6 +105,16 @@ class BallVisionFusionNode(Node):
         )
         self.sub_active = self.create_subscription(
             Bool, self.active_topic, self.cb_ball_active, activity_qos
+        )
+        self.pub_webcam_active = self.create_publisher(
+            Bool, self.webcam_active_topic, activity_qos
+        )
+        self.pub_webcam_active.publish(Bool(data=False))
+        self.sub_webcam_allowed = self.create_subscription(
+            Bool,
+            self.webcam_allowed_topic,
+            self.cb_webcam_ball_allowed,
+            activity_qos,
         )
         self.sub_realsense_yolo_state = self.create_subscription(
             String,
@@ -134,15 +154,47 @@ class BallVisionFusionNode(Node):
         self.latest_webcam = None
         self.latest_webcam_time = 0.0
 
+    def _set_webcam_ball_active(self, enabled: bool, reason: str) -> bool:
+        enabled = bool(enabled)
+        if enabled == self.webcam_ball_active:
+            return False
+        self.webcam_ball_active = enabled
+        self.latest_webcam = None
+        self.latest_webcam_time = 0.0
+        self.pub_webcam_active.publish(Bool(data=enabled))
+        self.get_logger().info(
+            "Webcam ball result "
+            f"{'ON' if enabled else 'OFF'} ({reason})"
+        )
+        return True
+
     def cb_ball_active(self, msg: Bool) -> None:
         requested = bool(msg.data)
         if requested == self.ball_detection_active:
             return
         self.ball_detection_active = requested
         self._clear_ball_detection_state()
+        self._set_webcam_ball_active(
+            False,
+            "ball mission started: wait for RealSense <= 120cm"
+            if requested
+            else "ball detection disabled",
+        )
         self.ball_status_publisher.set_detection_enabled(requested)
         self.get_logger().info(
             f"Ball YOLO state processing {'ON' if requested else 'OFF'}"
+        )
+
+    def cb_webcam_ball_allowed(self, msg: Bool) -> None:
+        requested = bool(msg.data)
+        if requested == self.webcam_ball_allowed:
+            return
+        self.webcam_ball_allowed = requested
+        self._set_webcam_ball_active(
+            False,
+            "webcam permission disabled"
+            if not requested
+            else "webcam permission enabled: wait for RealSense <= 120cm",
         )
 
     def cb_realsense_yolo_state(self, msg: String) -> None:
@@ -177,6 +229,16 @@ class BallVisionFusionNode(Node):
                 state["realsense_diagnostic"] = diagnostic
         self.latest_realsense = state
         self.latest_realsense_time = time.monotonic()
+        if (
+            detected
+            and getattr(self, "webcam_ball_allowed", False)
+            and not getattr(self, "webcam_ball_active", False)
+            and distance <= 120.0
+        ):
+            self._set_webcam_ball_active(
+                True,
+                f"RealSense ball distance {distance:.1f}cm <= 120.0cm",
+            )
 
     @staticmethod
     def _empty_realsense_state(active: bool = True) -> Dict[str, Any]:

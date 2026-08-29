@@ -34,6 +34,7 @@ class BallStatus:
     Left_Turn_Afterpick = 30
     Right_Turn_Afterpick = 31
     Shoot_Close = 32
+    Shoot_Mid = 33
     Ball_Lost = 45
     Ball_None = 99
 
@@ -75,12 +76,13 @@ class BallDecision:
         self.goal_normal_shoot_min_distance_cm = 64.0
         self.goal_too_close_distance_cm = 55.0
 
-        self.goal_approach_center_tol = 5.0
+        self.goal_approach_center_min = -5.0
+        self.goal_approach_center_max = 5.0
         self.goal_approach_large_angle = 60.0
-        self.goal_shoot_close_min = -11.0
+        self.goal_shoot_close_min = -10.0
         self.goal_shoot_close_max = 0.0
-        self.goal_shoot_far_min = -5.0
-        self.goal_shoot_far_max = 5.0
+        self.goal_shoot_far_min = -4.0
+        self.goal_shoot_far_max = 4.0
         self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준
@@ -205,9 +207,9 @@ class BallDecision:
     def _goal_status_from_angle(self, angle: float) -> Tuple[int, float]:
         if angle < -self.goal_approach_large_angle:
             return BallStatus.Left_Turn, angle
-        if angle < -self.goal_approach_center_tol:
+        if angle < self.goal_approach_center_min:
             return BallStatus.Left_Half_Forward, angle
-        if angle <= self.goal_approach_center_tol:
+        if angle <= self.goal_approach_center_max:
             return BallStatus.Forward_4step, 0.0
         if angle <= self.goal_approach_large_angle:
             return BallStatus.Right_Half_Forward, angle

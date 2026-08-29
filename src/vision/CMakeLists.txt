@@ -35,6 +35,7 @@ endif()
 install(PROGRAMS
   scripts/yolo_detector.py
   scripts/realsense_yolo_detector.py
+  scripts/ready_gated_process.py
   scripts/ball_vision_fusion.py
   scripts/realsense_rgb_stabilizer.py
   scripts/hurdle_vision_fusion.py

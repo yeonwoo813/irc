@@ -1,5 +1,6 @@
 from collections import deque
 import math
+import time
 from types import MethodType, SimpleNamespace
 
 from decision.main_decision import Ball, MainDecision, Motion
@@ -241,6 +242,23 @@ def test_has_ball_back_to_initial_arms_verified_result_wait():
     assert publisher.messages[-1].command == Motion.Back_To_Initial
     assert harness.pre_shoot_result_waiting is True
     assert harness.pre_shoot_verified_result is None
+    assert harness.motion_end is False
+
+
+def test_lost_back_to_initial_does_not_arm_pre_shoot_wait():
+    publisher = _Publisher()
+    harness = _make_harness()
+    harness.status = Motion.Back_To_Initial
+    harness.has_ball = True
+    harness.current_mode = "LostMode"
+    harness.motion_pub = publisher
+    harness.pre_shoot_result_waiting = False
+    harness.pre_shoot_verified_result = None
+
+    MainDecision.MotionCommand(harness)
+
+    assert publisher.messages[-1].command == Motion.Back_To_Initial
+    assert harness.pre_shoot_result_waiting is False
     assert harness.motion_end is False
 
 
@@ -520,6 +538,37 @@ def test_confirmed_hurdle_result_stays_latched_until_crossing_completes():
     )
     assert harness.hurdle_detected is False
     assert harness.hurdle_go_active is False
+
+
+def test_hurdle_is_ignored_for_three_seconds_after_first_motion_starts():
+    harness = _make_harness()
+    harness.hurdle_ignore_until = None
+    harness.status = Motion.Initial_Pose
+    harness.motion_pub = _Publisher()
+
+    MainDecision.MotionCommand(harness)
+    assert harness.hurdle_ignore_until is None
+
+    harness.status = Motion.Forward_4step
+    MainDecision.MotionCommand(harness)
+    assert 2.9 <= harness.hurdle_ignore_until - time.monotonic() <= 3.0
+
+    MainDecision.HurdleResultCallback(
+        harness,
+        SimpleNamespace(status=27, angle=12.0, hurdle_ready=True),
+    )
+    assert harness.hurdle_detected is False
+    assert harness.hurdle_buffer[-1] == 99
+    assert harness.hurdle_ready_buffer[-1] is False
+
+    harness.hurdle_ignore_until = time.monotonic() - 0.1
+
+    MainDecision.HurdleResultCallback(
+        harness,
+        SimpleNamespace(status=27, angle=12.0, hurdle_ready=True),
+    )
+    assert harness.hurdle_detected is True
+    assert harness.hurdle_buffer[-1] == 27
 
 
 def test_hurdle_none_does_not_enter_hurdle_mode():

@@ -179,7 +179,7 @@ class LineGeometryTest(unittest.TestCase):
         self.assertEqual(payload["line_distance"], 65.0)
         self.assertEqual(payload["status"], LineStatus.Forward_4step)
 
-    def test_curve_distance_and_tangent_use_second_closest_point(self) -> None:
+    def test_curve_distance_uses_first_and_tangent_uses_third_point(self) -> None:
         payload = make_line_payload(
             line_points=[
                 (400.0, 450.0),
@@ -192,18 +192,19 @@ class LineGeometryTest(unittest.TestCase):
         )
 
         self.assertGreater(abs(payload["curve_a"]), 1.0e-4)
-        self.assertEqual(payload["line_distance"], 25.0)
+        # 곡선 거리도 로봇에 가장 가까운 첫 번째 점(400px)을 사용한다.
+        self.assertEqual(payload["line_distance"], 55.0)
 
         a = payload["curve_a"]
-        second_y = 350.0
-        # 같은 피팅식의 두 번째 점 y에서 계산한 접선이어야 한다.
+        third_y = 250.0
+        # 같은 피팅식의 세 번째 점 y에서 계산한 접선이어야 한다.
         coeffs = np.polyfit(
             [450.0, 350.0, 250.0, 150.0],
             [400.0, 370.0, 360.0, 370.0],
             2,
         )
         expected_tangent = math.degrees(
-            math.atan2(-(2.0 * a * second_y + coeffs[1]), 1.0)
+            math.atan2(-(2.0 * a * third_y + coeffs[1]), 1.0)
         )
         self.assertAlmostEqual(
             payload["tangent_angle"],
@@ -225,6 +226,34 @@ class LineGeometryTest(unittest.TestCase):
 
         self.assertLessEqual(abs(payload["curve_a"]), 1.0e-4)
         self.assertEqual(payload["line_distance"], 65.0)
+
+    def test_nearly_straight_four_points_keep_second_point_tangent(self) -> None:
+        points = [
+            (400.0, 450.0),
+            (380.0, 350.0),
+            (362.0, 250.0),
+            (346.0, 150.0),
+        ]
+        payload = make_line_payload(
+            line_points=points,
+            frame_w=640,
+            frame_h=480,
+        )
+
+        self.assertLessEqual(abs(payload["curve_a"]), 2.0e-4)
+        coeffs = np.polyfit(
+            [point[1] for point in points],
+            [point[0] for point in points],
+            2,
+        )
+        expected_tangent = math.degrees(
+            math.atan2(-(2.0 * coeffs[0] * 350.0 + coeffs[1]), 1.0)
+        )
+        self.assertAlmostEqual(
+            payload["tangent_angle"],
+            expected_tangent,
+            places=6,
+        )
 
     def test_turn_half_status_name_is_exposed(self) -> None:
         payload = apply_line_status(
