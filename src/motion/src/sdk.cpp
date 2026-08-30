@@ -1131,14 +1131,13 @@ void SDK_Motion::define_motions()
         {2044,1207,2218,2040,2039,2044,2812,1693,1515,2008,2082,2117,2076,1657,1083,1981,2127,2429,3036,2141,1970,1961},
         {2044,1176,2573,2367,2040,2040,2807,1682,1520,2009,2082,2117,2077,1657,1085,1982,2127,2429,3034,2140,1969,1960},
         {2021,1374,2435,2390,2032,2045,2932,1565,1544,2016,2078,2118,2079,1657,1112,1986,2144,2427,3011,2135,1962,1961},
-        {2021,1374,2435,2390,2032,2045,2932,1565,1544,2016,2078,2118,2079,1657,1112,1986,2144,2427,3011,2135,1962,1961}
     };
 
     motion_hurdle.durations =
     {
         1.0, 0.1, 0.7, 0.6, 0.3, 0.25, 0.2, 0.1,
-        0.2, 1.2, 0.2, 0.7, 0.4, 0.4, 0.2, 0.2,
-        0.3, 0.4, 0.2, 0.1, 0.1, 0.1, 0.5
+        0.4, 1.3, 0.2, 0.7, 0.4, 0.4, 0.2, 0.2,
+        0.3, 0.4, 0.2, 0.2, 0.075, 0.075
     };
 
     motion_hurdle.blends =
@@ -1150,7 +1149,7 @@ void SDK_Motion::define_motions()
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth
+        BlendType::Smooth, BlendType::Smooth
     };
 
     motion_library_[19] = motion_hurdle;

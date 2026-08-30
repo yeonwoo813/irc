@@ -158,7 +158,7 @@ def test_lost_body_turn_line_recovery_runs_back_to_walk_first():
     assert harness.lost_back_to_walk_pending is False
 
 
-def test_lost_recovery_stays_lost_if_line_disappears_during_back_to_walk():
+def test_lost_recovery_returns_to_initial_if_line_disappears_during_back_to_walk():
     harness = _lost_harness(
         line_status=Line.Line_None,
         lost_step=4,
@@ -166,11 +166,44 @@ def test_lost_recovery_stays_lost_if_line_disappears_during_back_to_walk():
         lost_body_turn_count=1,
         lost_initial_pose_done=True,
         lost_back_to_walk_pending=True,
+        lost_left_line_seen=True,
     )
 
     MainDecision.LostMode(harness)
 
-    assert harness.commands == [Motion.Left_Turn]
+    assert harness.commands == [Motion.Back_To_Initial]
     assert harness.lost_back_to_walk_pending is False
-    assert harness.lost_body_turn_count == 2
+    assert harness.lost_initial_pose_done is True
+    assert harness.lost_step == 0
+    assert harness.lost_found_dir == 0
+    assert harness.lost_body_turn_count == 0
+    assert harness.lost_left_line_seen is False
+    assert harness.lost_right_line_seen is False
     assert harness.line_tracking_calls == 0
+
+    MainDecision.LostMode(harness)
+
+    assert harness.commands == [Motion.Back_To_Initial, Motion.Neck_Left]
+    assert harness.lost_step == 1
+
+
+def test_lost_backward_skips_back_to_initial_before_new_neck_scan():
+    harness = _lost_harness(
+        line_status=Line.Line_None,
+        lost_step=4,
+        lost_found_dir=-1,
+        lost_body_turn_count=5,
+        lost_initial_pose_done=True,
+    )
+
+    MainDecision.LostMode(harness)
+
+    assert harness.commands == [Motion.Backward_half]
+    assert harness.lost_initial_pose_done is True
+    assert harness.lost_step == 0
+
+    MainDecision.LostMode(harness)
+
+    assert harness.commands == [Motion.Backward_half, Motion.Neck_Left]
+    assert Motion.Back_To_Initial not in harness.commands
+    assert harness.lost_step == 1

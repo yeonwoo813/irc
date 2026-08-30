@@ -64,8 +64,8 @@ class BallDecision:
         self.ball_entry_distance_cm = 120.0
 
         # Realsense 직진 각도 범위
-        self.angle_center_min = -10.0
-        self.angle_center_max = 10.0
+        self.angle_center_min = -1.0
+        self.angle_center_max = 7.0
 
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
@@ -88,7 +88,7 @@ class BallDecision:
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
         self.webcam_pick_y_max_px = 90.0
-        self.webcam_pick_x_min_px = -30.0
+        self.webcam_pick_x_min_px = -20.0
         self.webcam_pick_x_max_px = 30.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:

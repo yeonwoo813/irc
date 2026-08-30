@@ -1329,6 +1329,22 @@ class MainDecision(Node):
                 self.LineTracking()
                 return
 
+            # Back_To_Walk 도중 라인이 사라졌다면 이전 몸통 탐색 방향을
+            # 이어가지 않는다. Back_To_Walk는 기본자세로 끝나는 모션이
+            # 아니므로 Back_To_Initial을 반드시 실행한 뒤 새 Lost 탐색을
+            # 목 왼쪽부터 다시 시작한다.
+            self.lost_count = 0
+            self.lost_step = 0
+            self.lost_found_dir = 0
+            self.lost_body_turn_count = 0
+            self.lost_initial_pose_done = True
+            self.lost_left_line_seen = False
+            self.lost_right_line_seen = False
+            self.lost_neck_scan_side = 0
+            self.status = Motion.Back_To_Initial
+            self.MotionCommand()
+            return
+
         #step 0 
         if self.lost_step == 0:
             if self.line_status != Line.Line_None:
@@ -1447,6 +1463,8 @@ class MainDecision(Node):
                 self.MotionCommand()
                 return
 
+            # Backward_half는 기본자세로 끝나므로
+            # lost_initial_pose_done은 유지하고 바로 새 목 탐색으로 간다.
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
