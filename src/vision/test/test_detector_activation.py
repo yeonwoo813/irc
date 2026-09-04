@@ -9,7 +9,10 @@ from std_msgs.msg import Bool, String
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from ball_vision_fusion import BallVisionFusionNode  # noqa: E402
+from ball_vision_fusion import (  # noqa: E402
+    DEFAULT_WEBCAM_ALLOWED_ON_START,
+    BallVisionFusionNode,
+)
 
 
 class _Logger:
@@ -29,6 +32,10 @@ class _Publisher:
 
     def publish(self, message):
         self.values.append(bool(message.data))
+
+
+def test_standalone_vision_allows_normal_webcam_handoff_by_default():
+    assert DEFAULT_WEBCAM_ALLOWED_ON_START is True
 
 
 def test_inactive_ball_callbacks_skip_yolo_state_processing():

@@ -157,7 +157,7 @@ def test_webcam_ball_off_removes_current_detection_and_possession_state():
     assert gate.update(True, now=1.0) is True
 
     with patch.object(yolo_detector, "yolo_detect", return_value=[ball]):
-        payload, _image = analyze_frame_yolo(
+        payload, image = analyze_frame_yolo(
             frame,
             model=object(),
             cfg=cfg,
@@ -166,8 +166,12 @@ def test_webcam_ball_off_removes_current_detection_and_possession_state():
         )
 
     assert payload["ball_detected"] is False
+    assert payload["ball_detection_active"] is False
     assert payload["raw_ball_in_hand"] is False
     assert gate.started_at is None
+    # 제어 결과는 OFF여도 모델의 원시 공 검출 박스는 보여야 게이트
+    # 상태를 실제 YOLO 오검출/미검출과 구분할 수 있다.
+    assert np.array_equal(image[300, 300], np.array([0, 180, 255]))
 
 
 def test_webcam_ball_on_keeps_current_detection():
@@ -192,3 +196,4 @@ def test_webcam_ball_on_keeps_current_detection():
         )
 
     assert payload["ball_detected"] is True
+    assert payload["ball_detection_active"] is True

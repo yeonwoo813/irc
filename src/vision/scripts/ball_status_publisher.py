@@ -64,8 +64,8 @@ class BallDecision:
         self.ball_entry_distance_cm = 120.0
 
         # Realsense 직진 각도 범위
-        self.angle_center_min = -1.0
-        self.angle_center_max = 7.0
+        self.angle_center_min = -2.5
+        self.angle_center_max = 4.5
 
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0

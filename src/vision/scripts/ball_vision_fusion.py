@@ -19,6 +19,9 @@ from std_msgs.msg import Bool, String
 from ball_status_publisher import BallStatusPublisher
 
 
+DEFAULT_WEBCAM_ALLOWED_ON_START = True
+
+
 class BallVisionFusionNode(Node):
     def __init__(self) -> None:
         super().__init__("ball_vision_fusion")
@@ -36,6 +39,15 @@ class BallVisionFusionNode(Node):
             "webcam_allowed_topic", "/vision/webcam_ball_allowed"
         )
         self.declare_parameter("active_on_start", True)
+        # vision_stack.launch.py can be run without MainDecision for camera
+        # testing. In that mode no publisher exists for
+        # /vision/webcam_ball_allowed, so allow the normal RealSense <= 120 cm
+        # handoff by default. MainDecision still overrides this permission
+        # during pick/shoot suppression phases.
+        self.declare_parameter(
+            "webcam_allowed_on_start",
+            DEFAULT_WEBCAM_ALLOWED_ON_START,
+        )
         self.declare_parameter("raw_ball_in_hand_topic", "/raw_ball_in_hand")
         self.declare_parameter("vision_state_topic", "/ball/vision_state")
         self.declare_parameter("ball_result_topic", "ball_result")
@@ -86,7 +98,9 @@ class BallVisionFusionNode(Node):
         self.latest_hoop_time = 0.0
         self.ball_in_hand = False
         self.webcam_ball_active = False
-        self.webcam_ball_allowed = False
+        self.webcam_ball_allowed = bool(
+            self.get_parameter("webcam_allowed_on_start").value
+        )
         self.frame_count = 0
         self.last_realsense_diagnostic_label: Optional[str] = None
         self.ball_detection_active = bool(
@@ -145,7 +159,9 @@ class BallVisionFusionNode(Node):
             1.0 / max(self.publish_hz, 1.0), self.publish_ball_features
         )
         self.get_logger().info(
-            "BallVisionFusionNode started in YOLO-only mode."
+            "BallVisionFusionNode started in YOLO-only mode; "
+            "webcam permission default="
+            f"{'ON' if self.webcam_ball_allowed else 'OFF'}."
         )
 
     def _clear_ball_detection_state(self) -> None:

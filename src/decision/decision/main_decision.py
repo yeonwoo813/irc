@@ -181,6 +181,9 @@ class MainDecision(Node):
         self.hurdle_go_active = False
         self.hurdle_go_started = False
         self.hurdle_ignore_until = None
+        # 첫 실제 모션 후 3초가 끝날 때까지 허들 상태를 강제로 끕니다.
+        # gate가 열릴 때 이 구간의 버퍼도 폐기해 새 프레임만 사용합니다.
+        self.hurdle_ignore_active = True
 
         # 최근 5개의 비전 상태를 저장하고, line과 BallMode는
         # 판단 시점의 최근 3개만 다수결에 사용합니다.
@@ -682,8 +685,30 @@ class MainDecision(Node):
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
         ignore_until = getattr(self, 'hurdle_ignore_until', None)
         ignore_hurdle = (
-            ignore_until is not None and time.monotonic() < ignore_until
+            ignore_until is None or time.monotonic() < ignore_until
         )
+
+        if ignore_hurdle:
+            # 금지 시간에 들어온 양성 결과는 래치하거나 기억하지 않습니다.
+            # Hurdle_None은 다른 비전 판단이 계속 진행될 수 있게 합니다.
+            if not getattr(self, 'hurdle_ignore_active', False):
+                self.hurdle_buffer.clear()
+                self.hurdle_ready_buffer.clear()
+            self.hurdle_ignore_active = True
+            self.hurdle_detected = False
+            self.hurdle_ready = False
+            self.hurdle_go_active = False
+            self.hurdle_go_started = False
+            self.hurdle_status = Hurdle.Hurdle_None
+            self.hurdle_angle = 0.0
+        elif getattr(self, 'hurdle_ignore_active', False):
+            # gate가 열리는 순간 금지 구간의 강제 False 샘플까지 버리고,
+            # 이후에 도착한 프레임만으로 허들을 판단합니다.
+            self.hurdle_buffer.clear()
+            self.hurdle_ready_buffer.clear()
+            self.hurdle_data = False
+            self.hurdle_ignore_active = False
+
         hurdle_status = (
             Hurdle.Hurdle_None if ignore_hurdle else hurdle_msg.status
         )
@@ -1710,6 +1735,17 @@ class MainDecision(Node):
             and getattr(self, 'hurdle_ignore_until', None) is None
         ):
             self.hurdle_ignore_until = time.monotonic() + 3.0
+            self.hurdle_ignore_active = True
+            self.hurdle_detected = False
+            self.hurdle_ready = False
+            self.hurdle_go_active = False
+            self.hurdle_go_started = False
+            self.hurdle_status = Hurdle.Hurdle_None
+            self.hurdle_angle = 0.0
+            self.latest_hurdle_angle = 0.0
+            self.latest_hurdle_ready = False
+            self.hurdle_buffer.clear()
+            self.hurdle_ready_buffer.clear()
 
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')

@@ -354,6 +354,7 @@ def test_ball_mode_single_pick_vote_does_not_override_two_approach_votes():
 def test_callbacks_store_latest_flags_before_motion_is_ready():
     harness = _make_harness()
     harness.motion_ready = False
+    harness.hurdle_ignore_until = time.monotonic() - 0.1
     line_msg = SimpleNamespace(
         status=3,
         angle=8.0,
@@ -495,6 +496,7 @@ def test_line_vote_log_contains_the_exact_three_frame_inputs():
 
 def test_confirmed_hurdle_result_stays_latched_until_crossing_completes():
     harness = _make_harness()
+    harness.hurdle_ignore_until = time.monotonic() - 0.1
 
     MainDecision.HurdleResultCallback(
         harness,
@@ -546,8 +548,39 @@ def test_hurdle_is_ignored_for_three_seconds_after_first_motion_starts():
     harness.status = Motion.Initial_Pose
     harness.motion_pub = _Publisher()
 
+    # 시작 전에 남아 있던 양성 상태가 있더라도 gate가 강제로 지워야 한다.
+    harness.hurdle_detected = True
+    harness.hurdle_ready = True
+    harness.hurdle_go_active = True
+    harness.hurdle_go_started = True
+    harness.hurdle_status = 27
+    harness.hurdle_angle = 12.0
+
+    # 첫 모션이 시작되기 전에는 deadline 자체가 없으며, 이 상태도
+    # 허들 검출 금지 구간이어야 한다.
+    MainDecision.HurdleResultCallback(
+        harness,
+        SimpleNamespace(status=27, angle=12.0, hurdle_ready=True),
+    )
+    assert harness.hurdle_detected is False
+    assert harness.hurdle_ready is False
+    assert harness.hurdle_go_active is False
+    assert harness.hurdle_status == 99
+    assert harness.hurdle_angle == 0.0
+    assert list(harness.hurdle_buffer) == [99]
+    assert list(harness.hurdle_ready_buffer) == [False]
+
     MainDecision.MotionCommand(harness)
     assert harness.hurdle_ignore_until is None
+
+    # 초기자세 명령만 실행된 뒤에도 첫 실제 모션 전이므로 계속 막는다.
+    MainDecision.HurdleResultCallback(
+        harness,
+        SimpleNamespace(status=27, angle=12.0, hurdle_ready=True),
+    )
+    assert harness.hurdle_detected is False
+    assert harness.hurdle_buffer[-1] == 99
+    assert harness.hurdle_ready_buffer[-1] is False
 
     harness.status = Motion.Forward_4step
     MainDecision.MotionCommand(harness)
@@ -568,7 +601,9 @@ def test_hurdle_is_ignored_for_three_seconds_after_first_motion_starts():
         SimpleNamespace(status=27, angle=12.0, hurdle_ready=True),
     )
     assert harness.hurdle_detected is True
-    assert harness.hurdle_buffer[-1] == 27
+    # gate 이전의 강제 False 샘플도 남기지 않고 첫 유효 프레임부터 시작한다.
+    assert list(harness.hurdle_buffer) == [27]
+    assert list(harness.hurdle_ready_buffer) == [True]
 
 
 def test_hurdle_none_does_not_enter_hurdle_mode():

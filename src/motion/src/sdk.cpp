@@ -1135,16 +1135,16 @@ void SDK_Motion::define_motions()
 
     motion_hurdle.durations =
     {
-        1.0, 0.1, 0.7, 0.6, 0.3, 0.25, 0.2, 0.1,
-        0.4, 1.3, 0.2, 0.7, 0.4, 0.4, 0.2, 0.2,
+        1.3, 0.1, 0.55, 0.6, 0.3, 0.25, 0.2, 0.1,
+        0.25, 1.3, 0.2, 0.7, 0.4, 0.4, 0.2, 0.2,
         0.3, 0.4, 0.2, 0.2, 0.075, 0.075
     };
 
     motion_hurdle.blends =
     {
         BlendType::Stop, BlendType::Stop,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
+        BlendType::Stop, BlendType::Stop, BlendType::Smooth,
+        BlendType::Stop, BlendType::Stop, BlendType::Stop,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,

@@ -1037,7 +1037,13 @@ def visualize_yolo(
 
         x1, y1, x2, y2 = map(int, [d.x1, d.y1, d.x2, d.y2])
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(vis, f"{d.name} {d.conf:.2f}", (x1, max(15, y1 - 5)),
+        label = f"{d.name} {d.conf:.2f}"
+        if (
+            d.name == cfg["ball_class"]
+            and not bool(payload.get("ball_detection_active", True))
+        ):
+            label += " (result OFF)"
+        cv2.putText(vis, label, (x1, max(15, y1 - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
     # 현재 프레임에서는 공을 놓쳤지만 홀드 중이면 마지막 실제 박스를 표시한다.
@@ -1249,7 +1255,10 @@ def visualize_yolo(
         f"ang:{payload['line_angle']:+.1f} tan:{payload['tangent_angle']:+.1f}",
         f"a:{payload['curve_a']:+.1e} f_ang:{payload['follow_angle']:+.1f}",
         f"tar:({payload['target_x']:.0f},{payload['target_y']:.0f}) fd:{payload['follow_distance']:.0f}",
-        f"B:{int(payload['ball_detected'])}",
+        (
+            f"B:{int(payload['ball_detected'])} "
+            f"gate:{'ON' if payload.get('ball_detection_active', True) else 'OFF'}"
+        ),
     ]
     draw_text_panel(
         line_lines,
@@ -1273,12 +1282,14 @@ def analyze_frame_yolo(
     ball_detection_hold: Optional[BallDetectionHold] = None,
 ) -> tuple[dict, np.ndarray]:
     h, w = frame.shape[:2]
-    dets = yolo_detect(model, frame, cfg)
+    raw_dets = yolo_detect(model, frame, cfg)
+    dets = raw_dets
     if not ball_detection_active:
         # Webcam YOLO는 라인/공/허들을 한 모델에서 추론하므로 전체
-        # 추론을 멈출 수는 없다. OFF 구간에는 공 클래스만 결과와
-        # 디버그 화면에서 제거해 현재 프레임의 공이 어떤 상태에도
-        # 영향을 주지 않게 한다.
+        # 추론을 멈출 수는 없다. OFF 구간에는 공 클래스만 제어용
+        # payload에서 제거해 현재 프레임의 공이 로봇 상태에 영향을
+        # 주지 않게 한다. 원시 검출 박스는 디버그 화면에 남겨 모델
+        # 실패와 결과 게이트 OFF를 구분할 수 있게 한다.
         ball_class = str(cfg.get("ball_class", "ball"))
         dets = [d for d in dets if d.name != ball_class]
     raw_line_points, roi_box = get_yolo_line_points(dets, w, h, cfg)
@@ -1312,10 +1323,11 @@ def analyze_frame_yolo(
 
     # 디버깅용으로 raw 개수도 같이 넣어둠. 알고리즘 쪽에서 안 쓰면 무시해도 됨.
     payload["raw_point_count"] = int(len(raw_line_points))
+    payload["ball_detection_active"] = bool(ball_detection_active)
 
     vis = visualize_yolo(
         frame,
-        dets,
+        raw_dets,
         raw_line_points,
         payload,
         roi_box,
