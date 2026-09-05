@@ -5,7 +5,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from collections import deque, Counter
 from msgs.msg import LineResult, MotionCommand, MotionEnd, BallResult, HurdleResult
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 
 # 커스텀메시지 가져오기
 
@@ -43,7 +44,7 @@ class Motion:
     Left_Turn_Afterpick = 30
     Right_Turn_Afterpick = 31
     Shoot_Close = 32
-    Shoot_Mid = 33
+    Shoot_Forward = 33
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -79,6 +80,13 @@ class Hurdle:
 
     
 class MainDecision(Node):
+    VISION_RESET_PARTICIPANTS = frozenset({
+        'webcam_yolo',
+        'realsense_yolo',
+        'ball_fusion',
+        'hurdle_fusion',
+    })
+
     def __init__(self):
         super().__init__('main_decision')
 
@@ -107,6 +115,18 @@ class MainDecision(Node):
         #test mode true/false에 따라 초기값 조정
         self.motion_end = self.test_mode
         self.motion_ready = self.test_mode
+        # 실제 경기에서는 초기자세와 두 YOLO가 모두 준비되어도
+        # 운영자가 Enter를 눌러 /mission/start 서비스를 호출하기 전까지
+        # 판단과 모션 명령을 잠근다. test_mode는 기존처럼 즉시 판단한다.
+        self.mission_started = self.test_mode
+        self.mission_armed_logged = False
+        self.mission_armed_state = None
+        self.mission_started_at = None
+        self.first_motion_after_start_pending = False
+        self.mission_start_warning_logged = False
+        self.vision_reset_pending = False
+        self.vision_reset_token = None
+        self.vision_reset_acks = set()
         # 실제 경기에서는 두 카메라의 YOLO가 첫 추론을 성공하기 전까지
         # 판단과 모션 발행을 모두 막는다. test_mode는 하드웨어 없이 판단
         # 로직만 검증하는 용도이므로 이 시작 게이트를 우회한다.
@@ -228,6 +248,37 @@ class MainDecision(Node):
         self.motion_end_sub = self.create_subscription(
             MotionEnd, 'motion_end', self.MotionEndCallback, motion_state_qos
         )
+        self.mission_armed_pub = self.create_publisher(
+            Bool,
+            '/mission/armed',
+            motion_state_qos,
+        )
+        vision_reset_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.vision_reset_pub = self.create_publisher(
+            String,
+            '/mission/vision_reset',
+            vision_reset_qos,
+        )
+        self.vision_reset_ack_sub = self.create_subscription(
+            String,
+            '/mission/vision_reset_ack',
+            self.VisionResetAckCallback,
+            vision_reset_qos,
+        )
+        MainDecision._set_mission_armed_state(self, False)
+        self.mission_start_service = self.create_service(
+            Trigger,
+            '/mission/start',
+            self.MissionStartCallback,
+        )
+        self.mission_start_watchdog = self.create_timer(
+            0.1,
+            self._check_mission_start_latency,
+        )
 
         #publish
         self.motion_pub = self.create_publisher(MotionCommand, 'motion_command', 10)
@@ -277,6 +328,167 @@ class MainDecision(Node):
             and getattr(self, 'realsense_yolo_ready', True)
         )
 
+    def _mission_has_started(self):
+        """Keep lightweight unit-test harnesses compatible by default."""
+        return bool(getattr(self, 'mission_started', True))
+
+    def _mission_armed(self):
+        """Return true only when pressing s may safely start decisions."""
+        return bool(
+            getattr(self, 'motion_ready', False)
+            and getattr(self, 'motion_end', False)
+            and MainDecision._vision_stack_ready(self)
+        )
+
+    def _set_mission_armed_state(self, armed):
+        """Publish armed changes for the launch-terminal waiting screen."""
+        armed = bool(armed)
+        previous = getattr(self, 'mission_armed_state', None)
+        self.mission_armed_state = armed
+        publisher = getattr(self, 'mission_armed_pub', None)
+        if publisher is not None and previous != armed:
+            publisher.publish(Bool(data=armed))
+        return previous != armed
+
+    def _maybe_log_mission_armed(self):
+        if MainDecision._mission_has_started(self):
+            MainDecision._set_mission_armed_state(self, False)
+            return False
+        armed = MainDecision._mission_armed(self)
+        MainDecision._set_mission_armed_state(self, armed)
+        if not armed:
+            self.mission_armed_logged = False
+            return False
+        if getattr(self, 'mission_armed_logged', False):
+            return False
+
+        self.mission_armed_logged = True
+        self.get_logger().info('[MISSION ARMED] Press Enter to start')
+        return True
+
+    def MissionStartCallback(self, _request, response):
+        if MainDecision._mission_has_started(self):
+            response.success = True
+            response.message = 'Mission already started.'
+            return response
+
+        if not MainDecision._mission_armed(self):
+            response.success = False
+            response.message = (
+                'Mission is not armed: wait for initial pose and both YOLOs.'
+            )
+            self.get_logger().info(
+                '[MISSION START REJECTED] Wait for initial pose and both '
+                'YOLO pipelines to become ready.'
+            )
+            return response
+
+        # Enter 이전에 저장된 결과는 첫 행동에 사용하지 않는다. MainDecision
+        # 버퍼뿐 아니라 각 비전 노드의 투표·hold·최종 확정 상태도
+        # 초기화한 뒤, 모든 reset ack가 도착한 시점 이후의 프레임만
+        # line/ball/hurdle 최초 판단에 사용한다.
+        MainDecision._reset_vision_decision_cycle(self)
+        self.latest_line_angle = 0.0
+        self.latest_line_follow_point = False
+        self.latest_ball_angle = 0.0
+        self.latest_ball_in_hand = False
+        self.latest_goal_distance_cm = 0.0
+        self.latest_hurdle_angle = 0.0
+        self.latest_hurdle_ready = False
+        self.line_status = Line.Line_None
+        self.ball_status = Ball.Ball_None
+        self.ball_in_hand = False
+        self.hurdle_status = Hurdle.Hurdle_None
+        self.hurdle_ready = False
+        self.hurdle_detected = False
+        self.hurdle_ignore_until = None
+        self.hurdle_ignore_active = True
+        self.mission_started = True
+        MainDecision._set_mission_armed_state(self, False)
+        self.mission_started_at = time.monotonic()
+        self.first_motion_after_start_pending = True
+        self.mission_start_warning_logged = False
+        self.current_mode = 'WaitingMode'
+        reset_publisher = getattr(self, 'vision_reset_pub', None)
+        if reset_publisher is None:
+            # Lightweight unit-test harnesses do not construct ROS publishers.
+            self.vision_reset_pending = False
+            self.get_logger().info(
+                '[MISSION START] Enter received: cleared pre-start vision data; '
+                'collecting 3 new frames per vision stream.'
+            )
+        else:
+            self.vision_reset_pending = True
+            self.vision_reset_acks = set()
+            self.vision_reset_token = str(time.monotonic_ns())
+            reset_publisher.publish(String(data=self.vision_reset_token))
+            self.get_logger().info(
+                '[MISSION START] Enter received: resetting every vision cache, '
+                'vote, hold, and detection latch before collecting frames.'
+            )
+        response.success = True
+        response.message = 'Mission start accepted; resetting vision state.'
+        return response
+
+    def VisionResetAckCallback(self, msg):
+        if not getattr(self, 'vision_reset_pending', False):
+            return
+
+        try:
+            participant, token = str(msg.data).split('|', 1)
+        except ValueError:
+            return
+        if token != getattr(self, 'vision_reset_token', None):
+            return
+
+        expected = set(MainDecision.VISION_RESET_PARTICIPANTS)
+        if participant not in expected:
+            return
+        self.vision_reset_acks.add(participant)
+        missing = expected - self.vision_reset_acks
+        if missing:
+            return
+
+        # Reset 중 도착한 중간 결과도 모두 폐기한다. 이 시점부터
+        # 도착하는 결과만 실제 첫 행동을 결정한다.
+        MainDecision._reset_vision_decision_cycle(self)
+        self.vision_reset_pending = False
+        self.get_logger().info(
+            '[MISSION VISION RESET] complete: collecting fresh '
+            'post-s frames only.'
+        )
+
+    def _check_mission_start_latency(self):
+        if (
+            not MainDecision._mission_has_started(self)
+            or not getattr(self, 'first_motion_after_start_pending', False)
+            or getattr(self, 'mission_start_warning_logged', False)
+            or getattr(self, 'mission_started_at', None) is None
+        ):
+            return
+
+        elapsed = time.monotonic() - self.mission_started_at
+        if elapsed < 0.5:
+            return
+
+        self.mission_start_warning_logged = True
+        if getattr(self, 'vision_reset_pending', False):
+            missing = sorted(
+                set(MainDecision.VISION_RESET_PARTICIPANTS)
+                - set(getattr(self, 'vision_reset_acks', set()))
+            )
+            self.get_logger().info(
+                '[MISSION START WAIT] Waiting for vision reset ack: '
+                + ','.join(missing)
+            )
+            return
+        self.get_logger().info(
+            '[MISSION START WAIT] No first motion after '
+            f'{elapsed:.2f}s: line={len(self.line_buffer)}/3, '
+            f'ball={len(self.ball_buffer)}/3, '
+            f'hurdle={len(self.hurdle_buffer)}/3.'
+        )
+
     def _set_yolo_readiness(self, source, ready):
         attr_name = f'{source}_yolo_ready'
         ready = bool(ready)
@@ -295,6 +507,7 @@ class MainDecision(Node):
         # 쌓인 결과가 재준비 직후 의사결정에 섞이지 않게 즉시 버린다.
         if not stack_ready:
             MainDecision._reset_vision_decision_cycle(self)
+            MainDecision._maybe_log_mission_armed(self)
             if previous_stack_ready or previous_source_ready != ready:
                 self.get_logger().info(
                     '[VisionStartup] 보행 잠금: webcam/RealSense YOLO의 '
@@ -306,8 +519,9 @@ class MainDecision(Node):
             MainDecision._reset_vision_decision_cycle(self)
             self.get_logger().info(
                 '[VisionStartup] webcam/RealSense YOLO READY: '
-                '새 비전 프레임 3개를 모은 뒤 보행을 시작합니다.'
+                '초기자세 완료와 Enter 입력을 기다립니다.'
             )
+        MainDecision._maybe_log_mission_armed(self)
         return True
 
     def _set_webcam_ball_allowed(self, allowed, reason=''):
@@ -433,11 +647,15 @@ class MainDecision(Node):
         )
         if self.motion_ready and not was_ready:
             if MainDecision._vision_stack_ready(self):
-                self.get_logger().info("초기자세 완료 확인: 판단을 시작합니다.")
+                self.get_logger().info(
+                    "초기자세 완료 확인: Enter 입력을 기다립니다."
+                )
             else:
                 self.get_logger().info(
                     "초기자세 완료 확인: 두 YOLO 준비 전이므로 보행을 대기합니다."
                 )
+
+        MainDecision._maybe_log_mission_armed(self)
 
         # 모션 실행 중 쌓인 최신 비전 결과를 모션 종료 즉시 집계합니다.
         # 다음 line/ball/hurdle 콜백을 기다리지 않도록 모션이 실제로 종료되는 전환 시점에 한 번만 판단
@@ -454,12 +672,15 @@ class MainDecision(Node):
         
         
     def LineResultCallback(self, line_msg:LineResult):
+        if getattr(self, 'vision_reset_pending', False):
+            return
         self.latest_line_angle = line_msg.angle
         self.latest_line_follow_point = line_msg.follow_point
 
         if (
             not self.motion_ready
             or not MainDecision._vision_stack_ready(self)
+            or not MainDecision._mission_has_started(self)
         ):
             return
 
@@ -518,6 +739,8 @@ class MainDecision(Node):
             self.get_logger().info(f"line: motion not ended yet")
             
     def BallResultCallback(self, ball_msg:BallResult):
+        if getattr(self, 'vision_reset_pending', False):
+            return
         self.latest_ball_angle = ball_msg.angle
         self.latest_ball_in_hand = bool(
             getattr(ball_msg, 'ball_in_hand', False)
@@ -525,6 +748,8 @@ class MainDecision(Node):
         self.latest_goal_distance_cm = float(
             getattr(ball_msg, 'goal_distance_cm', 0.0)
         )
+        if not MainDecision._mission_has_started(self):
+            return
         self.ball_frame_sequence = getattr(
             self, 'ball_frame_sequence', 0
         ) + 1
@@ -550,6 +775,7 @@ class MainDecision(Node):
         if (
             not self.motion_ready
             or not MainDecision._vision_stack_ready(self)
+            or not MainDecision._mission_has_started(self)
         ):
             return
 
@@ -570,6 +796,7 @@ class MainDecision(Node):
             or result is None
             or not self.motion_ready
             or not self.motion_end
+            or not MainDecision._mission_has_started(self)
         ):
             return False
 
@@ -683,6 +910,8 @@ class MainDecision(Node):
         )
 
     def HurdleResultCallback(self, hurdle_msg:HurdleResult):
+        if getattr(self, 'vision_reset_pending', False):
+            return
         ignore_until = getattr(self, 'hurdle_ignore_until', None)
         ignore_hurdle = (
             ignore_until is None or time.monotonic() < ignore_until
@@ -719,6 +948,7 @@ class MainDecision(Node):
         if (
             not self.motion_ready
             or not MainDecision._vision_stack_ready(self)
+            or not MainDecision._mission_has_started(self)
         ):
             return
 
@@ -751,9 +981,12 @@ class MainDecision(Node):
         if getattr(self, 'pre_shoot_result_waiting', False):
             return False
         if (
+            getattr(self, 'vision_reset_pending', False)
+            or
             not self.motion_ready
             or not self.motion_end
             or not MainDecision._vision_stack_ready(self)
+            or not MainDecision._mission_has_started(self)
         ):
             return False
 
@@ -927,6 +1160,7 @@ class MainDecision(Node):
         if (
             not self.motion_ready
             or not MainDecision._vision_stack_ready(self)
+            or not MainDecision._mission_has_started(self)
         ):
             return
 
@@ -1603,6 +1837,17 @@ class MainDecision(Node):
         return True
 
     def MotionCommand(self):
+        if not MainDecision._mission_has_started(self):
+            self.get_logger().info(
+                "mission_started=false: Enter 입력 전에는 모션 명령을 보내지 않습니다."
+            )
+            return
+        if getattr(self, 'vision_reset_pending', False):
+            self.get_logger().info(
+                'vision_reset_pending=true: 새 프레임 수집 전이라 '
+                '모션 명령을 보내지 않습니다.'
+            )
+            return
         if not self.motion_ready:
             self.get_logger().info("motion_ready=false: 모션 명령을 보내지 않습니다.")
             return
@@ -1715,7 +1960,7 @@ class MainDecision(Node):
             motion_msg.command = Motion.Shoot_Close
 
         elif self.status == 33:
-                    motion_msg.command = Motion.Shoot_Mid
+                    motion_msg.command = Motion.Shoot_Forward
         
 
         if (
@@ -1753,6 +1998,18 @@ class MainDecision(Node):
             f"[MotionCommand] command={motion_msg.command}, "
             f"motion={motion_name}, mode={self.current_mode}"
         )
+        if getattr(self, 'first_motion_after_start_pending', False):
+            started_at = getattr(self, 'mission_started_at', None)
+            latency = (
+                time.monotonic() - started_at
+                if started_at is not None
+                else 0.0
+            )
+            self.first_motion_after_start_pending = False
+            self.get_logger().info(
+                f'[MISSION STARTED] First motion latency={latency:.3f}s, '
+                f'command={motion_msg.command} ({motion_name}).'
+            )
         
         self._reset_vision_decision_cycle()
         #test mode일 때는 true 로 유지

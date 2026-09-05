@@ -209,6 +209,9 @@ class BallVisionFusionWebcamTest(unittest.TestCase):
                     "center_y": 128.25,
                     "realsense_goal_distance_cm": 72.0,
                     "realsense_goal_angle": -1.75,
+                    "stamp_sec": 123.5,
+                    "raw_detected": True,
+                    "held_previous_detection": False,
                 }
             )
         )
@@ -217,6 +220,60 @@ class BallVisionFusionWebcamTest(unittest.TestCase):
 
         self.assertEqual(harness.latest_hoop["realsense_goal_x_px"], 415.5)
         self.assertEqual(harness.latest_hoop["realsense_goal_y_px"], 128.25)
+        self.assertEqual(
+            harness.latest_hoop["realsense_goal_frame_stamp_sec"], 123.5
+        )
+        self.assertTrue(
+            harness.latest_hoop["realsense_goal_raw_detected"]
+        )
+        self.assertFalse(
+            harness.latest_hoop[
+                "realsense_goal_held_previous_detection"
+            ]
+        )
+
+    def test_reset_generation_rejects_old_source_messages(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.messages = []
+
+            def publish(self, msg):
+                self.messages.append(msg.data)
+
+        recorder = Recorder()
+        harness = SimpleNamespace(
+            required_mission_reset_token='new-start',
+            mission_reset_waiting=True,
+            mission_reset_sources_seen=set(),
+            mission_reset_ack_pub=recorder,
+            get_logger=lambda: type(
+                'Logger',
+                (),
+                {'info': lambda *_args: None},
+            )(),
+        )
+
+        self.assertFalse(
+            BallVisionFusionNode._accept_mission_reset_source(
+                harness,
+                'webcam',
+                {'mission_reset_token': 'old-start'},
+            )
+        )
+        self.assertTrue(harness.mission_reset_waiting)
+        self.assertEqual(recorder.messages, [])
+
+        for source in ('webcam', 'realsense'):
+            self.assertTrue(
+                BallVisionFusionNode._accept_mission_reset_source(
+                    harness,
+                    source,
+                    {'mission_reset_token': 'new-start'},
+                )
+            )
+
+        self.assertFalse(harness.mission_reset_waiting)
+        self.assertEqual(recorder.messages, ['ball_fusion|new-start'])
 
 
 class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
@@ -322,6 +379,29 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         self._confirm_webcam_ball()
         self.assertTrue(self.publisher.webcam_ball_confirmed)
 
+    def test_mission_start_reset_clears_every_prestore_latch(self):
+        self._confirm_webcam_ball()
+        self.publisher.back_to_initial_done = True
+        self.publisher.pick_command_seen = True
+        self.publisher.ball_in_hand = True
+        self.publisher.shoot_initial_waiting = True
+        self.publisher.shoot_initial_done = True
+        self.publisher.shoot_command_seen = True
+        self.publisher.pre_shoot_distance_buffer.extend([70.0, 71.0])
+
+        self.publisher.reset_for_mission_start()
+
+        self.assertEqual(list(self.publisher.webcam_detection_buffer), [])
+        self.assertFalse(self.publisher.webcam_ball_confirmed)
+        self.assertFalse(self.publisher.back_to_initial_waiting)
+        self.assertFalse(self.publisher.back_to_initial_done)
+        self.assertFalse(self.publisher.pick_command_seen)
+        self.assertFalse(self.publisher.ball_in_hand)
+        self.assertFalse(self.publisher.shoot_initial_waiting)
+        self.assertFalse(self.publisher.shoot_initial_done)
+        self.assertFalse(self.publisher.shoot_command_seen)
+        self.assertEqual(list(self.publisher.pre_shoot_distance_buffer), [])
+
     def test_goal_distance_is_published_for_decision_threshold(self):
         self.publisher.publish_ball_status(
             realsense_goal_distance_cm=89.5,
@@ -361,11 +441,23 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
     def test_goal_pre_shoot_requests_initial_pose_once_within_80_cm(self):
         self.publisher.ball_in_hand = True
 
-        first = self.publisher.publish_ball_status(
-            realsense_goal_distance_cm=80.0,
-            realsense_goal_angle=0.0,
+        results = [
+            self.publisher.publish_ball_status(
+                realsense_goal_distance_cm=distance,
+                realsense_goal_angle=0.0,
+                realsense_goal_frame_stamp_sec=stamp,
+                realsense_goal_raw_detected=True,
+            )
+            for stamp, distance in enumerate((81.0, 80.0, 79.0), 1)
+        ]
+        self.assertEqual(
+            results,
+            [
+                (BallStatus.Forward_4step, 0.0),
+                (BallStatus.Forward_4step, 0.0),
+                (BallStatus.Back_To_Initial, 0.0),
+            ],
         )
-        self.assertEqual(first, (BallStatus.Back_To_Initial, 0.0))
 
         self._send_motion(BallStatus.Back_To_Initial)
         after_initial = self.publisher.publish_ball_status(
@@ -399,11 +491,18 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
     def test_too_close_goal_still_sets_pose_before_backward(self):
         self.publisher.ball_in_hand = True
 
-        first = self.publisher.publish_ball_status(
-            realsense_goal_distance_cm=50.0,
-            realsense_goal_angle=0.0,
+        results = [
+            self.publisher.publish_ball_status(
+                realsense_goal_distance_cm=50.0,
+                realsense_goal_angle=0.0,
+                realsense_goal_frame_stamp_sec=float(stamp),
+                realsense_goal_raw_detected=True,
+            )
+            for stamp in (1, 2, 3)
+        ]
+        self.assertEqual(
+            results[-1], (BallStatus.Back_To_Initial, 0.0)
         )
-        self.assertEqual(first, (BallStatus.Back_To_Initial, 0.0))
 
         self._send_motion(BallStatus.Back_To_Initial)
         after_initial = self.publisher.publish_ball_status(
@@ -411,6 +510,56 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
             realsense_goal_angle=0.0,
         )
         self.assertEqual(after_initial, (BallStatus.Backward_half, 0.0))
+
+    def test_single_low_distance_outlier_does_not_request_initial_pose(self):
+        self.publisher.ball_in_hand = True
+
+        results = [
+            self.publisher.publish_ball_status(
+                realsense_goal_distance_cm=distance,
+                realsense_goal_angle=0.0,
+                realsense_goal_frame_stamp_sec=stamp,
+                realsense_goal_raw_detected=True,
+            )
+            for stamp, distance in enumerate((90.0, 79.0, 88.0), 1)
+        ]
+
+        self.assertNotIn(
+            (BallStatus.Back_To_Initial, 0.0), results
+        )
+        self.assertFalse(self.publisher.shoot_initial_waiting)
+
+    def test_duplicate_and_held_goal_frames_are_not_counted(self):
+        self.publisher.ball_in_hand = True
+
+        first = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=79.0,
+            realsense_goal_angle=0.0,
+            realsense_goal_frame_stamp_sec=1.0,
+            realsense_goal_raw_detected=True,
+        )
+        duplicate = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=79.0,
+            realsense_goal_angle=0.0,
+            realsense_goal_frame_stamp_sec=1.0,
+            realsense_goal_raw_detected=True,
+        )
+        held = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=79.0,
+            realsense_goal_angle=0.0,
+            realsense_goal_frame_stamp_sec=2.0,
+            realsense_goal_raw_detected=False,
+            realsense_goal_held_previous_detection=True,
+        )
+
+        self.assertEqual(
+            [first, duplicate, held],
+            [(BallStatus.Forward_4step, 0.0)] * 3,
+        )
+        self.assertEqual(
+            list(self.publisher.pre_shoot_distance_buffer), [79.0]
+        )
+        self.assertFalse(self.publisher.shoot_initial_waiting)
 
     def test_initial_pose_is_locked_after_motion_command_confirmation(self):
         self._confirm_webcam_ball()

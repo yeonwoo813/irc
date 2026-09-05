@@ -265,6 +265,7 @@ class RealSenseYoloDetector(Node):
         # OFF -> ON 순서로 모드를 전환하는 짧은 구간에도 마지막 화면을
         # 유지한다. 화면 토픽 이름은 바뀌지 않고 패널 내용만 전환된다.
         self.display_mode = "ball"
+        self.mission_reset_token = ""
         self.last_inference_time = 0.0
         self.frame_count = 0
         self.latest_ball_detection: Optional[Detection] = None
@@ -373,6 +374,22 @@ class RealSenseYoloDetector(Node):
             self.cb_hoop_active,
             self.activity_qos,
         )
+        reset_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.mission_reset_sub = self.create_subscription(
+            String,
+            "/mission/vision_reset",
+            self.cb_mission_vision_reset,
+            reset_qos,
+        )
+        self.mission_reset_ack_pub = self.create_publisher(
+            String,
+            "/mission/vision_reset_ack",
+            reset_qos,
+        )
 
         self.color_sub = Subscriber(
             self,
@@ -418,6 +435,29 @@ class RealSenseYoloDetector(Node):
                 f"CameraInfo fx={self.fx:.2f} fy={self.fy:.2f} "
                 f"cx={self.cx_intr:.2f} cy={self.cy_intr:.2f}"
             )
+
+    def cb_mission_vision_reset(self, msg: String) -> None:
+        token = str(msg.data)
+        if not token:
+            return
+        self.mission_reset_token = token
+        self._reset_ball_detection_hold()
+        self._reset_backboard_detection_hold()
+        self._reset_ball_loss_tracking(clear_last_valid=True)
+        self.latest_ball_detection = None
+        self.latest_backboard_detection = None
+        self.latest_raw_ball_candidate = None
+        self.latest_ball_state = self._empty_ball_state(self.ball_active)
+        self.latest_hoop_state = self._empty_hoop_state(self.hoop_active)
+        self.latest_process_ms = 0.0
+        self.last_inference_time = 0.0
+        self.mission_reset_ack_pub.publish(
+            String(data=f"realsense_yolo|{token}")
+        )
+        self.get_logger().info(
+            "Mission start reset: cleared RealSense ball/backboard holds "
+            "and cached detections."
+        )
 
     def cb_ball_active(self, msg: Bool) -> None:
         requested = bool(msg.data)
@@ -1117,12 +1157,24 @@ class RealSenseYoloDetector(Node):
         }
 
     def _publish_ball_state(self, state: Dict[str, object]) -> None:
+        state = dict(state)
+        state["mission_reset_token"] = getattr(
+            self,
+            "mission_reset_token",
+            "",
+        )
         self.ball_state_pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
         self.ball_detected_pub.publish(
             Bool(data=bool(state.get("realsense_ball_detected", False)))
         )
 
     def _publish_hoop_state(self, state: Dict[str, object]) -> None:
+        state = dict(state)
+        state["mission_reset_token"] = getattr(
+            self,
+            "mission_reset_token",
+            "",
+        )
         self.hoop_state_pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
         self.hoop_detected_pub.publish(Bool(data=bool(state.get("detected", False))))
 

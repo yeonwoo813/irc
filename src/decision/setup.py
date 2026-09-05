@@ -24,7 +24,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'main_decision = decision.main_decision:main'
+            'main_decision = decision.main_decision:main',
+            (
+                'mission_start_keyboard = '
+                'decision.mission_start_keyboard:main'
+            ),
         ],
     },
 )

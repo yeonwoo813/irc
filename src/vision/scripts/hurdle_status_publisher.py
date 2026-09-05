@@ -8,6 +8,7 @@ from msgs.msg import HurdleResult, MotionCommand, MotionEnd
 
 
 class HurdleStatus:
+    Initial_Pose = 0
     Hurdle_Go = 19
     Left_Turn_10 = 23
     Right_Turn_10 = 24
@@ -125,6 +126,7 @@ class HurdleStatusPublisher:
         topic_name: str = 'hurdle_result',
         post_crossing_cooldown_sec: float = 2.0,
         monotonic_clock: Optional[Callable[[], float]] = None,
+        startup_ignore_sec: float = 3.0,
     ):
         self.node = node
         self.hurdle_decision = HurdleDecision()
@@ -133,6 +135,9 @@ class HurdleStatusPublisher:
             float(post_crossing_cooldown_sec),
         )
         self._clock = monotonic_clock or time.monotonic
+        self.startup_ignore_sec = max(0.0, float(startup_ignore_sec))
+        self._startup_ignore_until: Optional[float] = None
+        self._startup_gate_open = self.startup_ignore_sec <= 0.0
         self._crossing_active = False
         self._crossing_started = False
         self._cooldown_until = 0.0
@@ -164,8 +169,66 @@ class HurdleStatusPublisher:
         if callable(get_logger):
             get_logger().info(message)
 
+    def _reset_hurdle_detection(self) -> None:
+        """Drop both raw votes and every state derived from those votes."""
+        self.hurdle_detected = False
+        self.hurdle_detection_buffer.clear()
+        self.hurdle_decision.reset_detection_cycle()
+
+    def reset_for_mission_start(self) -> None:
+        """Restore the complete pre-motion hurdle suppression state."""
+        self._startup_ignore_until = None
+        self._startup_gate_open = self.startup_ignore_sec <= 0.0
+        self._crossing_active = False
+        self._crossing_started = False
+        self._cooldown_until = 0.0
+        self._latest_motion_end = None
+        self._reset_hurdle_detection()
+        self._log_info(
+            "Mission start reset: cleared hurdle votes and latches; "
+            "startup suppression is armed."
+        )
+
+    def _startup_suppression_active(self) -> bool:
+        if self._startup_gate_open:
+            return False
+        if self._startup_ignore_until is None:
+            return True
+        if self._clock() < self._startup_ignore_until:
+            return True
+
+        # 출발선에서 얻은 raw vote와 확정 latch를 한 번 더 폐기한 뒤,
+        # 이 시점 이후에 도착한 새 프레임만 허들 판단에 사용합니다.
+        self._reset_hurdle_detection()
+        self._startup_gate_open = True
+        self._log_info(
+            "Startup hurdle suppression ended; detection restarts with "
+            "fresh frames."
+        )
+        return False
+
     def _motion_command_callback(self, msg: MotionCommand) -> None:
         command = int(msg.command)
+
+        if not self._startup_gate_open:
+            if self._startup_ignore_until is None:
+                if command == HurdleStatus.Initial_Pose:
+                    # 초기자세 중에는 타이머도 시작하지 않고 계속 폐기합니다.
+                    self._reset_hurdle_detection()
+                    return
+                self._startup_ignore_until = (
+                    self._clock() + self.startup_ignore_sec
+                )
+                self._reset_hurdle_detection()
+                self._log_info(
+                    "Startup hurdle suppression started for "
+                    f"{self.startup_ignore_sec:.1f}s after first motion."
+                )
+
+            # 금지 구간의 motion command도 허들 정렬 상태에 반영하지 않습니다.
+            if self._startup_suppression_active():
+                self._reset_hurdle_detection()
+                return
 
         if command == HurdleStatus.Hurdle_Go:
             self._crossing_active = True
@@ -208,9 +271,7 @@ class HurdleStatusPublisher:
 
         self._crossing_active = False
         self._crossing_started = False
-        self.hurdle_detected = False
-        self.hurdle_detection_buffer.clear()
-        self.hurdle_decision.reset_detection_cycle()
+        self._reset_hurdle_detection()
         self._cooldown_until = (
             self._clock() + self.post_crossing_cooldown_sec
         )
@@ -221,6 +282,8 @@ class HurdleStatusPublisher:
         )
 
     def suppression_reason(self) -> Optional[str]:
+        if self._startup_suppression_active():
+            return 'startup'
         if self._crossing_active:
             return 'crossing'
         if self._clock() < self._cooldown_until:
@@ -241,7 +304,11 @@ class HurdleStatusPublisher:
         line_second_point_distance_px: float = 0.0,
         line_angle_deg: float = 0.0,
     ) -> Tuple[int, float, bool]:
-        if self.suppression_reason() is not None:
+        suppression_reason = self.suppression_reason()
+        if suppression_reason is not None:
+            if suppression_reason == 'startup':
+                # 출발선 검출은 False 샘플로도 저장하지 않고 완전히 버립니다.
+                self._reset_hurdle_detection()
             status, angle, ready = (
                 HurdleStatus.Hurdle_None,
                 0.0,

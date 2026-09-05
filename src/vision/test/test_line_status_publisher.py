@@ -312,15 +312,58 @@ class CurveDistancePriorityTest(unittest.TestCase):
             angle,
             features.line_angle
             + min(
-                self.decision.steering_limit,
+                self.decision.large_offset_steering_limit,
                 math.degrees(
                     math.atan(
                         features.line_distance
-                        / self.decision.steering_scale_px
+                        / self.decision.large_offset_steering_scale_px
                     )
                 ),
             ),
         )
+
+    def test_large_right_offset_from_run_uses_right_half_forward(self) -> None:
+        cases = (
+            (160.6, -1.3),
+            (234.9, -4.0),
+        )
+
+        for distance, line_angle in cases:
+            with self.subTest(distance=distance, angle=line_angle):
+                features = self._curve_features(distance)
+                features.curve_a = 0.0
+                features.line_angle = line_angle
+
+                status, angle = self.decision.decide(features)
+
+                self.assertEqual(status, LineStatus.Right_Half_Forward)
+                self.assertGreater(angle, self.decision.forward_angle)
+
+    def test_large_left_offset_uses_left_half_forward(self) -> None:
+        features = self._curve_features(-160.6)
+        features.curve_a = 0.0
+        features.line_angle = 1.3
+
+        status, angle = self.decision.decide(features)
+
+        self.assertEqual(status, LineStatus.Left_Half_Forward)
+        self.assertGreater(angle, self.decision.forward_angle)
+
+    def test_normal_offset_keeps_original_straight_steering(self) -> None:
+        features = self._curve_features(149.9)
+        features.curve_a = 0.0
+        features.line_angle = -1.3
+
+        status, angle = self.decision.decide(features)
+
+        expected = features.line_angle + math.degrees(
+            math.atan(
+                features.line_distance / self.decision.steering_scale_px
+            )
+        )
+        self.assertEqual(status, LineStatus.Forward_4step)
+        self.assertEqual(angle, 0.0)
+        self.assertLessEqual(abs(expected), self.decision.forward_angle)
 
     def test_straight_far_above_30_degrees_uses_combined_steering(self) -> None:
         features = self._curve_features(

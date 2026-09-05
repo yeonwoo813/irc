@@ -74,6 +74,12 @@ class LineDecision:
         self.steering_scale_px = 1200.0
         self.steering_limit = 10.0 
 
+        # 평상시 조향감은 유지하고, 라인이 화면 좌우로 크게 밀린
+        # 직선 구간에서만 거리 보정을 조금 강하게 적용한다.
+        self.large_offset_distance = 150.0
+        self.large_offset_steering_scale_px = 1000.0
+        self.large_offset_steering_limit = 12.0
+
         # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
         self.curve_forward_angle = 7.0
         self.curve_fine_turn_angle = 25.0
@@ -253,15 +259,22 @@ class LineDecision:
     ) -> Tuple[int, float]:
         """Combine only meaningful, opposite straight-line errors."""
 
+        if abs(line_distance) >= self.large_offset_distance:
+            steering_scale_px = self.large_offset_steering_scale_px
+            steering_limit = self.large_offset_steering_limit
+        else:
+            steering_scale_px = self.steering_scale_px
+            steering_limit = self.steering_limit
+
         distance_angle = math.degrees(
             math.atan(
                 line_distance
-                / self.steering_scale_px
+                / steering_scale_px
             )
         )
         distance_angle = max(
-            -self.steering_limit,
-            min(self.steering_limit, distance_angle),
+            -steering_limit,
+            min(steering_limit, distance_angle),
         )
         steering_angle = line_angle + distance_angle
         return self._status_from_line_angle(steering_angle)

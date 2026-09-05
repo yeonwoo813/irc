@@ -235,7 +235,7 @@ class HurdlePublisherTest(unittest.TestCase):
                 return object()
 
         node = FakeNode()
-        publisher = HurdleStatusPublisher(node)
+        publisher = HurdleStatusPublisher(node, startup_ignore_sec=0.0)
 
         before_confirmation = []
         for detected in (True, False, True, False):
@@ -309,6 +309,110 @@ class HurdlePublisherTest(unittest.TestCase):
         self.assertEqual(node.recorder.messages[-1].angle, 0.0)
         self.assertTrue(node.recorder.messages[-1].hurdle_ready)
 
+    def test_startup_gate_discards_start_line_until_three_seconds_after_motion(
+        self,
+    ) -> None:
+        class Recorder:
+            def __init__(self):
+                self.messages = []
+
+            def publish(self, msg):
+                self.messages.append(msg)
+
+        class FakeNode:
+            def __init__(self):
+                self.recorder = Recorder()
+                self.callbacks = {}
+
+            def create_publisher(self, _msg_type, _topic_name, _depth):
+                return self.recorder
+
+            def create_subscription(
+                self,
+                _msg_type,
+                topic_name,
+                callback,
+                _depth,
+            ):
+                self.callbacks[topic_name] = callback
+                return object()
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 100.0
+
+            def __call__(self):
+                return self.now
+
+        class FakeMotionCommand:
+            def __init__(self, command):
+                self.command = command
+
+        clock = FakeClock()
+        node = FakeNode()
+        publisher = HurdleStatusPublisher(
+            node,
+            monotonic_clock=clock,
+            startup_ignore_sec=3.0,
+        )
+
+        # 초기자세 전후로 출발선이 계속 보여도 raw vote를 저장하지 않는다.
+        before_motion = [
+            publisher.publish_hurdle_status(True, line_point_count=2)
+            for _ in range(5)
+        ]
+        node.callbacks["motion_command"](
+            FakeMotionCommand(HurdleStatus.Initial_Pose)
+        )
+        during_initial_pose = publisher.publish_hurdle_status(
+            True,
+            line_point_count=2,
+        )
+
+        self.assertEqual(
+            before_motion,
+            [(HurdleStatus.Hurdle_None, 0.0, False)] * 5,
+        )
+        self.assertEqual(
+            during_initial_pose,
+            (HurdleStatus.Hurdle_None, 0.0, False),
+        )
+        self.assertFalse(publisher.hurdle_detected)
+        self.assertEqual(list(publisher.hurdle_detection_buffer), [])
+        self.assertFalse(publisher.hurdle_decision.back_to_initial_waiting)
+
+        # 첫 실제 모션부터 3초 동안에도 출발선 검출은 전부 폐기한다.
+        node.callbacks["motion_command"](FakeMotionCommand(1))
+        for now in (100.0, 101.0, 102.999):
+            clock.now = now
+            self.assertEqual(
+                publisher.publish_hurdle_status(True, line_point_count=2),
+                (HurdleStatus.Hurdle_None, 0.0, False),
+            )
+            self.assertFalse(publisher.hurdle_detected)
+            self.assertEqual(list(publisher.hurdle_detection_buffer), [])
+
+        # 3초 이후에는 그때 도착한 새 프레임 5개만으로 3/5를 판단한다.
+        clock.now = 103.0
+        fresh_results = [
+            publisher.publish_hurdle_status(detected, line_point_count=2)
+            for detected in (False, True, True, False, True)
+        ]
+
+        self.assertEqual(
+            fresh_results[:4],
+            [(HurdleStatus.Hurdle_None, 0.0, False)] * 4,
+        )
+        self.assertEqual(
+            fresh_results[4],
+            (HurdleStatus.Back_To_Initial, 0.0, False),
+        )
+        self.assertTrue(publisher.hurdle_detected)
+        self.assertEqual(
+            list(publisher.hurdle_detection_buffer),
+            [False, True, True, False, True],
+        )
+
     def test_hurdle_go_suppresses_detection_until_two_seconds_after_end(
         self,
     ) -> None:
@@ -359,6 +463,7 @@ class HurdlePublisherTest(unittest.TestCase):
             node,
             post_crossing_cooldown_sec=2.0,
             monotonic_clock=clock,
+            startup_ignore_sec=0.0,
         )
 
         for detected in (True, False, True, False, True):
@@ -483,6 +588,7 @@ class HurdlePublisherTest(unittest.TestCase):
             node,
             post_crossing_cooldown_sec=2.0,
             monotonic_clock=clock,
+            startup_ignore_sec=0.0,
         )
 
         # motion 노드가 19번 명령을 먼저 처리한 전달 순서를 재현합니다.
@@ -495,6 +601,50 @@ class HurdlePublisherTest(unittest.TestCase):
 
         clock.now = 12.0
         self.assertIsNone(publisher.suppression_reason())
+
+    def test_mission_start_reset_rearms_suppression_and_clears_latches(self):
+        class Recorder:
+            def publish(self, _msg):
+                pass
+
+        class FakeNode:
+            def __init__(self):
+                self.callbacks = {}
+
+            def create_publisher(self, _msg_type, _topic_name, _depth):
+                return Recorder()
+
+            def create_subscription(
+                self,
+                _msg_type,
+                topic_name,
+                callback,
+                _depth,
+            ):
+                self.callbacks[topic_name] = callback
+                return object()
+
+            def get_logger(self):
+                return type('Logger', (), {'info': lambda *_args: None})()
+
+        publisher = HurdleStatusPublisher(FakeNode(), startup_ignore_sec=3.0)
+        publisher._startup_gate_open = True
+        publisher._startup_ignore_until = 123.0
+        publisher._crossing_active = True
+        publisher._cooldown_until = 456.0
+        publisher.hurdle_detected = True
+        publisher.hurdle_detection_buffer.extend([True] * 5)
+        publisher.hurdle_decision.back_to_initial_waiting = True
+
+        publisher.reset_for_mission_start()
+
+        self.assertFalse(publisher._startup_gate_open)
+        self.assertIsNone(publisher._startup_ignore_until)
+        self.assertFalse(publisher._crossing_active)
+        self.assertEqual(publisher._cooldown_until, 0.0)
+        self.assertFalse(publisher.hurdle_detected)
+        self.assertEqual(list(publisher.hurdle_detection_buffer), [])
+        self.assertFalse(publisher.hurdle_decision.back_to_initial_waiting)
 
 
 class HurdleLineGeometryTest(unittest.TestCase):

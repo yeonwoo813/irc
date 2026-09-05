@@ -16,6 +16,10 @@ def _startup_gate_harness():
     logger = _Logger()
     harness = SimpleNamespace(
         test_mode=False,
+        mission_started=False,
+        mission_armed_logged=False,
+        motion_ready=False,
+        motion_end=False,
         webcam_yolo_ready=False,
         realsense_yolo_ready=False,
         line_data=True,
@@ -24,6 +28,7 @@ def _startup_gate_harness():
         line_buffer=deque([1, 1, 1], maxlen=5),
         line_vote_detail_buffer=deque([{"status": 1}], maxlen=5),
         ball_buffer=deque([99, 99, 99], maxlen=5),
+        ball_vote_detail_buffer=deque([{"status": 99}], maxlen=5),
         hurdle_buffer=deque([99, 99, 99], maxlen=5),
         hurdle_ready_buffer=deque([False, False, False], maxlen=5),
         get_logger=lambda: logger,
@@ -52,17 +57,125 @@ def test_startup_gate_waits_for_both_yolo_first_inferences():
     assert list(harness.line_buffer) == []
     assert list(harness.ball_buffer) == []
     assert list(harness.hurdle_buffer) == []
-    assert any("새 비전 프레임 3개" in message for message in logger.messages)
+    assert '[MISSION ARMED] Press Enter to start' not in logger.messages
+
+    harness.motion_ready = True
+    harness.motion_end = True
+    assert MainDecision._maybe_log_mission_armed(harness) is True
+    assert logger.messages.count('[MISSION ARMED] Press Enter to start') == 1
+
+    assert MainDecision._maybe_log_mission_armed(harness) is False
+    assert logger.messages.count('[MISSION ARMED] Press Enter to start') == 1
 
 
 def test_motion_command_is_blocked_before_both_yolo_are_ready():
     harness, logger = _startup_gate_harness()
+    harness.mission_started = True
     harness.motion_ready = True
     harness.status = Motion.Forward_4step
 
     MainDecision.MotionCommand(harness)
 
     assert any("vision_startup=false" in message for message in logger.messages)
+
+
+def test_mission_start_is_rejected_until_initial_pose_and_yolo_are_ready():
+    harness, logger = _startup_gate_harness()
+    response = SimpleNamespace(success=None, message='')
+
+    result = MainDecision.MissionStartCallback(harness, None, response)
+
+    assert result is response
+    assert response.success is False
+    assert harness.mission_started is False
+    assert any(
+        '[MISSION START REJECTED]' in message
+        for message in logger.messages
+    )
+
+
+def test_mission_start_clears_prestart_vision_and_opens_gate():
+    harness, logger = _startup_gate_harness()
+    harness.webcam_yolo_ready = True
+    harness.realsense_yolo_ready = True
+    harness.motion_ready = True
+    harness.motion_end = True
+    response = SimpleNamespace(success=None, message='')
+
+    result = MainDecision.MissionStartCallback(harness, None, response)
+
+    assert result is response
+    assert response.success is True
+    assert harness.mission_started is True
+    assert harness.first_motion_after_start_pending is True
+    assert harness.current_mode == 'WaitingMode'
+    assert list(harness.line_buffer) == []
+    assert list(harness.line_vote_detail_buffer) == []
+    assert list(harness.ball_buffer) == []
+    assert list(harness.ball_vote_detail_buffer) == []
+    assert list(harness.hurdle_buffer) == []
+    assert list(harness.hurdle_ready_buffer) == []
+    assert any('[MISSION START]' in message for message in logger.messages)
+
+
+def test_first_frames_are_blocked_until_every_vision_reset_ack_arrives():
+    harness, logger = _startup_gate_harness()
+    harness.mission_started = True
+    harness.vision_reset_pending = True
+    harness.vision_reset_token = 'start-1'
+    harness.vision_reset_acks = set()
+    harness.line_buffer.clear()
+    harness.ball_buffer.clear()
+    harness.hurdle_buffer.clear()
+
+    for participant in sorted(MainDecision.VISION_RESET_PARTICIPANTS)[:-1]:
+        MainDecision.VisionResetAckCallback(
+            harness,
+            SimpleNamespace(data=f'{participant}|start-1'),
+        )
+        assert harness.vision_reset_pending is True
+
+    final_participant = sorted(MainDecision.VISION_RESET_PARTICIPANTS)[-1]
+    MainDecision.VisionResetAckCallback(
+        harness,
+        SimpleNamespace(data=f'{final_participant}|start-1'),
+    )
+
+    assert harness.vision_reset_pending is False
+    assert list(harness.line_buffer) == []
+    assert list(harness.ball_buffer) == []
+    assert list(harness.hurdle_buffer) == []
+    assert any('[MISSION VISION RESET]' in message for message in logger.messages)
+
+
+def test_prestart_vision_and_motion_command_are_ignored():
+    harness, logger = _startup_gate_harness()
+    harness.webcam_yolo_ready = True
+    harness.realsense_yolo_ready = True
+    harness.motion_ready = True
+    harness.motion_end = True
+    harness.status = Motion.Forward_4step
+
+    MainDecision.LineResultCallback(
+        harness,
+        SimpleNamespace(angle=1.0, follow_point=True, status=1),
+    )
+    MainDecision.BallResultCallback(
+        harness,
+        SimpleNamespace(
+            angle=0.0,
+            ball_in_hand=False,
+            goal_distance_cm=0.0,
+            status=99,
+        ),
+    )
+    MainDecision.MotionCommand(harness)
+
+    assert list(harness.line_buffer) == [1, 1, 1]
+    assert list(harness.ball_buffer) == [99, 99, 99]
+    assert any(
+        'mission_started=false' in message for message in logger.messages
+    )
 
 
 class _Publisher:

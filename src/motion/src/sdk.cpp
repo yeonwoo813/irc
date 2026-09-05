@@ -1146,8 +1146,8 @@ void SDK_Motion::define_motions()
         BlendType::Stop, BlendType::Stop, BlendType::Smooth,
         BlendType::Stop, BlendType::Stop, BlendType::Stop,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
-        BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
+        BlendType::Smooth, BlendType::Stop, BlendType::Stop,
+        BlendType::Stop, BlendType::Stop, BlendType::Smooth,
         BlendType::Smooth, BlendType::Smooth, BlendType::Smooth,
         BlendType::Smooth, BlendType::Smooth
     };
@@ -1555,7 +1555,7 @@ void SDK_Motion::define_motions()
         0.04,
         0.04,
         0.04,
-        1.0
+        1.2 
     };
 
     motion_return_default.blends =
@@ -1723,28 +1723,52 @@ void SDK_Motion::define_motions()
     motion_library_[32] = motion_throw_close;
 
     // ----------------------------------------------------------
-    // 모션 33번: 중간 거리에서 던지기
+    // 모션 33번: 슛 전용 미세걷기
     // ----------------------------------------------------------
-    MotionSequence motion_throw_medium;
+    MotionSequence motion_shoot_mode_walk;
 
-    motion_throw_medium.poses =
+    const std::vector<std::vector<double>> shoot_mode_walk_cycle =
     {
-        {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
-        {2064,1371,2253,2216,2045,2082,2745,1699,1469,2050,2048,2115,2061,1590,2007,2061,38,2436,3079,2144,1984,1965},
-        {2065,1376,2252,2215,2050,2082,2744,1698,1475,2049,2045,2105,2057,1591,1463,2081,13,2436,3077,2144,1984,1965},
-        {2066,1372,2251,2220,2050,2082,2750,1699,1472,2049,2046,2119,2058,1076,2236,2123,727,2436,3075,2144,1984,1965}
+        {2061,1244,2297,2099,2060,2079,2898,1707,1669,2049,2024,2105,2012,1648,1037,1967,2108,2436,3069,2144,1978,1965},
+        {2054,1242,2312,2106,2053,2034,2885,1424,1363,2013,2022,2109,2002,1649,1039,1967,2108,2436,3067,2144,1976,1965},
+        {2054,1251,2336,2087,2051,2041,2763,1616,1508,2024,2017,2109,2016,1652,1049,1970,2116,2435,3060,2144,1970,1965},
+        {2050,1200,2280,2062,2050,2047,2846,1647,1515,2024,2016,2094,2018,1651,1051,1971,2117,2435,3058,2145,1972,1964},
+        {2052,1134,2523,2232,2051,2042,2846,1687,1591,2008,2039,2107,2033,1651,1049,1975,2119,2436,3061,2144,1972,1964},
+        {2045,1306,2346,2152,2049,2049,2848,1644,1608,2029,2066,2100,2058,1654,1062,1978,2127,2435,3051,2143,1964,1965}
     };
 
-    motion_throw_medium.durations = {0.5, 1.0, 0.1, 0.15};
-    motion_throw_medium.blends =
+    for (int repeat = 0; repeat < 2; ++repeat)
     {
-        BlendType::Smooth,
-        BlendType::Stop,
-        BlendType::Stop,
-        BlendType::Smooth
-    };
+        motion_shoot_mode_walk.poses.insert(
+            motion_shoot_mode_walk.poses.end(),
+            shoot_mode_walk_cycle.begin(),
+            shoot_mode_walk_cycle.end());
+        motion_shoot_mode_walk.durations.insert(
+            motion_shoot_mode_walk.durations.end(),
+            {0.045, 0.045, 0.045, 0.07, 0.07, 0.07});
+        motion_shoot_mode_walk.blends.insert(
+            motion_shoot_mode_walk.blends.end(),
+            {BlendType::Stop, BlendType::Stop, BlendType::Stop,
+             BlendType::Stop, BlendType::Stop, BlendType::Stop});
+    }
 
-    motion_library_[33] = motion_throw_medium;
+    motion_shoot_mode_walk.poses.insert(
+        motion_shoot_mode_walk.poses.end(),
+        {
+            {2049,1336,2302,2281,2045,2040,2883,1694,1566,1976,2069,2117,2051,1653,1068,1977,2122,2429,3049,2143,1974,1960},
+            {2051,1336,2304,2276,2040,2041,2915,1334,1260,1994,2069,2117,2033,1654,1070,1978,2122,2429,3046,2143,1975,1960},
+            {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
+            {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965}
+        });
+
+    motion_shoot_mode_walk.durations.insert(
+        motion_shoot_mode_walk.durations.end(),
+        {0.04, 0.04, 0.04, 0.8});
+    motion_shoot_mode_walk.blends.insert(
+        motion_shoot_mode_walk.blends.end(),
+        {BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Smooth});
+
+    motion_library_[33] = motion_shoot_mode_walk;
 
 }
 

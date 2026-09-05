@@ -121,7 +121,16 @@ def generate_launch_description():
                 ],
                 parameters=[{'test_mode': decision_test_mode}],
                 arguments=['--ros-args', '--log-level', 'info'],
-            )
+            ),
+            Node(
+                condition=IfCondition(use_decision),
+                package='decision',
+                executable='mission_start_keyboard',
+                name='mission_start_keyboard',
+                output='screen',
+                emulate_tty=True,
+                arguments=['--ros-args', '--log-level', 'info'],
+            ),
         ],
     )
 

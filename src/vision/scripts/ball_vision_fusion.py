@@ -106,6 +106,9 @@ class BallVisionFusionNode(Node):
         self.ball_detection_active = bool(
             self.get_parameter("active_on_start").value
         )
+        self.required_mission_reset_token = ""
+        self.mission_reset_waiting = False
+        self.mission_reset_sources_seen = set()
 
         activity_qos = QoSProfile(
             depth=1,
@@ -148,6 +151,22 @@ class BallVisionFusionNode(Node):
             self.cb_raw_ball_in_hand,
             10,
         )
+        reset_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.mission_reset_sub = self.create_subscription(
+            String,
+            "/mission/vision_reset",
+            self.cb_mission_vision_reset,
+            reset_qos,
+        )
+        self.mission_reset_ack_pub = self.create_publisher(
+            String,
+            "/mission/vision_reset_ack",
+            reset_qos,
+        )
         self.ball_status_publisher = BallStatusPublisher(
             self, topic_name=self.ball_result_topic
         )
@@ -169,6 +188,51 @@ class BallVisionFusionNode(Node):
         self.latest_realsense_time = 0.0
         self.latest_webcam = None
         self.latest_webcam_time = 0.0
+
+    def cb_mission_vision_reset(self, msg: String) -> None:
+        token = str(msg.data)
+        if not token:
+            return
+        self.required_mission_reset_token = token
+        self.mission_reset_waiting = True
+        self.mission_reset_sources_seen = set()
+        self._clear_ball_detection_state()
+        self.latest_hoop = None
+        self.latest_hoop_time = 0.0
+        self.ball_in_hand = False
+        self.frame_count = 0
+        self.last_realsense_diagnostic_label = None
+        self._set_webcam_ball_active(False, "mission start reset")
+        self.ball_status_publisher.reset_for_mission_start()
+        self.get_logger().info(
+            "Mission start reset: waiting for fresh webcam and RealSense "
+            "frames."
+        )
+
+    def _accept_mission_reset_source(
+        self,
+        source: str,
+        payload: Dict[str, Any],
+    ) -> bool:
+        required = getattr(self, "required_mission_reset_token", "")
+        if required and str(payload.get("mission_reset_token", "")) != required:
+            return False
+        if not getattr(self, "mission_reset_waiting", False):
+            return True
+
+        self.mission_reset_sources_seen.add(source)
+        if {"webcam", "realsense"}.issubset(
+            self.mission_reset_sources_seen
+        ):
+            self.mission_reset_waiting = False
+            self.mission_reset_ack_pub.publish(
+                String(data=f"ball_fusion|{required}")
+            )
+            self.get_logger().info(
+                "Mission start reset complete: fresh webcam and RealSense "
+                "frames received."
+            )
+        return True
 
     def _set_webcam_ball_active(self, enabled: bool, reason: str) -> bool:
         enabled = bool(enabled)
@@ -222,6 +286,12 @@ class BallVisionFusionNode(Node):
             self.get_logger().warning("Invalid RealSense YOLO state JSON")
             return
         if not isinstance(payload, dict):
+            return
+        if not BallVisionFusionNode._accept_mission_reset_source(
+            self,
+            "realsense",
+            payload,
+        ):
             return
 
         state = self._empty_realsense_state(True)
@@ -298,6 +368,12 @@ class BallVisionFusionNode(Node):
             self.get_logger().warning("Invalid webcam YOLO state JSON")
             return
         if not isinstance(payload, dict):
+            return
+        if not BallVisionFusionNode._accept_mission_reset_source(
+            self,
+            "webcam",
+            payload,
+        ):
             return
         if not bool(payload.get("ball_detected", False)):
             self.latest_webcam = self._empty_webcam_state()
@@ -379,7 +455,12 @@ class BallVisionFusionNode(Node):
         except (json.JSONDecodeError, TypeError):
             self.get_logger().warning("Invalid hoop YOLO state JSON")
             return
-        if not isinstance(payload, dict) or not bool(payload.get("detected")):
+        if not isinstance(payload, dict):
+            return
+        required = getattr(self, "required_mission_reset_token", "")
+        if required and str(payload.get("mission_reset_token", "")) != required:
+            return
+        if not bool(payload.get("detected")):
             self.latest_hoop = self._empty_hoop_state()
             self.latest_hoop_time = now
             return
@@ -394,6 +475,15 @@ class BallVisionFusionNode(Node):
                 "realsense_goal_angle": angle,
                 "realsense_goal_x_px": self._finite(payload, "center_x"),
                 "realsense_goal_y_px": self._finite(payload, "center_y"),
+                "realsense_goal_frame_stamp_sec": self._finite(
+                    payload, "stamp_sec"
+                ),
+                "realsense_goal_raw_detected": bool(
+                    payload.get("raw_detected", True)
+                ),
+                "realsense_goal_held_previous_detection": bool(
+                    payload.get("held_previous_detection", False)
+                ),
             }
         self.latest_hoop_time = now
 
@@ -405,9 +495,14 @@ class BallVisionFusionNode(Node):
             "realsense_goal_angle": None,
             "realsense_goal_x_px": None,
             "realsense_goal_y_px": None,
+            "realsense_goal_frame_stamp_sec": None,
+            "realsense_goal_raw_detected": False,
+            "realsense_goal_held_previous_detection": False,
         }
 
     def cb_raw_ball_in_hand(self, msg: Bool) -> None:
+        if getattr(self, "mission_reset_waiting", False):
+            return
         self.ball_in_hand = bool(msg.data)
 
     def _published_realsense_diagnostic(
@@ -458,6 +553,8 @@ class BallVisionFusionNode(Node):
             self.get_logger().info(f"[RealSenseBallDiagnostic] {label}")
 
     def publish_ball_features(self) -> None:
+        if getattr(self, "mission_reset_waiting", False):
+            return
         now = time.monotonic()
         rs_age = self._age(
             now, self.latest_realsense, self.latest_realsense_time
@@ -503,6 +600,9 @@ class BallVisionFusionNode(Node):
             "realsense_goal_angle": None,
             "realsense_goal_x_px": None,
             "realsense_goal_y_px": None,
+            "realsense_goal_frame_stamp_sec": None,
+            "realsense_goal_raw_detected": False,
+            "realsense_goal_held_previous_detection": False,
         }
         if rs_valid:
             for key in (
@@ -528,6 +628,9 @@ class BallVisionFusionNode(Node):
                 "realsense_goal_angle",
                 "realsense_goal_x_px",
                 "realsense_goal_y_px",
+                "realsense_goal_frame_stamp_sec",
+                "realsense_goal_raw_detected",
+                "realsense_goal_held_previous_detection",
             ):
                 features[key] = self.latest_hoop[key]
 

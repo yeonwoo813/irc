@@ -256,6 +256,9 @@ class LinePayloadSmoother:
         self.min_valid = min_valid
         self.buffer = deque(maxlen=window)
 
+    def reset(self):
+        self.buffer.clear()
+
     def _median(self, values):
         vals = []
         for v in values:
@@ -1361,6 +1364,7 @@ def main_ros2(ini_path: str = "settings.ini"):
             self.inference_failures = 0
             self.last_model_reload = 0.0
             self.motion_display_state = MotionDisplayState()
+            self.mission_reset_token = ""
             # 공 결과는 RealSense 거리가 120cm 이내가 된 뒤 별도 신호로
             # 활성화한다. 라인/허들 YOLO 추론은 이 값과 무관하게 계속한다.
             self.ball_detection_active = False
@@ -1405,6 +1409,22 @@ def main_ros2(ini_path: str = "settings.ini"):
                 "/vision/webcam_ball_active",
                 self.cb_ball_active,
                 ready_qos,
+            )
+            reset_qos = QoSProfile(
+                depth=10,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            )
+            self.mission_reset_sub = self.create_subscription(
+                String,
+                "/mission/vision_reset",
+                self.cb_mission_vision_reset,
+                reset_qos,
+            )
+            self.mission_reset_ack_pub = self.create_publisher(
+                String,
+                "/mission/vision_reset_ack",
+                reset_qos,
             )
             # 노드가 재시작되면 이전 인스턴스의 latched READY를 즉시 지운다.
             self.pub_yolo_ready.publish(Bool(data=False))
@@ -1453,6 +1473,24 @@ def main_ros2(ini_path: str = "settings.ini"):
 
         def cb_motion_command(self, msg: MotionCommand):
             self.motion_display_state.on_command(msg.command)
+
+        def cb_mission_vision_reset(self, msg: String):
+            token = str(msg.data)
+            if not token:
+                return
+            self.mission_reset_token = token
+            LINE_SMOOTHER.reset()
+            self.raw_ball_in_hand_gate.reset()
+            self.ball_detection_hold.reset()
+            if self.hurdle_status_publisher is not None:
+                self.hurdle_status_publisher.reset_for_mission_start()
+            self.mission_reset_ack_pub.publish(
+                String(data=f"webcam_yolo|{token}")
+            )
+            self.get_logger().info(
+                "Mission start reset: cleared webcam line smoothing and "
+                "ball/hurdle holds."
+            )
 
         def cb_ball_active(self, msg: Bool):
             requested = bool(msg.data)
@@ -1549,6 +1587,11 @@ def main_ros2(ini_path: str = "settings.ini"):
                     "[VisionStartup] webcam YOLO first inference READY"
                 )
             self.publish_hurdle_status(payload)
+            payload["mission_reset_token"] = getattr(
+                self,
+                "mission_reset_token",
+                "",
+            )
             self.pub_raw_ball_in_hand.publish(
                 Bool(data=bool(payload.get("raw_ball_in_hand", False)))
             )

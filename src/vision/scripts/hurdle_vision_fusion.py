@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from hurdle_status_publisher import HurdleStatusPublisher
@@ -74,12 +75,30 @@ class WebcamHurdlePublisherNode(Node):
         self.latest_webcam: Optional[Dict[str, Any]] = None
         self.latest_webcam_time = 0.0
         self.publish_count = 0
+        self.required_mission_reset_token = ""
+        self.mission_reset_waiting = False
 
         self.create_subscription(
             String,
             self.webcam_state_topic,
             self.cb_webcam_state,
             10,
+        )
+        reset_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.mission_reset_sub = self.create_subscription(
+            String,
+            "/mission/vision_reset",
+            self.cb_mission_vision_reset,
+            reset_qos,
+        )
+        self.mission_reset_ack_pub = self.create_publisher(
+            String,
+            "/mission/vision_reset_ack",
+            reset_qos,
         )
         self.hurdle_status_publisher = HurdleStatusPublisher(
             self,
@@ -101,6 +120,20 @@ class WebcamHurdlePublisherNode(Node):
         self.get_logger().info(
             "RealSense hurdle OpenCV is disabled; signed angle convention is "
             "left(-), right(+)."
+        )
+
+    def cb_mission_vision_reset(self, msg: String) -> None:
+        token = str(msg.data)
+        if not token:
+            return
+        self.required_mission_reset_token = token
+        self.mission_reset_waiting = True
+        self.latest_webcam = None
+        self.latest_webcam_time = 0.0
+        self.publish_count = 0
+        self.hurdle_status_publisher.reset_for_mission_start()
+        self.get_logger().info(
+            "Mission start reset: waiting for a fresh webcam frame."
         )
 
     @staticmethod
@@ -149,6 +182,9 @@ class WebcamHurdlePublisherNode(Node):
             return
         if not isinstance(payload, dict):
             return
+        required = getattr(self, "required_mission_reset_token", "")
+        if required and str(payload.get("mission_reset_token", "")) != required:
+            return
 
         detected = bool(payload.get("hurdle_detected", False))
         confidence = self._finite_float(payload.get("hurdle_conf"), 0.0)
@@ -178,8 +214,18 @@ class WebcamHurdlePublisherNode(Node):
             ),
         }
         self.latest_webcam_time = time.monotonic()
+        if getattr(self, "mission_reset_waiting", False):
+            self.mission_reset_waiting = False
+            self.mission_reset_ack_pub.publish(
+                String(data=f"hurdle_fusion|{required}")
+            )
+            self.get_logger().info(
+                "Mission start reset complete: fresh webcam frame received."
+            )
 
     def publish_hurdle_features(self) -> None:
+        if getattr(self, "mission_reset_waiting", False):
+            return
         now = time.monotonic()
         webcam_age = (
             now - self.latest_webcam_time
