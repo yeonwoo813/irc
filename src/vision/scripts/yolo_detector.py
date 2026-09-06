@@ -134,6 +134,7 @@ MOTION_NAME = {
     25: "Hurdle_1step",
     26: "Hurdle_Forward_20",
     27: "Back_To_Initial",
+    33: "Shoot_Forward",
 }
 
 

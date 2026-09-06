@@ -56,6 +56,7 @@ class BallFeatures:
     webcam_ball_distance_px: Optional[float] = None
 
     ball_in_hand: bool = False
+    shoot_initial_done: bool = False
 
 
 class BallDecision:
@@ -69,10 +70,10 @@ class BallDecision:
 
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
-        # 80cm 이내에서 Pre-Shoot로 전환해 Back_To_Initial을 먼저
-        # 실행한다. 해당 모션의 MotionEnd 이후 최신 골대 판단 결과를
-        # pre_shoot_verified BallResult로 구분해 보낸다.
-        self.goal_shoot_max_distance_cm = 80.0
+        # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
+        # 27/33번 MotionEnd 이후 골대 판단은 pre_shoot_verified로 보낸다.
+        self.goal_pre_shoot_entry_distance_cm = 88.0
+        self.goal_shoot_max_distance_cm = 74.0
         self.goal_normal_shoot_min_distance_cm = 64.0
         self.goal_too_close_distance_cm = 58.0
 
@@ -187,7 +188,13 @@ class BallDecision:
         distance = features.realsense_goal_distance_cm
         angle = features.realsense_goal_angle
 
-        if distance is None or angle is None:
+        if (
+            distance is None
+            or angle is None
+            or not math.isfinite(distance)
+            or distance <= 0.0
+            or not math.isfinite(angle)
+        ):
             return BallStatus.Ball_None, 0.0
 
         if distance <= self.goal_too_close_distance_cm:
@@ -200,6 +207,9 @@ class BallDecision:
                 else BallStatus.Shoot_Close
             )
             return self._shoot_status_from_goal_angle(angle, shoot_status)
+
+        if features.shoot_initial_done:
+            return BallStatus.Shoot_Forward, 0.0
 
         return self._goal_status_from_angle(angle)
 
@@ -268,7 +278,7 @@ class BallStatusPublisher:
         self.shoot_initial_done = False
         self.shoot_command_seen = False
         # Pre-Shoot 기본자세(27번)는 서로 다른 최신 골대 원본
-        # 3프레임 중 2프레임 이상이 80cm 이내일 때만 확정한다.
+        # 3프레임 중 2프레임 이상이 85cm 이내일 때만 확정한다.
         # Fusion의 주기 발행으로 같은 원본 프레임이 중복 집계되지
         # 않도록 원본 stamp도 함께 기억한다.
         self.pre_shoot_distance_buffer = deque(maxlen=3)
@@ -349,15 +359,17 @@ class BallStatusPublisher:
         ):
             self.shoot_initial_waiting = False
             self.shoot_initial_done = True
-            self.pre_shoot_motion_active = True
-            self.pre_shoot_motion_started = (
-                self._latest_motion_end is False
-            )
-            self.pre_shoot_verified_pending = False
-            self._log_info(
-                "Shoot Back_To_Initial execution confirmed; "
-                "wait for its MotionEnd before verified goal result."
-            )
+            self._wait_for_pre_shoot_motion('Back_To_Initial')
+
+        if (
+            command == BallStatus.Shoot_Forward
+            and self.ball_in_hand
+            and self.shoot_initial_done
+            and not self.shoot_command_seen
+        ):
+            # 33번은 공과 슛 준비 자세를 유지한다. 27번을 재요청하지 않고
+            # 이번 미세전진의 MotionEnd 이후 골대 결과만 다시 확인한다.
+            self._wait_for_pre_shoot_motion('Shoot_Forward')
 
         if command in (BallStatus.Shoot, BallStatus.Shoot_Close):
             self.shoot_command_seen = True
@@ -393,6 +405,15 @@ class BallStatusPublisher:
                 "lock released."
             )
 
+    def _wait_for_pre_shoot_motion(self, motion_name: str) -> None:
+        self.pre_shoot_motion_active = True
+        self.pre_shoot_motion_started = self._latest_motion_end is False
+        self.pre_shoot_verified_pending = False
+        self._log_info(
+            f"Shoot {motion_name} execution confirmed; "
+            "wait for its MotionEnd before verified goal result."
+        )
+
     def _motion_end_callback(self, msg: MotionEnd) -> None:
         motion_ended = bool(msg.motion_end)
         self._latest_motion_end = motion_ended
@@ -409,7 +430,7 @@ class BallStatusPublisher:
         self.pre_shoot_motion_started = False
         self.pre_shoot_verified_pending = True
         self._log_info(
-            "Shoot Back_To_Initial MotionEnd confirmed; the next valid "
+            "Pre-Shoot positioning MotionEnd confirmed; the next valid "
             "goal BallResult will be marked pre_shoot_verified."
         )
 
@@ -420,7 +441,7 @@ class BallStatusPublisher:
         raw_detected: Optional[bool],
         held_previous_detection: bool,
     ) -> bool:
-        """Record one new raw hoop frame and test the 80cm 2-of-3 vote."""
+        """Record one new raw hoop frame and test the entry 2-of-3 vote."""
         if (
             not self.ball_in_hand
             or self.shoot_initial_done
@@ -448,8 +469,9 @@ class BallStatusPublisher:
         if len(self.pre_shoot_distance_buffer) < 3:
             return False
 
+        entry_distance = self.ball_decision.goal_pre_shoot_entry_distance_cm
         in_range_count = sum(
-            distance <= self.ball_decision.goal_shoot_max_distance_cm
+            distance <= entry_distance
             for distance in self.pre_shoot_distance_buffer
         )
         if in_range_count < 2:
@@ -460,7 +482,8 @@ class BallStatusPublisher:
         )
         self._log_info(
             "Pre-Shoot distance confirmed by 3-frame majority: "
-            f"within_80cm={in_range_count}/3, distances=[{distances}]cm."
+            f"within_{entry_distance:g}cm={in_range_count}/3, "
+            f"distances=[{distances}]cm."
         )
         return True
 
@@ -541,6 +564,7 @@ class BallStatusPublisher:
             webcam_ball_angle_error=webcam_ball_angle_error,
             webcam_ball_distance_px=webcam_ball_distance_px,
             ball_in_hand=self.ball_in_hand,
+            shoot_initial_done=self.shoot_initial_done,
         )
 
         status, angle = self.ball_decision.decide(features)

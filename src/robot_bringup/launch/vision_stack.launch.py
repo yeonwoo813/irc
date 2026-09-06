@@ -52,7 +52,7 @@ def _make_webcam_node(context):
             package="v4l2_camera",
             executable="v4l2_camera_node",
             name="webcam",
-            output="screen",
+            output="both",
             emulate_tty=True,
             condition=IfCondition(LaunchConfiguration("start_webcam")),
             parameters=[
@@ -183,7 +183,7 @@ def generate_launch_description() -> LaunchDescription:
         executable="realsense2_camera_node",
         namespace="",
         name="camera",
-        output="screen",
+        output="both",
         emulate_tty=True,
         condition=IfCondition(start_realsense),
         parameters=[
@@ -231,7 +231,7 @@ def generate_launch_description() -> LaunchDescription:
             "2",
         ],
         cwd=scripts_dir,
-        output="screen",
+        output="both",
         emulate_tty=True,
         condition=IfCondition(
             LaunchConfiguration("lock_realsense_rgb_after_warmup")
@@ -245,7 +245,7 @@ def generate_launch_description() -> LaunchDescription:
         name="yolo_vision_process",
         cmd=[sys.executable, yolo_script, settings_ini, "--ros2"],
         cwd=scripts_dir,
-        output="screen",
+        output="both",
         emulate_tty=True,
         respawn=True,
         # Give CUDA/TensorRT time to release allocations after an
@@ -289,7 +289,7 @@ def generate_launch_description() -> LaunchDescription:
             settings_ini,
         ],
         cwd=scripts_dir,
-        output="screen",
+        output="both",
         emulate_tty=True,
         condition=IfCondition(start_realsense_yolo),
         additional_env={"PYTHONUNBUFFERED": "1"},
@@ -321,7 +321,7 @@ def generate_launch_description() -> LaunchDescription:
             "rqt_image_view",
             realsense_view_topic,
         ],
-        output="screen",
+        output="both",
         condition=IfCondition(start_realsense_viewer),
     )
 
@@ -330,7 +330,7 @@ def generate_launch_description() -> LaunchDescription:
         name="ball_vision_fusion_process",
         cmd=[sys.executable, ball_script],
         cwd=scripts_dir,
-        output="screen",
+        output="both",
         emulate_tty=True,
         condition=IfCondition(start_ball),
         additional_env={"PYTHONUNBUFFERED": "1"},
@@ -340,7 +340,7 @@ def generate_launch_description() -> LaunchDescription:
         name="webcam_hurdle_publisher_process",
         cmd=[sys.executable, hurdle_script],
         cwd=scripts_dir,
-        output="screen",
+        output="both",
         emulate_tty=True,
         condition=IfCondition(start_hurdle),
         additional_env={"PYTHONUNBUFFERED": "1"},
@@ -350,7 +350,7 @@ def generate_launch_description() -> LaunchDescription:
         name="vision_status_monitor_process",
         cmd=[sys.executable, monitor_script],
         cwd=scripts_dir,
-        output="screen",
+        output="both",
         emulate_tty=True,
         condition=IfCondition(start_monitor),
         additional_env={"PYTHONUNBUFFERED": "1"},

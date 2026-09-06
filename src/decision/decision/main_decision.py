@@ -188,7 +188,7 @@ class MainDecision(Node):
         self.shoot_in_progress = False
         self.shoot_motion_started = False
         # Pre-Shoot의 거리·각도 판단은 BallStatusPublisher가 담당한다.
-        # MainDecision은 Back_To_Initial 이후 verified BallResult를
+        # MainDecision은 Back_To_Initial/Shoot_Forward 이후 verified BallResult를
         # 기다렸다가 전달받은 모션 상태만 실행한다.
         self.pre_shoot_result_waiting = False
         self.pre_shoot_verified_result = None
@@ -664,7 +664,7 @@ class MainDecision(Node):
                 self._reset_vision_decision_cycle()
                 if not self._consume_pre_shoot_verified_result():
                     self.get_logger().info(
-                        "[PreShoot] Back_To_Initial MotionEnd: "
+                        "[PreShoot] 슈팅 준비 모션 MotionEnd: "
                         "BallStatusPublisher의 verified 결과를 기다립니다."
                     )
                 return
@@ -976,7 +976,7 @@ class MainDecision(Node):
 
     #모션 종료 후 저장된 비전값으로 다음 행동 결정
     def _try_decision_from_cached_results(self):
-        # Pre-Shoot Back_To_Initial 뒤에는 일반 투표 대신
+        # Pre-Shoot Back_To_Initial/Shoot_Forward 뒤에는 일반 투표 대신
         # BallStatusPublisher가 표시한 verified 결과 하나만 사용한다.
         if getattr(self, 'pre_shoot_result_waiting', False):
             return False
@@ -1960,18 +1960,21 @@ class MainDecision(Node):
             motion_msg.command = Motion.Shoot_Close
 
         elif self.status == 33:
-                    motion_msg.command = Motion.Shoot_Forward
+            motion_msg.command = Motion.Shoot_Forward
         
 
         if (
-            motion_msg.command == Motion.Back_To_Initial
+            motion_msg.command in (
+                Motion.Back_To_Initial,
+                Motion.Shoot_Forward,
+            )
             and getattr(self, 'has_ball', False)
             and getattr(self, 'current_mode', None) == "BallMode"
         ):
             self.pre_shoot_result_waiting = True
             self.pre_shoot_verified_result = None
             self.get_logger().info(
-                "[PreShoot] 80cm 이내 Back_To_Initial 실행: "
+                f"[PreShoot] {MOTION_NAME[motion_msg.command]} 실행: "
                 "MotionEnd 이후 BallStatusPublisher 결과를 기다립니다."
             )
         

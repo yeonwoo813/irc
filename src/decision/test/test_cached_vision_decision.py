@@ -3,6 +3,8 @@ import math
 import time
 from types import MethodType, SimpleNamespace
 
+import pytest
+
 from decision.main_decision import Ball, MainDecision, Motion
 
 
@@ -168,11 +170,15 @@ def test_hoop_approach_motion_end_uses_cached_results_immediately():
     ]
 
 
-def test_pre_shoot_motion_end_waits_for_verified_ball_result():
+@pytest.mark.parametrize('command', [Motion.Back_To_Initial, Motion.Shoot_Forward])
+def test_pre_shoot_motion_end_waits_for_verified_ball_result(command):
     harness = _make_harness()
     harness.current_mode = "BallMode"
     harness.has_ball = True
-    harness.pre_shoot_result_waiting = True
+    harness.status = command
+    harness.motion_pub = _Publisher()
+    MainDecision.MotionCommand(harness)
+    assert harness.pre_shoot_result_waiting is True
     harness.ball_mode_calls = 0
     harness.BallMode = lambda: setattr(
         harness,
@@ -227,10 +233,11 @@ def test_pre_shoot_motion_end_waits_for_verified_ball_result():
     assert detail['measured_angle'] == -1.7
 
 
-def test_has_ball_back_to_initial_arms_verified_result_wait():
+@pytest.mark.parametrize('command', [Motion.Back_To_Initial, Motion.Shoot_Forward])
+def test_has_ball_positioning_motion_arms_verified_result_wait(command):
     publisher = _Publisher()
     harness = _make_harness()
-    harness.status = Motion.Back_To_Initial
+    harness.status = command
     harness.has_ball = True
     harness.current_mode = "BallMode"
     harness.motion_pub = publisher
@@ -239,10 +246,35 @@ def test_has_ball_back_to_initial_arms_verified_result_wait():
 
     MainDecision.MotionCommand(harness)
 
-    assert publisher.messages[-1].command == Motion.Back_To_Initial
+    assert publisher.messages[-1].command == command
     assert harness.pre_shoot_result_waiting is True
     assert harness.pre_shoot_verified_result is None
     assert harness.motion_end is False
+
+
+def test_shoot_forward_preserves_possession_and_does_not_start_post_shoot():
+    harness = _make_harness()
+    harness.has_ball = True
+    harness.ball_status = Motion.Shoot_Forward
+    harness.pick_done = False
+    harness.backward_after_pick = False
+    harness.turn_after_pick = False
+    harness.turn_after_shoot = False
+    harness.neck_down_pending = False
+    harness.shoot_in_progress = False
+    harness.post_shoot_detection_suppressed = False
+    harness.motion_pub = _Publisher()
+    harness.MotionCommand = MethodType(MainDecision.MotionCommand, harness)
+
+    MainDecision.BallMode(harness)
+
+    assert harness.motion_pub.messages[-1].command == Motion.Shoot_Forward
+    assert harness.has_ball is True
+    assert harness.pre_shoot_result_waiting is True
+    assert harness.neck_down_pending is False
+    assert harness.turn_after_shoot is False
+    assert harness.shoot_in_progress is False
+    assert harness.post_shoot_detection_suppressed is False
 
 
 def test_lost_back_to_initial_does_not_arm_pre_shoot_wait():

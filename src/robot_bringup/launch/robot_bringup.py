@@ -68,7 +68,7 @@ def generate_launch_description():
         package='motion',
         executable='main',
         name='main_motion',
-        output='screen',
+        output='both',
         emulate_tty=True,
         remappings=[
             ('motion_command', '/motion_command'),
@@ -109,7 +109,7 @@ def generate_launch_description():
                 package='decision',
                 executable='main_decision',
                 name='main_decision',
-                output='screen',
+                output='both',
                 emulate_tty=True,
                 remappings=[
                     ('line_result', '/line_result'),
@@ -127,7 +127,7 @@ def generate_launch_description():
                 package='decision',
                 executable='mission_start_keyboard',
                 name='mission_start_keyboard',
-                output='screen',
+                output='both',
                 emulate_tty=True,
                 arguments=['--ros-args', '--log-level', 'info'],
             ),

@@ -117,27 +117,83 @@ class BallDecisionTest(unittest.TestCase):
                     (expected_status, expected_angle),
                 )
 
-    def test_goal_pre_shoot_range_extends_through_80_cm(self) -> None:
-        at_boundary = self.decision.decide(
-            BallFeatures(
-                ball_in_hand=True,
-                realsense_goal_distance_cm=80.0,
-                realsense_goal_angle=0.0,
-            )
+    def test_goal_shoot_distance_boundaries_after_initial_pose(self) -> None:
+        cases = (
+            (58.0, BallStatus.Backward_half),
+            (58.01, BallStatus.Shoot_Close),
+            (63.99, BallStatus.Shoot_Close),
+            (64.0, BallStatus.Shoot),
+            (74.0, BallStatus.Shoot),
+            (74.01, BallStatus.Shoot_Forward),
+            (85.0, BallStatus.Shoot_Forward),
+            (86.0, BallStatus.Shoot_Forward),
         )
-        outside_boundary = self.decision.decide(
-            BallFeatures(
-                ball_in_hand=True,
-                realsense_goal_distance_cm=80.01,
-                realsense_goal_angle=0.0,
-            )
-        )
+        for distance, expected in cases:
+            with self.subTest(distance=distance):
+                self.assertEqual(
+                    self.decision.decide(BallFeatures(
+                        ball_in_hand=True,
+                        shoot_initial_done=True,
+                        realsense_goal_distance_cm=distance,
+                        realsense_goal_angle=0.0,
+                    )),
+                    (expected, 0.0),
+                )
 
-        self.assertEqual(at_boundary, (BallStatus.Shoot, 0.0))
-        self.assertEqual(
-            outside_boundary,
-            (BallStatus.Forward_4step, 0.0),
+    def test_goal_shoot_angles_remain_distance_specific(self) -> None:
+        cases = (
+            (70.0, -4.01, BallStatus.Left_Turn_5),
+            (70.0, -4.0, BallStatus.Shoot),
+            (70.0, 4.0, BallStatus.Shoot),
+            (70.0, 4.01, BallStatus.Right_Turn_5),
+            (60.0, -8.01, BallStatus.Left_Turn_5),
+            (60.0, -8.0, BallStatus.Shoot_Close),
+            (60.0, 0.0, BallStatus.Shoot_Close),
+            (60.0, 0.01, BallStatus.Right_Turn_5),
         )
+        for distance, angle, expected in cases:
+            with self.subTest(distance=distance, angle=angle):
+                status, _ = self.decision.decide(BallFeatures(
+                    ball_in_hand=True,
+                    shoot_initial_done=True,
+                    realsense_goal_distance_cm=distance,
+                    realsense_goal_angle=angle,
+                ))
+                self.assertEqual(status, expected)
+
+    def test_goal_approach_switches_to_33_only_after_initial_pose(self):
+        for angle in (-65.0, -6.0, 0.0, 6.0, 65.0):
+            with self.subTest(angle=angle):
+                features = BallFeatures(
+                    ball_in_hand=True,
+                    realsense_goal_distance_cm=84.0,
+                    realsense_goal_angle=angle,
+                )
+                self.assertEqual(
+                    self.decision.decide(features),
+                    self.decision._goal_status_from_angle(angle),
+                )
+                features.shoot_initial_done = True
+                self.assertEqual(
+                    self.decision.decide(features),
+                    (BallStatus.Shoot_Forward, 0.0),
+                )
+
+    def test_invalid_goal_does_not_issue_shoot_forward(self):
+        for distance, angle in (
+            (None, 0.0), (float('nan'), 0.0), (0.0, 0.0),
+            (78.0, None), (78.0, float('nan')), (78.0, float('inf')),
+        ):
+            with self.subTest(distance=distance, angle=angle):
+                self.assertEqual(
+                    self.decision.decide(BallFeatures(
+                        ball_in_hand=True,
+                        shoot_initial_done=True,
+                        realsense_goal_distance_cm=distance,
+                        realsense_goal_angle=angle,
+                    )),
+                    (BallStatus.Ball_None, 0.0),
+                )
 
     def test_goal_approach_uses_asymmetric_center_boundaries(self) -> None:
         cases = (
@@ -438,7 +494,7 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
             300.0,
         )
 
-    def test_goal_pre_shoot_requests_initial_pose_once_within_80_cm(self):
+    def test_goal_pre_shoot_requests_initial_pose_once_within_85_cm(self):
         self.publisher.ball_in_hand = True
 
         results = [
@@ -448,7 +504,7 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
                 realsense_goal_frame_stamp_sec=stamp,
                 realsense_goal_raw_detected=True,
             )
-            for stamp, distance in enumerate((81.0, 80.0, 79.0), 1)
+            for stamp, distance in enumerate((86.0, 85.0, 84.0), 1)
         ]
         self.assertEqual(
             results,
@@ -461,7 +517,7 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
 
         self._send_motion(BallStatus.Back_To_Initial)
         after_initial = self.publisher.publish_ball_status(
-            realsense_goal_distance_cm=80.0,
+            realsense_goal_distance_cm=74.0,
             realsense_goal_angle=0.0,
         )
         self.assertEqual(after_initial, (BallStatus.Shoot, 0.0))
@@ -472,7 +528,7 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         self._send_motion_end(False)
         self._send_motion_end(True)
         verified = self.publisher.publish_ball_status(
-            realsense_goal_distance_cm=80.0,
+            realsense_goal_distance_cm=74.0,
             realsense_goal_angle=0.0,
         )
         self.assertEqual(verified, (BallStatus.Shoot, 0.0))
@@ -481,12 +537,86 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
         )
 
         self.publisher.publish_ball_status(
-            realsense_goal_distance_cm=80.0,
+            realsense_goal_distance_cm=74.0,
             realsense_goal_angle=0.0,
         )
         self.assertFalse(
             self.node.recorder.messages[-1].pre_shoot_verified
         )
+
+    def test_shoot_forward_rechecks_without_repeating_initial_pose(self):
+        self.publisher.ball_in_hand = True
+        self._send_motion_end(False)
+
+        def publish_goal(distance, angle=0.0, stamp=None):
+            return self.publisher.publish_ball_status(
+                realsense_goal_distance_cm=distance,
+                realsense_goal_angle=angle,
+                realsense_goal_frame_stamp_sec=stamp,
+                realsense_goal_raw_detected=True,
+            )[0]
+
+        # 원본 투표는 접근 모션이 끝나기 전에 이미 완료된다.
+        for stamp, distance in enumerate((86.0, 85.0, 84.0), 1):
+            status = publish_goal(distance, stamp=float(stamp))
+        self.assertEqual(status, BallStatus.Back_To_Initial)
+        self._send_motion_end(True)
+        commands = [BallStatus.Back_To_Initial]
+        self._send_motion(commands[-1])
+
+        # 27 -> 78cm -> 33 -> 76cm -> 33 -> 71cm -> 13.
+        for distance, expected in (
+            (78.0, BallStatus.Shoot_Forward),
+            (76.0, BallStatus.Shoot_Forward),
+            (71.0, BallStatus.Shoot),
+        ):
+            # 명령만 수신하고 시작하지 않은 상태에서는 verified를 보내지 않는다.
+            self._send_motion_end(True)
+            publish_goal(distance)
+            self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+            self._send_motion_end(False)
+            publish_goal(distance)
+            self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+
+            self._send_motion_end(True)
+            self.assertEqual(publish_goal(None), BallStatus.Ball_None)
+            self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+            self.assertTrue(self.publisher.pre_shoot_verified_pending)
+            status = publish_goal(distance)
+            self.assertEqual(status, expected)
+            self.assertTrue(self.node.recorder.messages[-1].pre_shoot_verified)
+            # verified는 한 번만 발행하고, 다음 모션에서 새로 기다린다.
+            publish_goal(distance)
+            self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+            commands.append(status)
+            self._send_motion(status)
+            self.assertTrue(self.publisher.shoot_initial_done)
+            self.assertFalse(self.publisher.shoot_initial_waiting)
+            self.assertTrue(self.publisher.ball_in_hand)
+            self.assertEqual(
+                self.publisher.shoot_command_seen, status == BallStatus.Shoot
+            )
+
+        self.assertEqual(commands, [27, 33, 33, 13])
+
+    def test_shoot_forward_can_recheck_to_close_shot_or_backward(self):
+        self.publisher.ball_in_hand = True
+        self.publisher.shoot_initial_done = True
+        self._send_motion_end(True)
+        for distance, expected in (
+            (60.0, BallStatus.Shoot_Close),
+            (58.0, BallStatus.Backward_half),
+        ):
+            self._send_motion(BallStatus.Shoot_Forward)
+            self._send_motion_end(False)
+            self._send_motion_end(True)
+            result = self.publisher.publish_ball_status(
+                realsense_goal_distance_cm=distance,
+                realsense_goal_angle=0.0,
+            )
+            self.assertEqual(result, (expected, 0.0))
+            self.assertTrue(self.node.recorder.messages[-1].pre_shoot_verified)
+            self.assertTrue(self.publisher.shoot_initial_done)
 
     def test_too_close_goal_still_sets_pose_before_backward(self):
         self.publisher.ball_in_hand = True
