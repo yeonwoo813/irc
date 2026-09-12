@@ -45,6 +45,7 @@ class Motion:
     Right_Turn_Afterpick = 31
     Shoot_Close = 32
     Shoot_Forward = 33
+    Shoot_Mid = 34
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -66,6 +67,7 @@ class Ball:
     Pick_Ready = Motion.Pick
     Shoot = Motion.Shoot
     Shoot_Close = Motion.Shoot_Close
+    Shoot_Mid = Motion.Shoot_Mid
 
 class Line:
     Line_None = 99
@@ -1466,7 +1468,7 @@ class MainDecision(Node):
         #goal이 보이고 공을 가지고 있으면 shoot 시도
         if self.has_ball == True:
             #shoot 준비완료
-            if self.ball_status in (Ball.Shoot, Ball.Shoot_Close):
+            if self.ball_status in (Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid):
                 MainDecision._log_ball_action_evidence(
                     self,
                     self.ball_status,
@@ -1501,7 +1503,7 @@ class MainDecision(Node):
         
         ##### 공이 없으면 Pick Mode #####
         #공이 없는데 ShootReady이면 무시
-        if self.ball_status in (Ball.Shoot, Ball.Shoot_Close):
+        if self.ball_status in (Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid):
             self.LineTracking()
             return
         
@@ -1961,6 +1963,9 @@ class MainDecision(Node):
 
         elif self.status == 33:
             motion_msg.command = Motion.Shoot_Forward
+
+        elif self.status == 34:
+            motion_msg.command = Motion.Shoot_Mid
         
 
         if (

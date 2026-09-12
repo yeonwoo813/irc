@@ -110,6 +110,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--gate-topic", required=True)
     parser.add_argument("--gate-enabled", type=parse_bool, default=True)
     parser.add_argument("--source-enabled", type=parse_bool, default=True)
+    parser.add_argument("--waiting-message", default="")
     parser.add_argument("--gate-open-delay-seconds", type=float, default=0.0)
     parser.add_argument("--initial-backoff-seconds", type=float, default=5.0)
     parser.add_argument("--max-backoff-seconds", type=float, default=30.0)
@@ -146,6 +147,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     backoff = initial_backoff
     gate_was_open = False
     gate_opened_at: Optional[float] = None
+    next_wait_notice = time.monotonic() + 10.0
 
     try:
         if gate_enabled:
@@ -159,6 +161,16 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             rclpy.spin_once(node, timeout_sec=0.1)
             now = time.monotonic()
             gate_open = node.is_open()
+
+            if (
+                args.waiting_message and not gate_open and child is None
+                and now >= next_wait_notice
+            ):
+                node.get_logger().info(
+                    f"Still waiting for {args.gate_topic}=true: "
+                    f"{args.waiting_message}"
+                )
+                next_wait_notice = now + 10.0
 
             if gate_open != gate_was_open:
                 state = "OPEN" if gate_open else "CLOSED"

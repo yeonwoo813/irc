@@ -135,5 +135,5 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        declarations + [motion_node, vision_stack, decision_node]
+        declarations + [vision_stack, motion_node, decision_node]
     )

@@ -35,6 +35,7 @@ class BallStatus:
     Right_Turn_Afterpick = 31
     Shoot_Close = 32
     Shoot_Forward = 33
+    Shoot_Mid = 34
     Ball_Lost = 45
     Ball_None = 99
 
@@ -72,9 +73,11 @@ class BallDecision:
         self.goal_entry_distance_cm = 120.0
         # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
         # 27/33번 MotionEnd 이후 골대 판단은 pre_shoot_verified로 보낸다.
-        self.goal_pre_shoot_entry_distance_cm = 88.0
+        self.goal_pre_shoot_entry_distance_cm = 83.5
         self.goal_shoot_max_distance_cm = 74.0
         self.goal_normal_shoot_min_distance_cm = 64.0
+        self.goal_mid_shoot_min_distance_cm = 62.0
+        self.goal_mid_shoot_max_distance_cm = 68.0
         self.goal_too_close_distance_cm = 58.0
 
         self.goal_approach_center_min = -5.0
@@ -201,11 +204,16 @@ class BallDecision:
             return BallStatus.Backward_half, 0.0
 
         if distance <= self.goal_shoot_max_distance_cm:
-            shoot_status = (
-                BallStatus.Shoot
-                if distance >= self.goal_normal_shoot_min_distance_cm
-                else BallStatus.Shoot_Close
-            )
+            if (
+                self.goal_mid_shoot_min_distance_cm
+                <= distance
+                <= self.goal_mid_shoot_max_distance_cm
+            ):
+                shoot_status = BallStatus.Shoot_Mid
+            elif distance >= self.goal_normal_shoot_min_distance_cm:
+                shoot_status = BallStatus.Shoot
+            else:
+                shoot_status = BallStatus.Shoot_Close
             return self._shoot_status_from_goal_angle(angle, shoot_status)
 
         if features.shoot_initial_done:
@@ -371,7 +379,11 @@ class BallStatusPublisher:
             # 이번 미세전진의 MotionEnd 이후 골대 결과만 다시 확인한다.
             self._wait_for_pre_shoot_motion('Shoot_Forward')
 
-        if command in (BallStatus.Shoot, BallStatus.Shoot_Close):
+        if command in (
+            BallStatus.Shoot,
+            BallStatus.Shoot_Close,
+            BallStatus.Shoot_Mid,
+        ):
             self.shoot_command_seen = True
 
         if (
@@ -595,6 +607,7 @@ class BallStatusPublisher:
             and status in (
                 BallStatus.Shoot,
                 BallStatus.Shoot_Close,
+                BallStatus.Shoot_Mid,
                 BallStatus.Backward_half,
             )
         ):

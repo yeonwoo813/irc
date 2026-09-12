@@ -9,6 +9,9 @@
 """
 
 import glob
+import os
+import shlex
+import stat
 import sys
 
 from launch import LaunchDescription
@@ -16,15 +19,20 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     OpaqueFunction,
+    RegisterEventHandler,
+    Shutdown,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessIO
 from launch.substitutions import (
     EnvironmentVariable,
     LaunchConfiguration,
     PathJoinSubstitution,
 )
 from launch_ros.actions import Node
+
+from robot_bringup.realsense_guard import READY_MARKER
 
 
 def _make_webcam_node(context):
@@ -43,9 +51,16 @@ def _make_webcam_node(context):
                 "Connect the webcam or set webcam_device explicitly."
             )
         device = c920_devices[0]
+    try:
+        if not stat.S_ISCHR(os.stat(device).st_mode):
+            raise RuntimeError(f'Webcam is not a camera device: {device}')
+    except OSError as error:
+        raise RuntimeError(f'Webcam is unavailable: {device}: {error}') from error
     width = int(LaunchConfiguration("webcam_width").perform(context))
     height = int(LaunchConfiguration("webcam_height").perform(context))
     fps = int(LaunchConfiguration("webcam_fps").perform(context))
+    if min(width, height, fps) <= 0:
+        raise RuntimeError('Webcam width, height and fps must be positive.')
 
     return [
         Node(
@@ -77,7 +92,14 @@ def _make_webcam_node(context):
     ]
 
 
-def generate_launch_description() -> LaunchDescription:
+def _start_stack(context):
+    # Resolve/validate the webcam before returning ANY process actions.  An
+    # exception in a later OpaqueFunction used to leave the driver orphaned.
+    webcam_nodes = _make_webcam_node(context)
+    return _make_stack_actions(context, webcam_nodes)
+
+
+def _make_stack_actions(context, webcam_nodes):
     scripts_dir = LaunchConfiguration("scripts_dir")
     settings_ini = LaunchConfiguration("settings_ini")
     start_realsense = LaunchConfiguration("start_realsense")
@@ -107,76 +129,6 @@ def generate_launch_description() -> LaunchDescription:
         [scripts_dir, "realsense_rgb_stabilizer.py"]
     )
 
-    declarations = [
-        DeclareLaunchArgument(
-            "scripts_dir",
-            default_value=PathJoinSubstitution(
-                [
-                    EnvironmentVariable("HOME"),
-                    "irc",
-                    "src",
-                    "vision",
-                    "scripts",
-                ]
-            ),
-            description="vision Python scripts/settings/model directory",
-        ),
-        DeclareLaunchArgument(
-            "settings_ini",
-            default_value=PathJoinSubstitution(
-                [
-                    EnvironmentVariable("HOME"),
-                    "irc",
-                    "src",
-                    "vision",
-                    "config",
-                    "settings.ini",
-                ]
-            ),
-        ),
-        DeclareLaunchArgument("start_realsense", default_value="true"),
-        DeclareLaunchArgument("start_webcam", default_value="true"),
-        DeclareLaunchArgument("start_yolo", default_value="true"),
-        DeclareLaunchArgument("start_realsense_yolo", default_value="true"),
-        DeclareLaunchArgument(
-            "start_realsense_viewer",
-            default_value="true",
-            description="Open an rqt_image_view window for RealSense YOLO.",
-        ),
-        DeclareLaunchArgument(
-            "realsense_view_topic",
-            default_value="/vision/realsense_combined_image",
-            description="RealSense YOLO debug image topic shown by rqt.",
-        ),
-        DeclareLaunchArgument("start_ball", default_value="true"),
-        DeclareLaunchArgument("start_hurdle", default_value="true"),
-        DeclareLaunchArgument("start_monitor", default_value="true"),
-        DeclareLaunchArgument(
-            "webcam_device",
-            default_value="auto",
-            description=(
-                "Webcam device path. 'auto' selects the C920 video-index0 "
-                "device from /dev/v4l/by-id/."
-            ),
-        ),
-        DeclareLaunchArgument("webcam_width", default_value="640"),
-        DeclareLaunchArgument("webcam_height", default_value="480"),
-        DeclareLaunchArgument("webcam_fps", default_value="30"),
-        DeclareLaunchArgument(
-            "lock_realsense_rgb_after_warmup",
-            default_value="true",
-            description=(
-                "Warm up RealSense RGB auto exposure/WB, then lock the "
-                "settled values for stable YOLO input."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "realsense_rgb_warmup_seconds",
-            default_value="5.0",
-            description="Auto exposure/WB warmup time before locking.",
-        ),
-    ]
-
     # RealSense color/depth는 하나의 YOLO 노드에서 공과 후프 검출에 사용한다.
     realsense_node = Node(
         package="realsense2_camera",
@@ -185,6 +137,13 @@ def generate_launch_description() -> LaunchDescription:
         name="camera",
         output="both",
         emulate_tty=True,
+        prefix=[
+            shlex.quote(sys.executable)
+            + ' -m robot_bringup.realsense_guard --'
+        ],
+        sigterm_timeout='3.0',
+        sigkill_timeout='2.0',
+        on_exit=[Shutdown(reason='RealSense driver exited; see camera/guard log.')],
         condition=IfCondition(start_realsense),
         parameters=[
             {
@@ -238,8 +197,6 @@ def generate_launch_description() -> LaunchDescription:
         ),
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
-
-    webcam_node = OpaqueFunction(function=_make_webcam_node)
 
     yolo_process = ExecuteProcess(
         name="yolo_vision_process",
@@ -304,6 +261,9 @@ def generate_launch_description() -> LaunchDescription:
             ready_gate_script,
             "--node-name",
             "realsense_viewer_gate",
+            "--waiting-message",
+            "RealSense viewer needs the first successful YOLO inference. "
+            "If this persists, check camera frame/USB errors above.",
             "--gate-topic",
             "/vision/realsense_yolo_ready",
             "--gate-enabled",
@@ -373,15 +333,113 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
-    return LaunchDescription(
-        declarations
-        + [
-            realsense_node,
-            delayed_rgb_stabilizer,
-            webcam_node,
-            yolo_process,
-            realsense_yolo_process,
-            realsense_viewer_process,
-            delayed_vision,
-        ]
-    )
+    startup_actions = [
+        *webcam_nodes,
+        yolo_process,
+        realsense_yolo_process,
+        realsense_viewer_process,
+        delayed_vision,
+    ]
+    if not IfCondition(start_realsense).evaluate(context):
+        return startup_actions
+    startup_actions.insert(0, delayed_rgb_stabilizer)
+    return _after_camera_ownership(context, realsense_node, startup_actions)
+
+
+def _after_camera_ownership(context, camera_node, startup_actions):
+    # Only the winner of the atomic lock may start the remaining stack.  This
+    # also prevents a second launch from briefly opening the webcam/GPU.
+    pending = bytearray()
+    started = False
+
+    def on_camera_output(event):
+        nonlocal started
+        if started or context.is_shutdown:
+            return []
+        pending.extend(event.text)
+        if READY_MARKER.encode() in pending:
+            started = True
+            return startup_actions
+        # Keep enough bytes to match a marker split across output events.
+        del pending[:-len(READY_MARKER)]
+        return []
+
+    return [
+        RegisterEventHandler(OnProcessIO(
+            target_action=camera_node, on_stdout=on_camera_output,
+        )),
+        camera_node,
+    ]
+
+
+def generate_launch_description() -> LaunchDescription:
+    declarations = [
+        DeclareLaunchArgument(
+            "scripts_dir",
+            default_value=PathJoinSubstitution(
+                [
+                    EnvironmentVariable("HOME"),
+                    "irc",
+                    "src",
+                    "vision",
+                    "scripts",
+                ]
+            ),
+            description="vision Python scripts/settings/model directory",
+        ),
+        DeclareLaunchArgument(
+            "settings_ini",
+            default_value=PathJoinSubstitution(
+                [
+                    EnvironmentVariable("HOME"),
+                    "irc",
+                    "src",
+                    "vision",
+                    "config",
+                    "settings.ini",
+                ]
+            ),
+        ),
+        DeclareLaunchArgument("start_realsense", default_value="true"),
+        DeclareLaunchArgument("start_webcam", default_value="true"),
+        DeclareLaunchArgument("start_yolo", default_value="true"),
+        DeclareLaunchArgument("start_realsense_yolo", default_value="true"),
+        DeclareLaunchArgument(
+            "start_realsense_viewer",
+            default_value="true",
+            description="Open an rqt_image_view window for RealSense YOLO.",
+        ),
+        DeclareLaunchArgument(
+            "realsense_view_topic",
+            default_value="/vision/realsense_combined_image",
+            description="RealSense YOLO debug image topic shown by rqt.",
+        ),
+        DeclareLaunchArgument("start_ball", default_value="true"),
+        DeclareLaunchArgument("start_hurdle", default_value="true"),
+        DeclareLaunchArgument("start_monitor", default_value="true"),
+        DeclareLaunchArgument(
+            "webcam_device",
+            default_value="auto",
+            description=(
+                "Webcam device path. 'auto' selects the C920 video-index0 "
+                "device from /dev/v4l/by-id/."
+            ),
+        ),
+        DeclareLaunchArgument("webcam_width", default_value="640"),
+        DeclareLaunchArgument("webcam_height", default_value="480"),
+        DeclareLaunchArgument("webcam_fps", default_value="30"),
+        DeclareLaunchArgument(
+            "lock_realsense_rgb_after_warmup",
+            default_value="true",
+            description=(
+                "Warm up RealSense RGB auto exposure/WB, then lock the "
+                "settled values for stable YOLO input."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "realsense_rgb_warmup_seconds",
+            default_value="5.0",
+            description="Auto exposure/WB warmup time before locking.",
+        ),
+    ]
+    return LaunchDescription(declarations + [OpaqueFunction(function=_start_stack)])

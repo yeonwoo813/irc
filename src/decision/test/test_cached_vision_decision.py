@@ -963,7 +963,10 @@ def test_failed_pick_runs_backward_then_turn_without_neck_up():
     assert harness.turn_after_pick_calls == 1
 
 
-def test_confirmed_ball_is_not_checked_again_before_shoot():
+@pytest.mark.parametrize(
+    'shoot_status', [Motion.Shoot, Motion.Shoot_Close, Motion.Shoot_Mid],
+)
+def test_confirmed_ball_is_not_checked_again_before_shoot(shoot_status):
     harness = SimpleNamespace(
         current_mode="BallMode",
         pick_done=False,
@@ -974,7 +977,7 @@ def test_confirmed_ball_is_not_checked_again_before_shoot():
         has_ball=True,
         # 후속 비전 값이 false여도 이미 확정한 has_ball은 유지한다.
         ball_in_hand=False,
-        ball_status=Ball.Shoot,
+        ball_status=shoot_status,
         turn_count=3,
     )
     harness.logger = _Logger()
@@ -993,7 +996,7 @@ def test_confirmed_ball_is_not_checked_again_before_shoot():
     MainDecision.BallMode(harness)
 
     assert harness.check_ball_calls == 0
-    assert harness.commands == [Motion.Shoot]
+    assert harness.commands == [shoot_status]
     assert harness.has_ball is False
     assert harness.neck_down_pending is True
     assert harness.turn_after_shoot is True
@@ -1001,3 +1004,115 @@ def test_confirmed_ball_is_not_checked_again_before_shoot():
     assert harness.post_shoot_detection_suppressed is True
     assert harness.ball_vision_active is False
     assert harness.hoop_vision_active is False
+
+
+def test_verified_shoot_mid_publishes_34_and_runs_post_shoot_return():
+    harness = _make_harness()
+    harness.current_mode = 'BallMode'
+    harness.has_ball = True
+    harness.pick_done = False
+    harness.turn_after_pick = False
+    harness.neck_down_pending = False
+    harness.turn_after_shoot = False
+    harness.goal_count = 0
+    harness.line_status = Motion.Forward_4step
+    harness.ball_vision_active = False
+    harness.hoop_vision_active = True
+    harness.webcam_ball_allowed = True
+    harness.motion_pub = _Publisher()
+    for method in (
+        'MotionCommand', 'BallMode', 'TurnAfterShoot', 'LineTracking',
+        '_finish_turn_after_shoot', '_finish_post_shoot_detection_suppression',
+    ):
+        setattr(
+            harness, method, MethodType(getattr(MainDecision, method), harness),
+        )
+
+    def finish_motion():
+        MainDecision.MotionEndCallback(
+            harness, SimpleNamespace(motion_ready=True, motion_end=False),
+        )
+        MainDecision.MotionEndCallback(
+            harness, SimpleNamespace(motion_ready=True, motion_end=True),
+        )
+
+    harness.status = Motion.Back_To_Initial
+    harness.MotionCommand()
+    finish_motion()
+    MainDecision.BallResultCallback(
+        harness,
+        SimpleNamespace(
+            status=Motion.Shoot_Mid, angle=0.0, detected_angle=1.5,
+            ball_in_hand=True, goal_distance_cm=66.0, pre_shoot_verified=True,
+        ),
+    )
+
+    assert harness.motion_pub.messages[-1].command == Motion.Shoot_Mid
+    assert harness.pre_shoot_result_waiting is False
+    assert harness.has_ball is False
+    assert harness.shoot_in_progress is True
+    assert harness.neck_down_pending is True
+    assert harness.post_shoot_detection_suppressed is True
+    assert harness.ball_vision_active is False
+    assert harness.hoop_vision_active is False
+    assert harness.webcam_ball_allowed is False
+    assert any(
+        '[ShootDecisionEvidence] action=Shoot_Mid' in message
+        and 'goal_distance=66.00cm' in message
+        for message in harness.logger.messages
+    )
+
+    finish_motion()
+    assert harness.shoot_in_progress is False
+    harness.BallMode()
+    assert harness.motion_pub.messages[-1].command == Motion.Neck_Down
+
+    for _ in range(4):
+        finish_motion()
+        harness.BallMode()
+        assert (
+            harness.motion_pub.messages[-1].command
+            == Motion.Right_Turn_Afterpick
+        )
+        assert harness.post_shoot_detection_suppressed is True
+
+    finish_motion()
+    harness.BallMode()
+    assert harness.motion_pub.messages[-1].command == Motion.Back_To_Walk
+    assert harness.ball_vision_active is True
+    assert harness.hoop_vision_active is False
+    assert harness.post_shoot_detection_suppressed is False
+
+    finish_motion()
+    harness.BallMode()
+    assert harness.current_mode == 'LineTrackingMode'
+    assert [message.command for message in harness.motion_pub.messages] == [
+        Motion.Back_To_Initial, Motion.Shoot_Mid, Motion.Neck_Down,
+        *([Motion.Right_Turn_Afterpick] * 4), Motion.Back_To_Walk,
+        Motion.Forward_4step,
+    ]
+
+
+@pytest.mark.parametrize(
+    'shoot_status', [Motion.Shoot, Motion.Shoot_Close, Motion.Shoot_Mid],
+)
+def test_shoot_without_possession_returns_to_line_tracking(shoot_status):
+    harness = _make_harness()
+    harness.has_ball = False
+    harness.ball_status = shoot_status
+    harness.pick_done = False
+    harness.turn_after_pick = False
+    harness.neck_down_pending = False
+    harness.turn_after_shoot = False
+    harness.pick_try_count = 0
+    harness.motion_pub = _Publisher()
+    harness.MotionCommand = MethodType(MainDecision.MotionCommand, harness)
+    harness.line_tracking_calls = 0
+    harness.LineTracking = lambda: setattr(
+        harness, 'line_tracking_calls', harness.line_tracking_calls + 1,
+    )
+
+    MainDecision.BallMode(harness)
+
+    assert harness.line_tracking_calls == 1
+    assert harness.motion_pub.messages == []
