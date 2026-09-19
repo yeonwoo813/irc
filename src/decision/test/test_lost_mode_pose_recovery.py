@@ -162,12 +162,41 @@ def test_neck_center_always_starts_first_body_turn(
     assert harness.lost_back_to_walk_pending is False
 
 
-def test_lost_body_turn_line_recovery_runs_back_to_walk_first():
+@pytest.mark.parametrize("direction, command", [
+    (-1, Motion.Left_Turn_Afterpick),
+    (1, Motion.Right_Turn_Afterpick),
+])
+@pytest.mark.parametrize("completed_turns", [1, 2])
+@pytest.mark.parametrize("line_status", [
+    Line.Line_None, Motion.Forward_4step, Motion.Left_Turn,
+])
+def test_lost_body_turn_cannot_recover_before_third_turn(
+    direction, command, completed_turns, line_status
+):
+    harness = _lost_harness(
+        line_status=line_status,
+        lost_step=4,
+        lost_found_dir=direction,
+        lost_body_turn_count=completed_turns,
+        lost_initial_pose_done=True,
+    )
+
+    MainDecision.LostMode(harness)
+
+    assert harness.commands == [command]
+    assert harness.lost_body_turn_count == completed_turns + 1
+    assert harness.lost_found_dir == direction
+    assert harness.lost_back_to_walk_pending is False
+    assert harness.line_tracking_calls == 0
+
+
+@pytest.mark.parametrize("completed_turns", [3, 4, 5])
+def test_lost_body_turn_line_recovery_runs_back_to_walk_first(completed_turns):
     harness = _lost_harness(
         line_status=Motion.Forward_4step,
         lost_step=4,
         lost_found_dir=1,
-        lost_body_turn_count=1,
+        lost_body_turn_count=completed_turns,
         lost_initial_pose_done=True,
     )
 
@@ -191,7 +220,7 @@ def test_lost_recovery_returns_to_initial_if_line_disappears_during_back_to_walk
         line_status=Line.Line_None,
         lost_step=4,
         lost_found_dir=-1,
-        lost_body_turn_count=1,
+        lost_body_turn_count=3,
         lost_initial_pose_done=True,
         lost_back_to_walk_pending=True,
         lost_left_line_seen=True,

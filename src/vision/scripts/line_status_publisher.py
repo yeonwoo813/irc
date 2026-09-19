@@ -84,7 +84,8 @@ class LineDecision:
         # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
         self.curve_forward_angle = 7.0
         self.curve_fine_turn_angle = 25.0
-        self.curve_turn_angle = 35.0
+        self.curve_turn_angle = 40.0
+        self.curve_angle_priority_threshold = 40.0
 
         self.curve_move_distance = 90.0
         self.curve_steering_distance_max = 130.0
@@ -202,6 +203,17 @@ class LineDecision:
         angle_status, angle_value = self._status_from_curve_angle(
             tangent_angle
         )
+        # Only override distance priority in the near-offset curve band.
+        if (
+            tangent_angle is not None
+            and abs(tangent_angle) > self.curve_angle_priority_threshold
+            and line_distance is not None
+            and self.curve_move_distance
+            <= abs(line_distance)
+            < self.curve_steering_distance_max
+        ):
+            return angle_status, angle_value
+
         opposite_half = bool(
             (
                 distance_status == LineStatus.Left_Half_Forward

@@ -46,6 +46,7 @@ class Motion:
     Shoot_Close = 32
     Shoot_Forward = 33
     Shoot_Mid = 34
+    Shoot_62 = 35
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -68,6 +69,7 @@ class Ball:
     Shoot = Motion.Shoot
     Shoot_Close = Motion.Shoot_Close
     Shoot_Mid = Motion.Shoot_Mid
+    Shoot_62 = Motion.Shoot_62
 
 class Line:
     Line_None = 99
@@ -683,20 +685,20 @@ class MainDecision(Node):
             if (
                 getattr(self, 'current_mode', None) == "LostMode"
                 and getattr(self, 'lost_step', 0) == 4
-                and getattr(self, 'lost_body_turn_count', 0) == 1
+                and getattr(self, 'lost_body_turn_count', 0) == 3
                 and getattr(self, 'status', None) in (
                     Motion.Left_Turn_Afterpick,
                     Motion.Right_Turn_Afterpick,
                 )
             ):
-                # Only the first Lost body turn needs post-completion samples.
+                # Only the third forced Lost turn needs post-completion samples.
                 self.line_data = False
                 self.line_buffer.clear()
                 detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
                 if detail_buffer is not None:
                     detail_buffer.clear()
                 self.get_logger().info(
-                    "[LostFirstTurn] completed: cleared line votes; "
+                    "[LostForcedTurns] completed=3: cleared line votes; "
                     "waiting for 3 new line results."
                 )
                 return
@@ -1498,7 +1500,9 @@ class MainDecision(Node):
         #goal이 보이고 공을 가지고 있으면 shoot 시도
         if self.has_ball == True:
             #shoot 준비완료
-            if self.ball_status in (Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid):
+            if self.ball_status in (
+                Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_62,
+            ):
                 MainDecision._log_ball_action_evidence(
                     self,
                     self.ball_status,
@@ -1533,7 +1537,9 @@ class MainDecision(Node):
         
         ##### 공이 없으면 Pick Mode #####
         #공이 없는데 ShootReady이면 무시
-        if self.ball_status in (Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid):
+        if self.ball_status in (
+            Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_62,
+        ):
             self.LineTracking()
             return
         
@@ -1700,7 +1706,7 @@ class MainDecision(Node):
 
         #step 3 : 몸통 회전 명령
         if self.lost_step == 3:
-            # Always turn once toward the line found during the neck scan.
+            # Start the forced turns toward the line found during the neck scan.
             
             #왼쪽 회전 기억
             if self.lost_found_dir == -1:
@@ -1728,7 +1734,10 @@ class MainDecision(Node):
 
         #step 4 : 몸통 회전 후 라인 보이는지 판단
         if self.lost_step == 4:
-            if self.line_status != Line.Line_None:
+            if (
+                self.lost_body_turn_count >= 3
+                and self.line_status != Line.Line_None
+            ):
                 MainDecision._return_from_lost_to_line_tracking(self)
                 return
             
@@ -1993,6 +2002,9 @@ class MainDecision(Node):
 
         elif self.status == 34:
             motion_msg.command = Motion.Shoot_Mid
+
+        elif self.status == 35:
+            motion_msg.command = Motion.Shoot_62
         
 
         if (

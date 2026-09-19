@@ -106,14 +106,14 @@ def test_motion_end_immediately_decides_from_cached_results():
     ([Line.Line_None, Motion.Left_Turn, Line.Line_None], Line.Line_None),
     ([Motion.Left_Turn, Motion.Left_Turn, Line.Line_None], Motion.Left_Turn),
 ])
-def test_first_lost_body_turn_waits_for_three_post_completion_line_results(
+def test_third_lost_body_turn_waits_for_three_post_completion_line_results(
     command, fresh_votes, expected
 ):
     harness = _make_harness()
     harness.current_mode = "LostMode"
     harness.status = command
     harness.lost_step = 4
-    harness.lost_body_turn_count = 1
+    harness.lost_body_turn_count = 3
     harness.line_vote_detail_buffer.append({'sequence': -1})
     cached_ball = list(harness.ball_buffer)
     cached_hurdle = list(harness.hurdle_buffer)
@@ -143,11 +143,15 @@ def test_first_lost_body_turn_waits_for_three_post_completion_line_results(
 
 
 @pytest.mark.parametrize("mode, command, step, count", [
+    ("LostMode", Motion.Left_Turn_Afterpick, 4, 1),
+    ("LostMode", Motion.Right_Turn_Afterpick, 4, 1),
     ("LostMode", Motion.Left_Turn_Afterpick, 4, 2),
+    ("LostMode", Motion.Right_Turn_Afterpick, 4, 2),
+    ("LostMode", Motion.Left_Turn_Afterpick, 4, 4),
     ("LostMode", Motion.Right_Turn_Afterpick, 4, 5),
     ("LostMode", Motion.Neck_Center, 3, 0),
-    ("LostMode", Motion.Back_To_Walk, 4, 1),
-    ("BallMode", Motion.Left_Turn_Afterpick, 4, 1),
+    ("LostMode", Motion.Back_To_Walk, 4, 3),
+    ("BallMode", Motion.Left_Turn_Afterpick, 4, 3),
 ])
 def test_other_motion_completions_keep_immediate_cached_decision(
     mode, command, step, count
@@ -171,8 +175,9 @@ def test_other_motion_completions_keep_immediate_cached_decision(
     (-1, Motion.Left_Turn_Afterpick),
     (1, Motion.Right_Turn_Afterpick),
 ])
-def test_lost_turn_sequence_waits_only_once_and_preserves_five_turn_limit(
-    direction, command
+@pytest.mark.parametrize("recovery_turn", [3, 4, 5, None])
+def test_lost_turn_sequence_forces_three_and_preserves_five_turn_limit(
+    direction, command, recovery_turn
 ):
     harness = _make_harness()
     harness.current_mode = "LostMode"
@@ -191,14 +196,18 @@ def test_lost_turn_sequence_waits_only_once_and_preserves_five_turn_limit(
     MainDecision.LostMode(harness)
     assert harness.motion_pub.messages[-1].command == command
 
-    for count in range(1, 6):
+    last_turn = recovery_turn or 5
+    for count in range(1, last_turn + 1):
         assert harness.lost_body_turn_count == count
         assert harness.lost_found_dir == direction
         assert harness.motion_end is False
         harness.ball_buffer.extend([Ball.Ball_None] * 3)
         harness.hurdle_buffer.extend([99] * 3)
         harness.hurdle_ready_buffer.extend([False] * 3)
-        cached_status = Motion.Forward_4step if count == 1 else Line.Line_None
+        cached_status = (
+            Motion.Forward_4step
+            if count <= 3 or count == recovery_turn else Line.Line_None
+        )
         for _ in range(3):
             MainDecision.LineResultCallback(
                 harness,
@@ -209,27 +218,37 @@ def test_lost_turn_sequence_waits_only_once_and_preserves_five_turn_limit(
 
         MainDecision.MotionEndCallback(harness, ended)
 
-        if count == 1:
-            assert len(harness.motion_pub.messages) == 1
+        if count == 3:
+            assert len(harness.motion_pub.messages) == 3
+            fresh_status = (
+                Motion.Forward_4step
+                if recovery_turn == 3 else Line.Line_None
+            )
             for index in range(3):
                 MainDecision.LineResultCallback(
                     harness,
                     SimpleNamespace(
-                        status=Line.Line_None, angle=0.0, follow_point=False
+                        status=fresh_status, angle=0.0, follow_point=False
                     ),
                 )
                 assert len(harness.motion_pub.messages) == (
-                    2 if index == 2 else 1
+                    4 if index == 2 else 3
                 )
         assert len(harness.motion_pub.messages) == count + 1
 
     assert [msg.command for msg in harness.motion_pub.messages] == (
-        [command] * 5 + [Motion.Backward_half]
+        [command] * last_turn
+        + [Motion.Back_To_Walk if recovery_turn else Motion.Backward_half]
     )
-    assert harness.lost_step == 0
-    assert harness.lost_found_dir == 0
+    if recovery_turn:
+        assert harness.lost_back_to_walk_pending is True
+        assert harness.lost_found_dir == direction
+    else:
+        assert harness.lost_step == 0
+        assert harness.lost_found_dir == 0
+        assert harness.lost_body_turn_count == 0
     assert sum(
-        "[LostFirstTurn]" in message for message in harness.logger.messages
+        "[LostForcedTurns]" in message for message in harness.logger.messages
     ) == 1
 
 
@@ -1098,7 +1117,9 @@ def test_failed_pick_runs_backward_then_turn_without_neck_up():
 
 
 @pytest.mark.parametrize(
-    'shoot_status', [Motion.Shoot, Motion.Shoot_Close, Motion.Shoot_Mid],
+    'shoot_status', [
+        Motion.Shoot, Motion.Shoot_Close, Motion.Shoot_Mid, Motion.Shoot_62,
+    ],
 )
 def test_confirmed_ball_is_not_checked_again_before_shoot(shoot_status):
     harness = SimpleNamespace(
@@ -1140,7 +1161,13 @@ def test_confirmed_ball_is_not_checked_again_before_shoot(shoot_status):
     assert harness.hoop_vision_active is False
 
 
-def test_verified_shoot_mid_publishes_34_and_runs_post_shoot_return():
+@pytest.mark.parametrize('shoot_status, shoot_name, distance', [
+    (Motion.Shoot_Mid, 'Shoot_Mid', 66.0),
+    (Motion.Shoot_62, 'Shoot_62', 62.0),
+])
+def test_verified_shoot_publishes_command_and_runs_post_shoot_return(
+    shoot_status, shoot_name, distance,
+):
     harness = _make_harness()
     harness.current_mode = 'BallMode'
     harness.has_ball = True
@@ -1176,12 +1203,13 @@ def test_verified_shoot_mid_publishes_34_and_runs_post_shoot_return():
     MainDecision.BallResultCallback(
         harness,
         SimpleNamespace(
-            status=Motion.Shoot_Mid, angle=0.0, detected_angle=1.5,
-            ball_in_hand=True, goal_distance_cm=66.0, pre_shoot_verified=True,
+            status=shoot_status, angle=0.0, detected_angle=1.5,
+            ball_in_hand=True, goal_distance_cm=distance,
+            pre_shoot_verified=True,
         ),
     )
 
-    assert harness.motion_pub.messages[-1].command == Motion.Shoot_Mid
+    assert harness.motion_pub.messages[-1].command == shoot_status
     assert harness.pre_shoot_result_waiting is False
     assert harness.has_ball is False
     assert harness.shoot_in_progress is True
@@ -1191,8 +1219,8 @@ def test_verified_shoot_mid_publishes_34_and_runs_post_shoot_return():
     assert harness.hoop_vision_active is False
     assert harness.webcam_ball_allowed is False
     assert any(
-        '[ShootDecisionEvidence] action=Shoot_Mid' in message
-        and 'goal_distance=66.00cm' in message
+        f'[ShootDecisionEvidence] action={shoot_name}' in message
+        and f'goal_distance={distance:.2f}cm' in message
         for message in harness.logger.messages
     )
 
@@ -1221,14 +1249,16 @@ def test_verified_shoot_mid_publishes_34_and_runs_post_shoot_return():
     harness.BallMode()
     assert harness.current_mode == 'LineTrackingMode'
     assert [message.command for message in harness.motion_pub.messages] == [
-        Motion.Back_To_Initial, Motion.Shoot_Mid, Motion.Neck_Down,
+        Motion.Back_To_Initial, shoot_status, Motion.Neck_Down,
         *([Motion.Right_Turn_Afterpick] * 4), Motion.Back_To_Walk,
         Motion.Forward_4step,
     ]
 
 
 @pytest.mark.parametrize(
-    'shoot_status', [Motion.Shoot, Motion.Shoot_Close, Motion.Shoot_Mid],
+    'shoot_status', [
+        Motion.Shoot, Motion.Shoot_Close, Motion.Shoot_Mid, Motion.Shoot_62,
+    ],
 )
 def test_shoot_without_possession_returns_to_line_tracking(shoot_status):
     harness = _make_harness()

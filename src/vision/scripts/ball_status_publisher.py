@@ -36,6 +36,7 @@ class BallStatus:
     Shoot_Close = 32
     Shoot_Forward = 33
     Shoot_Mid = 34
+    Shoot_62 = 35
     Ball_Lost = 45
     Ball_None = 99
 
@@ -75,9 +76,11 @@ class BallDecision:
         # 27/33번 MotionEnd 이후 골대 판단은 pre_shoot_verified로 보낸다.
         self.goal_pre_shoot_entry_distance_cm = 83.5
         self.goal_shoot_max_distance_cm = 74.0
-        self.goal_normal_shoot_min_distance_cm = 64.0
-        self.goal_mid_shoot_min_distance_cm = 62.0
+        self.goal_shoot_min_distance_cm = 68.0
+        self.goal_mid_shoot_min_distance_cm = 64.0
         self.goal_mid_shoot_max_distance_cm = 68.0
+        self.goal_62_shoot_min_distance_cm = 62.0
+        self.goal_62_shoot_max_distance_cm = 64.0
         self.goal_too_close_distance_cm = 58.0
 
         self.goal_approach_center_min = -5.0
@@ -85,8 +88,10 @@ class BallDecision:
         self.goal_approach_large_angle = 60.0
         self.goal_shoot_close_min = -8.0
         self.goal_shoot_close_max = 0.0
+        self.goal_shoot_62_min = -3.0
+        self.goal_shoot_62_max = 3.0
         self.goal_shoot_mid_min = -4.0
-        self.goal_shoot_mid_max = 3.0
+        self.goal_shoot_mid_max = 0.7
         self.goal_shoot_far_min = -4.0
         self.goal_shoot_far_max = 4.0
         self.goal_shoot_large_angle = 20.0
@@ -206,13 +211,20 @@ class BallDecision:
             return BallStatus.Backward_half, 0.0
 
         if distance <= self.goal_shoot_max_distance_cm:
+            # Disjoint bands: Close < 61, 62 in [61, 63], Mid in (63, 68].
             if (
-                self.goal_mid_shoot_min_distance_cm
+                self.goal_62_shoot_min_distance_cm
                 <= distance
+                <= self.goal_62_shoot_max_distance_cm
+            ):
+                shoot_status = BallStatus.Shoot_62
+            elif (
+                self.goal_mid_shoot_min_distance_cm
+                < distance
                 <= self.goal_mid_shoot_max_distance_cm
             ):
                 shoot_status = BallStatus.Shoot_Mid
-            elif distance >= self.goal_normal_shoot_min_distance_cm:
+            elif distance > self.goal_shoot_min_distance_cm:
                 shoot_status = BallStatus.Shoot
             else:
                 shoot_status = BallStatus.Shoot_Close
@@ -244,6 +256,9 @@ class BallDecision:
         if shoot_status == BallStatus.Shoot_Close:
             center_min = self.goal_shoot_close_min
             center_max = self.goal_shoot_close_max
+        elif shoot_status == BallStatus.Shoot_62:
+            center_min = self.goal_shoot_62_min
+            center_max = self.goal_shoot_62_max
         elif shoot_status == BallStatus.Shoot_Mid:
             center_min = self.goal_shoot_mid_min
             center_max = self.goal_shoot_mid_max
@@ -388,6 +403,7 @@ class BallStatusPublisher:
             BallStatus.Shoot,
             BallStatus.Shoot_Close,
             BallStatus.Shoot_Mid,
+            BallStatus.Shoot_62,
         ):
             self.shoot_command_seen = True
 
@@ -613,6 +629,7 @@ class BallStatusPublisher:
                 BallStatus.Shoot,
                 BallStatus.Shoot_Close,
                 BallStatus.Shoot_Mid,
+                BallStatus.Shoot_62,
                 BallStatus.Backward_half,
             )
         ):
