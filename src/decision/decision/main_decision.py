@@ -369,6 +369,14 @@ class MainDecision(Node):
         return True
 
     def MissionStartCallback(self, _request, response):
+        received_at = time.monotonic()
+        self.get_logger().info(
+            '[MISSION REQUEST RECEIVED] /mission/start: '
+            f'receive_monotonic={received_at:.6f}, '
+            f'started={MainDecision._mission_has_started(self)}, '
+            f'motion_ready={self.motion_ready}, motion_end={self.motion_end}, '
+            f'vision_ready={MainDecision._vision_stack_ready(self)}'
+        )
         if MainDecision._mission_has_started(self):
             response.success = True
             response.message = 'Mission already started.'
@@ -416,7 +424,8 @@ class MainDecision(Node):
             # Lightweight unit-test harnesses do not construct ROS publishers.
             self.vision_reset_pending = False
             self.get_logger().info(
-                '[MISSION START] Enter received: cleared pre-start vision data; '
+                '[MISSION START] Start request accepted: '
+                'cleared pre-start vision data; '
                 'collecting 3 new frames per vision stream.'
             )
         else:
@@ -425,7 +434,8 @@ class MainDecision(Node):
             self.vision_reset_token = str(time.monotonic_ns())
             reset_publisher.publish(String(data=self.vision_reset_token))
             self.get_logger().info(
-                '[MISSION START] Enter received: resetting every vision cache, '
+                '[MISSION START] Start request accepted: '
+                'resetting every vision cache, '
                 'vote, hold, and detection latch before collecting frames.'
             )
         response.success = True
@@ -669,6 +679,26 @@ class MainDecision(Node):
                         "[PreShoot] 슈팅 준비 모션 MotionEnd: "
                         "BallStatusPublisher의 verified 결과를 기다립니다."
                     )
+                return
+            if (
+                getattr(self, 'current_mode', None) == "LostMode"
+                and getattr(self, 'lost_step', 0) == 4
+                and getattr(self, 'lost_body_turn_count', 0) == 1
+                and getattr(self, 'status', None) in (
+                    Motion.Left_Turn_Afterpick,
+                    Motion.Right_Turn_Afterpick,
+                )
+            ):
+                # Only the first Lost body turn needs post-completion samples.
+                self.line_data = False
+                self.line_buffer.clear()
+                detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
+                if detail_buffer is not None:
+                    detail_buffer.clear()
+                self.get_logger().info(
+                    "[LostFirstTurn] completed: cleared line votes; "
+                    "waiting for 3 new line results."
+                )
                 return
             self._try_decision_from_cached_results()
         
@@ -1670,10 +1700,7 @@ class MainDecision(Node):
 
         #step 3 : 몸통 회전 명령
         if self.lost_step == 3:
-            #라인 발견하면 lost mode 종료, line tracking으로 이동
-            if self.line_status != Line.Line_None:
-                MainDecision._return_from_lost_to_line_tracking(self)
-                return
+            # Always turn once toward the line found during the neck scan.
             
             #왼쪽 회전 기억
             if self.lost_found_dir == -1:

@@ -221,6 +221,7 @@ def apply_line_status(
     frame_w: int,
     frame_h: int,
     publisher: Optional[LineStatusPublisher] = None,
+    line_center_bias_px: float = 0.0,
 ) -> dict:
     """line_status_publisher의 판단 로직을 호출하고 ROS 모드에서는 즉시 발행한다."""
     values = {
@@ -243,7 +244,9 @@ def apply_line_status(
         status, angle = publisher.publish_line_status(**values)
     else:
         # OpenCV 단독 실행 모드에서는 ROS publish 없이 같은 판단 로직만 사용한다.
-        status, angle = LineDecision().decide(LineFeatures(**values))
+        status, angle = LineDecision(line_center_bias_px).decide(
+            LineFeatures(**values)
+        )
 
     payload["status"] = int(status)
     payload["status_name"] = LINE_STATUS_NAME.get(int(status), "UNKNOWN")
@@ -330,6 +333,7 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "cam_fps": 30,
         "flip_vertical": False,
         "robot_center_offset_x_px": 25.0,
+        "line_center_bias_px": 0.0,
 
         # ROI: YOLO line 중심점 중 이 영역 안에 있는 것만 주행용으로 사용
         "roi_top_ratio": 0.00,
@@ -396,6 +400,9 @@ def load_config(ini_path: str = "settings.ini") -> dict:
             "camera",
             "robot_center_offset_x_px",
             defaults["robot_center_offset_x_px"],
+        ),
+        "line_center_bias_px": gf(
+            "camera", "line_center_bias_px", defaults["line_center_bias_px"]
         ),
 
         "roi_top_ratio": gf("detection", "roi_top_ratio", defaults["roi_top_ratio"]),
@@ -1323,7 +1330,10 @@ def analyze_frame_yolo(
         raw_ball_in_hand_gate.reset()
         payload["raw_ball_in_hand"] = False
     payload = LINE_SMOOTHER.smooth(payload, w, h)
-    payload = apply_line_status(payload, w, h, line_status_publisher)
+    payload = apply_line_status(
+        payload, w, h, line_status_publisher,
+        line_center_bias_px=float(cfg.get("line_center_bias_px", 0.0)),
+    )
 
     # 디버깅용으로 raw 개수도 같이 넣어둠. 알고리즘 쪽에서 안 쓰면 무시해도 됨.
     payload["raw_point_count"] = int(len(raw_line_points))
@@ -1435,7 +1445,10 @@ def main_ros2(ini_path: str = "settings.ini"):
                 10,
             )
             self.pub_debug = self.create_publisher(Image, "/line_tracker/debug_image", 10)
-            self.line_status_publisher = LineStatusPublisher(self)
+            self.line_status_publisher = LineStatusPublisher(
+                self,
+                line_center_bias_px=float(self.cfg.get("line_center_bias_px", 0.0)),
+            )
             self.motion_command_sub = self.create_subscription(
                 MotionCommand,
                 "/motion_command",

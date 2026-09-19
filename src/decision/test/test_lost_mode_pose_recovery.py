@@ -1,6 +1,8 @@
 from collections import deque
 from types import SimpleNamespace
 
+import pytest
+
 from decision.main_decision import Line, MainDecision, Motion
 
 
@@ -132,6 +134,32 @@ def test_lost_right_scan_latches_line_seen_during_motion():
     assert harness.lost_found_dir == 1
     assert harness.lost_step == 3
     assert harness.lost_neck_scan_side == 0
+
+
+@pytest.mark.parametrize("direction, command", [
+    (-1, Motion.Left_Turn_Afterpick),
+    (1, Motion.Right_Turn_Afterpick),
+])
+@pytest.mark.parametrize("line_status", [
+    Line.Line_None, Motion.Forward_4step, Motion.Left_Turn,
+])
+def test_neck_center_always_starts_first_body_turn(
+    direction, command, line_status
+):
+    harness = _lost_harness(
+        line_status=line_status,
+        lost_step=3,
+        lost_found_dir=direction,
+        lost_initial_pose_done=True,
+    )
+
+    MainDecision.LostMode(harness)
+
+    assert harness.commands == [command]
+    assert harness.lost_step == 4
+    assert harness.lost_body_turn_count == 1
+    assert harness.lost_found_dir == direction
+    assert harness.lost_back_to_walk_pending is False
 
 
 def test_lost_body_turn_line_recovery_runs_back_to_walk_first():

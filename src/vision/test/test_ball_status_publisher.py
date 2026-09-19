@@ -146,10 +146,35 @@ class BallDecisionTest(unittest.TestCase):
             (70.0, -4.0, BallStatus.Shoot),
             (70.0, 4.0, BallStatus.Shoot),
             (70.0, 4.01, BallStatus.Right_Turn_5),
+            (66.0, -4.01, BallStatus.Left_Turn_5),
+            (66.0, -4.0, BallStatus.Shoot_Mid),
+            (66.0, 4.0, BallStatus.Shoot_Mid),
+            (66.0, 4.01, BallStatus.Right_Turn_5),
             (60.0, -8.01, BallStatus.Left_Turn_5),
             (60.0, -8.0, BallStatus.Shoot_Close),
             (60.0, 0.0, BallStatus.Shoot_Close),
             (60.0, 0.01, BallStatus.Right_Turn_5),
+        )
+        for distance, angle, expected in cases:
+            with self.subTest(distance=distance, angle=angle):
+                status, _ = self.decision.decide(BallFeatures(
+                    ball_in_hand=True,
+                    shoot_initial_done=True,
+                    realsense_goal_distance_cm=distance,
+                    realsense_goal_angle=angle,
+                ))
+                self.assertEqual(status, expected)
+
+    def test_goal_mid_shoot_angle_range_is_independent(self) -> None:
+        self.decision.goal_shoot_mid_min = -2.0
+        self.decision.goal_shoot_mid_max = 3.0
+        cases = (
+            (66.0, -2.01, BallStatus.Left_Turn_5),
+            (66.0, -2.0, BallStatus.Shoot_Mid),
+            (66.0, 3.0, BallStatus.Shoot_Mid),
+            (66.0, 3.01, BallStatus.Right_Turn_5),
+            (70.0, -4.0, BallStatus.Shoot),
+            (70.0, 4.0, BallStatus.Shoot),
         )
         for distance, angle, expected in cases:
             with self.subTest(distance=distance, angle=angle):

@@ -54,7 +54,8 @@ class LineFeatures:
 
 
 class LineDecision:
-    def __init__(self):
+    def __init__(self, line_center_bias_px: float = 0.0):
+        self.line_center_bias_px = float(line_center_bias_px)
         # 직진, 미세회전, 중간회전, 회전 각도 기준
         self.forward_angle = 7.0
         self.fine_turn_angle = 25.0
@@ -99,11 +100,16 @@ class LineDecision:
         if features.point_count == 1:
             return self._status_from_follow_angle(features.follow_angle)
 
+        # Keep measured geometry intact; offset only the distance used to decide.
+        line_distance = features.line_distance
+        if line_distance is not None:
+            line_distance -= self.line_center_bias_px
+
         # 점 2~3개는 일반 직선 상황이다.
         if features.point_count <= 3:
             return self._status_from_straight_line(
                 features.line_angle,
-                features.line_distance,
+                line_distance,
             )
 
         # 점 4개 이상은 먼저 이차함수의 a값으로 직선과 곡선을 구분한다.
@@ -113,12 +119,12 @@ class LineDecision:
         if is_curve:
             return self._status_from_curve_line(
                 features.tangent_angle,
-                features.line_distance,
+                line_distance,
             )
 
         return self._status_from_straight_line(
             features.line_angle,
-            features.line_distance,
+            line_distance,
         )
 
     def _status_from_straight_line(
@@ -369,9 +375,12 @@ class LineDecision:
 
 
 class LineStatusPublisher:
-    def __init__(self, node: Node, topic_name: str = 'line_result'):
+    def __init__(
+        self, node: Node, topic_name: str = 'line_result',
+        line_center_bias_px: float = 0.0,
+    ):
         self.node = node
-        self.line_decision = LineDecision()
+        self.line_decision = LineDecision(line_center_bias_px)
         self.line_pub = self.node.create_publisher(LineResult, topic_name, 10)
 
     #라인 상태를 판단하고 Publish하는 함수

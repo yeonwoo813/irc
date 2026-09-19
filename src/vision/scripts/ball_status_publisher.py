@@ -85,6 +85,8 @@ class BallDecision:
         self.goal_approach_large_angle = 60.0
         self.goal_shoot_close_min = -8.0
         self.goal_shoot_close_max = 0.0
+        self.goal_shoot_mid_min = -4.0
+        self.goal_shoot_mid_max = 3.0
         self.goal_shoot_far_min = -4.0
         self.goal_shoot_far_max = 4.0
         self.goal_shoot_large_angle = 20.0
@@ -242,6 +244,9 @@ class BallDecision:
         if shoot_status == BallStatus.Shoot_Close:
             center_min = self.goal_shoot_close_min
             center_max = self.goal_shoot_close_max
+        elif shoot_status == BallStatus.Shoot_Mid:
+            center_min = self.goal_shoot_mid_min
+            center_max = self.goal_shoot_mid_max
         else:
             center_min = self.goal_shoot_far_min
             center_max = self.goal_shoot_far_max

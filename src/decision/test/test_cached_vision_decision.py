@@ -5,7 +5,7 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-from decision.main_decision import Ball, MainDecision, Motion
+from decision.main_decision import Ball, Line, MainDecision, Motion
 
 
 class _Logger:
@@ -97,6 +97,140 @@ def test_motion_end_immediately_decides_from_cached_results():
     assert harness.ball_in_hand is True
     assert harness.hurdle_angle == 3.5
     assert harness.hurdle_ready is True
+
+
+@pytest.mark.parametrize("command", [
+    Motion.Left_Turn_Afterpick, Motion.Right_Turn_Afterpick,
+])
+@pytest.mark.parametrize("fresh_votes, expected", [
+    ([Line.Line_None, Motion.Left_Turn, Line.Line_None], Line.Line_None),
+    ([Motion.Left_Turn, Motion.Left_Turn, Line.Line_None], Motion.Left_Turn),
+])
+def test_first_lost_body_turn_waits_for_three_post_completion_line_results(
+    command, fresh_votes, expected
+):
+    harness = _make_harness()
+    harness.current_mode = "LostMode"
+    harness.status = command
+    harness.lost_step = 4
+    harness.lost_body_turn_count = 1
+    harness.line_vote_detail_buffer.append({'sequence': -1})
+    cached_ball = list(harness.ball_buffer)
+    cached_hurdle = list(harness.hurdle_buffer)
+    cached_ready = list(harness.hurdle_ready_buffer)
+    ended = SimpleNamespace(motion_ready=True, motion_end=True)
+
+    MainDecision.MotionEndCallback(harness, ended)
+
+    assert harness.decision_count == 0
+    assert list(harness.line_buffer) == []
+    assert list(harness.line_vote_detail_buffer) == []
+    assert list(harness.ball_buffer) == cached_ball
+    assert list(harness.hurdle_buffer) == cached_hurdle
+    assert list(harness.hurdle_ready_buffer) == cached_ready
+
+    for index, status in enumerate(fresh_votes):
+        MainDecision.LineResultCallback(
+            harness,
+            SimpleNamespace(status=status, angle=0.0, follow_point=False),
+        )
+        # Repeated completion messages must not discard the new samples.
+        MainDecision.MotionEndCallback(harness, ended)
+        assert harness.decision_count == (1 if index == 2 else 0)
+        assert list(harness.line_buffer) == fresh_votes[:index + 1]
+
+    assert harness.line_status == expected
+
+
+@pytest.mark.parametrize("mode, command, step, count", [
+    ("LostMode", Motion.Left_Turn_Afterpick, 4, 2),
+    ("LostMode", Motion.Right_Turn_Afterpick, 4, 5),
+    ("LostMode", Motion.Neck_Center, 3, 0),
+    ("LostMode", Motion.Back_To_Walk, 4, 1),
+    ("BallMode", Motion.Left_Turn_Afterpick, 4, 1),
+])
+def test_other_motion_completions_keep_immediate_cached_decision(
+    mode, command, step, count
+):
+    harness = _make_harness()
+    harness.current_mode = mode
+    harness.status = command
+    harness.lost_step = step
+    harness.lost_body_turn_count = count
+
+    MainDecision.MotionEndCallback(
+        harness, SimpleNamespace(motion_ready=True, motion_end=True)
+    )
+
+    assert harness.decision_count == 1
+    assert harness.line_status == 2
+    assert list(harness.line_buffer) == [1, 2, 2, 2, 3]
+
+
+@pytest.mark.parametrize("direction, command", [
+    (-1, Motion.Left_Turn_Afterpick),
+    (1, Motion.Right_Turn_Afterpick),
+])
+def test_lost_turn_sequence_waits_only_once_and_preserves_five_turn_limit(
+    direction, command
+):
+    harness = _make_harness()
+    harness.current_mode = "LostMode"
+    harness.line_status = Motion.Forward_4step
+    harness.lost_initial_pose_done = True
+    harness.lost_back_to_walk_pending = False
+    harness.lost_step = 3
+    harness.lost_found_dir = direction
+    harness.lost_body_turn_count = 0
+    harness.motion_pub = _Publisher()
+    harness.hurdle_ignore_until = time.monotonic() - 1.0
+    harness.MotionCommand = MethodType(MainDecision.MotionCommand, harness)
+    harness.Decision = MethodType(MainDecision.LostMode, harness)
+    ended = SimpleNamespace(motion_ready=True, motion_end=True)
+
+    MainDecision.LostMode(harness)
+    assert harness.motion_pub.messages[-1].command == command
+
+    for count in range(1, 6):
+        assert harness.lost_body_turn_count == count
+        assert harness.lost_found_dir == direction
+        assert harness.motion_end is False
+        harness.ball_buffer.extend([Ball.Ball_None] * 3)
+        harness.hurdle_buffer.extend([99] * 3)
+        harness.hurdle_ready_buffer.extend([False] * 3)
+        cached_status = Motion.Forward_4step if count == 1 else Line.Line_None
+        for _ in range(3):
+            MainDecision.LineResultCallback(
+                harness,
+                SimpleNamespace(
+                    status=cached_status, angle=0.0, follow_point=False
+                ),
+            )
+
+        MainDecision.MotionEndCallback(harness, ended)
+
+        if count == 1:
+            assert len(harness.motion_pub.messages) == 1
+            for index in range(3):
+                MainDecision.LineResultCallback(
+                    harness,
+                    SimpleNamespace(
+                        status=Line.Line_None, angle=0.0, follow_point=False
+                    ),
+                )
+                assert len(harness.motion_pub.messages) == (
+                    2 if index == 2 else 1
+                )
+        assert len(harness.motion_pub.messages) == count + 1
+
+    assert [msg.command for msg in harness.motion_pub.messages] == (
+        [command] * 5 + [Motion.Backward_half]
+    )
+    assert harness.lost_step == 0
+    assert harness.lost_found_dir == 0
+    assert sum(
+        "[LostFirstTurn]" in message for message in harness.logger.messages
+    ) == 1
 
 
 def test_motion_end_waits_when_cached_results_are_insufficient():

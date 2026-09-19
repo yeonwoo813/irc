@@ -4,6 +4,7 @@
 import atexit
 import os
 import termios
+import time
 import tty
 
 import rclpy
@@ -20,6 +21,8 @@ class MissionStartKeyboard(Node):
         self.tty_fd = None
         self.original_terminal_settings = None
         self.pending_request = None
+        self.last_enter_at = None
+        self.start_request_sent_at = None
         self.mission_armed = False
         self.start_requested = False
         self.armed_screen_active = False
@@ -135,12 +138,28 @@ class MissionStartKeyboard(Node):
             self._restore_terminal()
             return
 
+        read_at = time.monotonic()
+        if pressed and not self.start_requested:
+            self.get_logger().info(
+                f'[MISSION INPUT] read_monotonic={read_at:.6f}, '
+                f'bytes={pressed!r}'
+            )
         for key in pressed.decode(errors='ignore'):
             if key in ('\r', '\n'):
+                self.last_enter_at = read_at
+                self.get_logger().info(
+                    f'[MISSION ENTER] read_monotonic={read_at:.6f}, '
+                    f'armed={self.mission_armed}'
+                )
                 self._request_mission_start()
 
     def _request_mission_start(self):
         if self.pending_request is not None and not self.pending_request.done():
+            elapsed = time.monotonic() - self.start_request_sent_at
+            self.get_logger().warning(
+                '[MISSION ENTER IGNORED] Start request still pending: '
+                f'elapsed={elapsed:.3f}s; no additional request sent.'
+            )
             return
         if not self.start_client.service_is_ready():
             self.get_logger().warning(
@@ -153,19 +172,47 @@ class MissionStartKeyboard(Node):
         # 시작 로그부터 빠짐없이 보이게 한다.
         self.start_requested = True
         self._leave_armed_screen()
+        self.start_request_sent_at = time.monotonic()
+        key_delay = (
+            f'{self.start_request_sent_at - self.last_enter_at:.3f}s'
+            if self.last_enter_at is not None else 'N/A'
+        )
+        self.get_logger().info(
+            '[MISSION REQUEST SEND] /mission/start: '
+            f'send_monotonic={self.start_request_sent_at:.6f}, '
+            f'key_to_send={key_delay}'
+        )
         self.pending_request = self.start_client.call_async(Trigger.Request())
-        self.pending_request.add_done_callback(self._start_response)
+        sent_at = self.start_request_sent_at
+        self.pending_request.add_done_callback(
+            lambda future: self._start_response(future, sent_at=sent_at)
+        )
 
-    def _start_response(self, future):
+    def _start_response(self, future, *, sent_at):
+        received_at = time.monotonic()
+        elapsed = received_at - sent_at
         try:
             response = future.result()
         except Exception as exc:
             self.start_requested = False
-            self.get_logger().error(f'Mission start request failed: {exc}')
+            self.get_logger().error(
+                '[MISSION RESPONSE ERROR] '
+                f'receive_monotonic={received_at:.6f}, '
+                f'send_monotonic={sent_at:.6f}, '
+                f'round_trip={elapsed:.3f}s: '
+                f'Mission start request failed: {exc}'
+            )
             if self.mission_armed:
                 self._enter_armed_screen()
             return
 
+        self.get_logger().info(
+            '[MISSION RESPONSE] '
+            f'receive_monotonic={received_at:.6f}, '
+            f'send_monotonic={sent_at:.6f}, '
+            f'round_trip={elapsed:.3f}s, success={response.success}, '
+            f'message={response.message!r}'
+        )
         if response.success:
             self.mission_armed = False
             self.get_logger().info(f'[MISSION KEY] {response.message}')
