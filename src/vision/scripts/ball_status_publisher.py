@@ -79,7 +79,7 @@ class BallDecision:
         self.goal_shoot_min_distance_cm = 68.0
         self.goal_mid_shoot_min_distance_cm = 64.0
         self.goal_mid_shoot_max_distance_cm = 68.0
-        self.goal_62_shoot_min_distance_cm = 62.0
+        self.goal_62_shoot_min_distance_cm = 60.5
         self.goal_62_shoot_max_distance_cm = 64.0
         self.goal_too_close_distance_cm = 58.0
 
@@ -88,8 +88,8 @@ class BallDecision:
         self.goal_approach_large_angle = 60.0
         self.goal_shoot_close_min = -8.0
         self.goal_shoot_close_max = 0.0
-        self.goal_shoot_62_min = -3.0
-        self.goal_shoot_62_max = 3.0
+        self.goal_shoot_62_min = -4.5
+        self.goal_shoot_62_max = 1.0
         self.goal_shoot_mid_min = -4.0
         self.goal_shoot_mid_max = 0.7
         self.goal_shoot_far_min = -4.0

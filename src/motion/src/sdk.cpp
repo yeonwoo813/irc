@@ -197,6 +197,7 @@ void SDK_Motion::define_motions()
 
     motion_forward_2.blends =
     {
+
         BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
@@ -208,7 +209,7 @@ void SDK_Motion::define_motions()
         BlendType::Smooth,
         BlendType::Smooth,
         BlendType::Smooth,
-        BlendType::Smooth
+        BlendType::Smooth,
     };
 
     motion_library_[1] = motion_forward_2;
@@ -251,10 +252,10 @@ void SDK_Motion::define_motions()
             R(3034), R(2140), R(1969), R(1960)
         },
         {
-            R(2025), R(1404), R(2383), R(2360), R(2012), R(2036),
-            R(2914), R(1550), R(1514), R(2008), R(2034), R(2098),
-            R(2045), R(1662), R(1137), R(1980), R(2158), R(2426),
-            R(2990), R(2129), R(1945), R(1964)
+            R(2026), R(1398), R(2366), R(2369), R(2015), R(2033),
+            R(2919), R(1563), R(1510), R(2014), R(2032), R(2105),
+            R(2034), R(1661), R(1131), R(1981), R(2156), R(2426),
+            R(2995), R(2128), R(1947), R(1964)
         },
         {
             R(2042), R(1331), R(2309), R(2286), R(2031), R(2027),
@@ -296,18 +297,18 @@ void SDK_Motion::define_motions()
 
     motion_fine_left_2.durations =
     {
-        0.07,
-        0.07,
-        0.07,
         0.075,
         0.075,
         0.075,
-        0.07,
-        0.07,
-        0.07,
+        0.08,
+        0.08,
+        0.08,
         0.075,
         0.075,
-        0.075
+        0.075,
+        0.08,
+        0.08,
+        0.08
     };
 
     motion_fine_left_2.blends =
@@ -770,10 +771,10 @@ void SDK_Motion::define_motions()
 
     const std::vector<std::vector<double>> webcam_ball_mode_walk_cycle =
     {
-        {2061,1244,2297,2099,2060,2079,2898,1707,1669,2049,2024,2105,2012,1648,1037,1967,2108,2436,3069,2144,1978,1965},
+        {2056,1239,2316,2088,2062,2071,2903,1685,1675,2046,2052,2108,2061,1649,1044,1968,2111,2435,3064,2145,1974,1964},
         {2054,1242,2312,2106,2053,2034,2885,1424,1363,2013,2022,2109,2002,1649,1039,1967,2108,2436,3067,2144,1976,1965},
         {2054,1251,2336,2087,2051,2041,2763,1616,1508,2024,2017,2109,2016,1652,1049,1970,2116,2435,3060,2144,1970,1965},
-        {2050,1200,2280,2062,2050,2047,2846,1647,1515,2024,2016,2094,2018,1651,1051,1971,2117,2435,3058,2145,1972,1964},
+        {2048,1193,2292,2050,2046,2048,2849,1622,1521,2023,2064,2093,2061,1653,1059,1973,2121,2433,3046,2147,1968,1962},
         {2052,1134,2523,2232,2051,2042,2846,1687,1591,2008,2039,2107,2033,1651,1049,1975,2119,2436,3061,2144,1972,1964},
         {2045,1306,2346,2152,2049,2049,2848,1644,1608,2029,2066,2100,2058,1654,1062,1978,2127,2435,3051,2143,1964,1965}
     };
@@ -784,9 +785,10 @@ void SDK_Motion::define_motions()
             motion_webcam_ball_mode_walk.poses.end(),
             webcam_ball_mode_walk_cycle.begin(),
             webcam_ball_mode_walk_cycle.end());
+        const double short_duration = repeat == 0 ? 0.045 : 0.04;
         motion_webcam_ball_mode_walk.durations.insert(
             motion_webcam_ball_mode_walk.durations.end(),
-            {0.045, 0.045, 0.045, 0.07, 0.07, 0.07});
+            {short_duration, short_duration, short_duration, 0.06, 0.06, 0.06});
         motion_webcam_ball_mode_walk.blends.insert(
             motion_webcam_ball_mode_walk.blends.end(),
             {BlendType::Stop, BlendType::Stop, BlendType::Stop,
@@ -804,10 +806,10 @@ void SDK_Motion::define_motions()
 
     motion_webcam_ball_mode_walk.durations.insert(
         motion_webcam_ball_mode_walk.durations.end(),
-        {0.04, 0.04, 0.04, 0.8});
+        {0.04, 0.04, 0.04, 0.7});
     motion_webcam_ball_mode_walk.blends.insert(
         motion_webcam_ball_mode_walk.blends.end(),
-        {BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Smooth});
+        {BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Stop});
 
     motion_library_[8] = motion_webcam_ball_mode_walk;
 
@@ -1049,13 +1051,17 @@ void SDK_Motion::define_motions()
         {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
         {2071,1436,2141,2174,2054,2081,2694,1796,1514,2042,2054,2118,2062,1646,1506,2055,42,2436,3073,2144,1984,1964},
         {2071,1429,2141,2172,2054,2081,2694,1797,1507,2041,2059,2112,2064,1097,2307,2109,581,2436,3070,2144,1984,1964},
-        {2071,1429,2141,2172,2054,2081,2694,1797,1507,2041,2059,2112,2064,1096,2307,2109,582,2436,3071,2144,1984,1964}
+        {2071,1429,2141,2172,2054,2081,2694,1797,1507,2041,2059,2112,2064,1096,2307,2109,582,2436,3071,2144,1984,1964},
+        {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
+        {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965}
     };
 
-    motion_throw_far.durations = {0.5, 1.0, 0.1, 0.015};
+    motion_throw_far.durations = {0.5, 1.0, 0.1, 0.015, 0.3, 0.2};
     motion_throw_far.blends =
     {
         BlendType::Smooth,
+        BlendType::Stop,
+        BlendType::Stop,
         BlendType::Stop,
         BlendType::Stop,
         BlendType::Stop
@@ -1842,7 +1848,7 @@ void SDK_Motion::define_motions()
         BlendType::Smooth
     };
 
-    motion_library_[34] = motion_throw_62;
+    motion_library_[35] = motion_throw_62;
 
 }
 

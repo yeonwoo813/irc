@@ -1,3 +1,5 @@
+from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -13,9 +15,11 @@ import yolo_detector  # noqa: E402
 from yolo_detector import (  # noqa: E402
     BallDetectionHold,
     ContinuousTrueGate,
+    MotionDisplayState,
     ObjectDetection,
     analyze_frame_yolo,
     load_config,
+    webcam_ball_evidence,
 )
 
 
@@ -92,6 +96,72 @@ def test_webcam_ball_hold_is_reset_when_detector_is_off():
 def test_webcam_ball_hold_default_is_half_second():
     cfg = load_config("/__missing_webcam_yolo_test__.ini")
     assert cfg["ball_detection_hold_seconds"] == 0.5
+
+
+@pytest.mark.parametrize("frame_count", [1, 2, 4, 5, 6, 9])
+def test_webcam_ball_evidence_keeps_confidence_on_non_summary_frames(frame_count):
+    hold = BallDetectionHold(hold_seconds=0.5)
+    raw = _ball_payload(detected=True)
+    raw["ball_conf"] = 0.73123456789
+    payload = hold.apply(raw, now=10.0)
+    before = deepcopy(payload)
+    motion = MotionDisplayState()
+    motion.on_command(26)
+    motion.on_motion_state(motion_end=False, motion_ready=True)
+
+    evidence = webcam_ball_evidence(payload, frame_count, motion)
+    evidence = json.loads(json.dumps(evidence))
+
+    assert evidence["frame"] == frame_count
+    assert evidence["ball_conf"] == raw["ball_conf"]
+    assert evidence["ball_raw"] is True
+    assert evidence["ball_hold"] is False
+    assert evidence["hold_elapsed_sec"] == 0.0
+    assert evidence["ball_bbox"] == [100.0, 100.0, 140.0, 140.0]
+    assert evidence["active_motion"] == 26
+    assert evidence["motion_running"] is True
+    assert payload == before
+
+
+def test_webcam_ball_evidence_labels_held_confidence_and_stops_after_expiry():
+    hold = BallDetectionHold(hold_seconds=0.5)
+    hold.apply(_ball_payload(detected=True), now=10.0)
+    motion = MotionDisplayState()
+    held = hold.apply(_ball_payload(detected=False), now=10.2)
+
+    evidence = webcam_ball_evidence(held, 2, motion)
+
+    assert evidence["ball_conf"] == 0.95
+    assert evidence["ball_raw"] is False
+    assert evidence["ball_hold"] is True
+    assert evidence["hold_elapsed_sec"] == pytest.approx(0.2)
+    assert evidence["active_motion"] is None
+    assert evidence["motion_running"] is False
+
+    expired = hold.apply(_ball_payload(detected=False), now=10.5)
+    assert webcam_ball_evidence(expired, 3, motion) is None
+
+
+def test_webcam_ball_evidence_uses_reacquired_confidence():
+    hold = BallDetectionHold(hold_seconds=0.5)
+    hold.apply(_ball_payload(detected=True), now=10.0)
+    hold.apply(_ball_payload(detected=False), now=10.2)
+    raw = _ball_payload(detected=True, x1=200.0)
+    raw["ball_conf"] = 0.42
+    reacquired = hold.apply(raw, now=10.3)
+
+    evidence = webcam_ball_evidence(reacquired, 3, MotionDisplayState())
+
+    assert evidence["ball_conf"] == 0.42
+    assert evidence["ball_raw"] is True
+    assert evidence["ball_hold"] is False
+    assert evidence["ball_bbox"] == [200.0, 100.0, 240.0, 140.0]
+
+
+def test_webcam_ball_evidence_skips_missing_ball():
+    assert webcam_ball_evidence(
+        _ball_payload(detected=False), 1, MotionDisplayState()
+    ) is None
 
 
 def test_analyzer_outputs_held_true_and_draws_hold_overlay():

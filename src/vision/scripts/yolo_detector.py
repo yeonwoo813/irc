@@ -964,6 +964,27 @@ class BallDetectionHold:
         return result
 
 
+def webcam_ball_evidence(
+    payload: dict,
+    frame_count: int,
+    motion_state: MotionDisplayState,
+) -> Optional[dict]:
+    """Keep current and held confidence distinguishable in diagnostic logs."""
+    if not payload.get("ball_detected", False):
+        return None
+
+    return {
+        "frame": frame_count,
+        "ball_conf": payload["ball_conf"],
+        "ball_raw": bool(payload.get("ball_raw_detected", False)),
+        "ball_hold": bool(payload.get("ball_hold_active", False)),
+        "hold_elapsed_sec": payload.get("ball_hold_elapsed_sec", 0.0),
+        "ball_bbox": payload.get("ball_bbox", []),
+        "active_motion": motion_state.active_command,
+        "motion_running": motion_state.running,
+    }
+
+
 def make_vision_payload(dets: list[ObjectDetection], line_points: list[tuple[float, float]], frame_w: int, frame_h: int, cfg: dict) -> dict:
     center_offset_x = float(cfg.get("robot_center_offset_x_px", 25.0))
     payload = make_line_payload(
@@ -1622,6 +1643,15 @@ def main_ros2(ini_path: str = "settings.ini"):
                     rclpy.shutdown()
 
             self.frame_count += 1
+            # Preserve even one-frame detections between periodic summaries.
+            ball_evidence = webcam_ball_evidence(
+                payload, self.frame_count, self.motion_display_state
+            )
+            if ball_evidence is not None:
+                self.get_logger().info(
+                    "[WebcamBallEvidence] "
+                    + json.dumps(ball_evidence, separators=(",", ":"))
+                )
             if self.frame_count % self.cfg["print_every_n_frames"] == 0:
                 self.get_logger().info(
                     f"[{self.frame_count}] status={payload['status']}({payload['status_name']}) "
@@ -1632,6 +1662,7 @@ def main_ros2(ini_path: str = "settings.ini"):
                     f"ball={payload['ball_detected']} "
                     f"ball_raw={payload.get('ball_raw_detected')} "
                     f"ball_hold={payload.get('ball_hold_active')} "
+                    f"ball_conf={payload['ball_conf']:.6f} "
                     f"hurdle={payload['hurdle_detected']} "
                     f"h_dist={payload.get('line_second_point_distance_px')} "
                     f"h_line_ang={payload.get('hurdle_line_angle_deg')}"
