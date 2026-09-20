@@ -60,7 +60,7 @@ class LineDecision:
         self.forward_angle = 7.0
         self.fine_turn_angle = 25.0
         self.half_turn_angle = 30.0
-        self.large_turn_angle = 45.0
+        self.large_turn_angle = 50.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
         self.curve_a = 2.0e-4
@@ -79,7 +79,7 @@ class LineDecision:
         # 직선 구간에서만 거리 보정을 조금 강하게 적용한다.
         self.large_offset_distance = 150.0
         self.large_offset_steering_scale_px = 1000.0
-        self.large_offset_steering_limit = 12.0
+        self.large_offset_steering_limit = 16.0
 
         # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
         self.curve_forward_angle = 7.0

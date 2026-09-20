@@ -204,6 +204,8 @@ class MainDecision(Node):
         self.hurdle_detected = False
         self.hurdle_go_active = False
         self.hurdle_go_started = False
+        self.hurdle_ball_suppressed = False
+        self.hurdle_previous_ball_active = True
         self.hurdle_ignore_until = None
         # 첫 실제 모션 후 3초가 끝날 때까지 허들 상태를 강제로 끕니다.
         # gate가 열릴 때 이 구간의 버퍼도 폐기해 새 프레임만 사용합니다.
@@ -633,6 +635,14 @@ class MainDecision(Node):
                 self.hurdle_go_active = False
                 self.hurdle_go_started = False
                 self.hurdle_detected = False
+                if getattr(self, 'hurdle_ball_suppressed', False):
+                    self.hurdle_ball_suppressed = False
+                    MainDecision._set_vision_activity(
+                        self,
+                        ball_active=self.hurdle_previous_ball_active,
+                        hoop_active=self.hoop_vision_active,
+                        reason='hurdle crossing completed: restore ball detection',
+                    )
                 self.get_logger().info(
                     "Hurdle_Go 완료: hurdle_detected=false, "
                     "허들 모드 잠금을 해제하고 라인 트래킹 복귀를 허용합니다."
@@ -813,7 +823,12 @@ class MainDecision(Node):
         ):
             return
 
-        self.ball_buffer.append(ball_msg.status)
+        ball_status = ball_msg.status
+        if getattr(self, 'hurdle_ball_suppressed', False):
+            # Keep samples flowing, but reject in-flight ball detections.
+            ball_status = Ball.Ball_None
+            detail['status'] = Ball.Ball_None
+        self.ball_buffer.append(ball_status)
         detail_buffer = getattr(self, 'ball_vote_detail_buffer', None)
         if detail_buffer is not None:
             detail_buffer.append(detail)
@@ -1571,6 +1586,17 @@ class MainDecision(Node):
     #Hurdle mission            
     def HurdleMode(self):
         self.current_mode = "HurdleMode"
+        if not getattr(self, 'hurdle_ball_suppressed', False):
+            self.hurdle_previous_ball_active = getattr(
+                self, 'ball_vision_active', True
+            )
+            self.hurdle_ball_suppressed = True
+            MainDecision._set_vision_activity(
+                self,
+                ball_active=False,
+                hoop_active=getattr(self, 'hoop_vision_active', False),
+                reason='hurdle mode: suppress ball detection until crossing ends',
+            )
 
         #step 0: Ready 전 접근명령
         if self.hurdle_step == 0:

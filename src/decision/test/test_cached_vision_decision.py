@@ -1007,6 +1007,110 @@ def test_hurdle_mode_runs_forward_20_once_then_hurdle_go():
     assert harness.hurdle_go_started is False
 
 
+@pytest.mark.parametrize("ball_active, hoop_active", [
+    (True, False), (False, False), (False, True),
+])
+def test_hurdle_blocks_ball_until_crossing_without_delaying_line_return(
+    ball_active, hoop_active
+):
+    harness = _make_harness()
+    harness.ball_vision_active = ball_active
+    harness.hoop_vision_active = hoop_active
+    harness.ball_active_pub = _Publisher()
+    harness.hoop_active_pub = _Publisher()
+    harness.motion_pub = _Publisher()
+    harness.hurdle_ignore_until = time.monotonic() - 1.0
+    harness.hurdle_detected = True
+    harness.hurdle_step = 0
+    harness.hurdle_ready = False
+    harness.hurdle_status = Motion.Back_To_Initial
+    harness.pick_done = False
+    harness.turn_after_pick = False
+    harness.turn_after_shoot = False
+    harness.ball_mode_calls = []
+    harness.BallMode = lambda: harness.ball_mode_calls.append(harness.ball_status)
+    for name in (
+        'MotionCommand', 'HurdleMode', 'LineTracking', 'Decision',
+        '_finish_post_shoot_detection_suppression',
+    ):
+        setattr(harness, name, MethodType(getattr(MainDecision, name), harness))
+
+    MainDecision.HurdleMode(harness)
+
+    assert harness.hurdle_ball_suppressed is True
+    assert harness.ball_vision_active is False
+    assert harness.hoop_vision_active is hoop_active
+    expected_switches = [False] if ball_active else []
+    assert [msg.data for msg in harness.ball_active_pub.messages] == expected_switches
+    assert [msg.command for msg in harness.motion_pub.messages] == [27]
+
+    ended = SimpleNamespace(motion_ready=True, motion_end=True)
+    running = SimpleNamespace(motion_ready=True, motion_end=False)
+    stale_ball = SimpleNamespace(
+        status=Motion.Back_To_Initial, angle=3.0, ball_in_hand=False,
+    )
+    for next_motion in (Motion.Hurdle_Forward_20, Motion.Hurdle_Go,
+                        Motion.Forward_4step):
+        if harness.hurdle_go_active:
+            # A stale completion must not re-enable ball detection before 19 runs.
+            MainDecision.MotionEndCallback(harness, ended)
+            assert harness.hurdle_ball_suppressed is True
+            assert harness.ball_vision_active is False
+        MainDecision.MotionEndCallback(harness, running)
+        crossing = harness.hurdle_go_active
+        for _ in range(5):
+            MainDecision.LineResultCallback(
+                harness,
+                SimpleNamespace(status=Motion.Forward_4step,
+                                angle=0.0, follow_point=False),
+            )
+            MainDecision.BallResultCallback(harness, stale_ball)
+            MainDecision.HurdleResultCallback(
+                harness,
+                SimpleNamespace(status=99 if crossing else 26,
+                                angle=0.0, hurdle_ready=not crossing),
+            )
+        assert list(harness.ball_buffer) == [Ball.Ball_None] * 5
+        assert all(detail['status'] == Ball.Ball_None
+                   for detail in harness.ball_vote_detail_buffer)
+        assert stale_ball.status == Motion.Back_To_Initial
+
+        MainDecision.MotionEndCallback(harness, ended)
+
+        assert harness.motion_pub.messages[-1].command == next_motion
+        assert harness.ball_mode_calls == []
+        if not crossing:
+            assert harness.hurdle_ball_suppressed is True
+            assert harness.ball_vision_active is False
+            assert [msg.data for msg in harness.ball_active_pub.messages] == expected_switches
+
+    assert [msg.command for msg in harness.motion_pub.messages] == [27, 26, 19, 1]
+    assert harness.current_mode == "LineTrackingMode"
+    assert harness.hurdle_count == 1
+    assert harness.hurdle_ball_suppressed is False
+    assert harness.ball_vision_active is ball_active
+    assert harness.hoop_vision_active is hoop_active
+    assert harness.hoop_active_pub.messages == []
+    assert [msg.data for msg in harness.ball_active_pub.messages] == (
+        [False, True] if ball_active else []
+    )
+
+    # Normal ball results can enter the decision again after HurdleMode ends.
+    if ball_active:
+        for _ in range(3):
+            MainDecision.LineResultCallback(
+                harness,
+                SimpleNamespace(status=1, angle=0.0, follow_point=False),
+            )
+            MainDecision.BallResultCallback(harness, stale_ball)
+            MainDecision.HurdleResultCallback(
+                harness,
+                SimpleNamespace(status=99, angle=0.0, hurdle_ready=False),
+            )
+        MainDecision.MotionEndCallback(harness, ended)
+        assert harness.ball_mode_calls == [Motion.Back_To_Initial]
+
+
 def test_hurdle_mode_does_not_publish_none_as_motion_zero():
     harness = SimpleNamespace(
         hurdle_step=0,
