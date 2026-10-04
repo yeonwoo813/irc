@@ -5,7 +5,7 @@ import sys
 
 import cv2
 import numpy as np
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 
 SCRIPT = (
@@ -52,6 +52,29 @@ publish_debug_image = true
     assert config["backboard_detection_hold_seconds"] == 1.0
     assert config["ball_loss_log_interval_seconds"] == 1.0
     assert config["publish_debug_image"] is True
+
+
+def test_enter_reset_clears_ball_hold_and_preserves_hoop_state():
+    detector = MODULE.RealSenseYoloDetector.__new__(MODULE.RealSenseYoloDetector)
+    detector.ball_active = True
+    detector.last_valid_ball_state = {'realsense_ball_detected': True}
+    detector.last_valid_ball_detection = object()
+    detector.last_valid_ball_time = 100.0
+    detector.latest_ball_detection = object()
+    detector.latest_raw_ball_candidate = object()
+    detector.latest_hoop_state = {'detected': True}
+    detector.last_valid_backboard_time = 100.0
+
+    detector.cb_ball_start_reset(String(data='enter'))
+
+    assert detector.ball_start_token == 'enter'
+    assert detector.last_valid_ball_state is None
+    assert detector.last_valid_ball_detection is None
+    assert detector.latest_ball_detection is None
+    assert detector.latest_raw_ball_candidate is None
+    assert detector.latest_ball_state['realsense_ball_detected'] is False
+    assert detector.latest_hoop_state == {'detected': True}
+    assert detector.last_valid_backboard_time == 100.0
 
 
 def test_ball_dropout_holds_last_distance_angle_and_box_for_half_second():

@@ -83,7 +83,7 @@ class LineDecision:
 
         # 곡선 판단 전용 기준. 테스트 후 직선과 독립적으로 조정한다.
         self.curve_forward_angle = 7.0
-        self.curve_fine_turn_angle = 25.0
+        self.curve_fine_turn_angle = 27.0
         self.curve_turn_angle = 40.0
         self.curve_angle_priority_threshold = 40.0
 
@@ -337,21 +337,21 @@ class LineDecision:
         if abs_angle <= self.forward_angle:
             return LineStatus.Forward_4step, 0.0
 
-        # 7~22.5도: 전진하며 미세회전
+        # 7도 초과~25도 이하: 전진하며 미세회전
         if abs_angle <= self.fine_turn_angle:
             if angle < 0:
                 return LineStatus.Left_Half_Forward, abs_angle
             else:
                 return LineStatus.Right_Half_Forward, abs_angle
 
-        # 22.5도 초과, 30도 미만: 중간 제자리회전
+        # 25도 초과~30도 미만: 중간 제자리회전
         if abs_angle < self.half_turn_angle:
             if angle < 0:
                 return LineStatus.Left_Turn_Half, abs_angle
             else:
                 return LineStatus.Right_Turn_Half, abs_angle
 
-        # 30도 이상: full turn
+        # 30도 이상: 제자리회전
         if angle < 0:
             return LineStatus.Left_Turn, abs_angle
         else:
@@ -384,6 +384,25 @@ class LineDecision:
         if angle < 0:
             return LineStatus.Left_Turn_Curve, abs_angle
         return LineStatus.Right_Turn_Curve, abs_angle
+
+
+class LineTrackingController:
+    """Select one motion from the latest voted line result at MotionEnd."""
+
+    def next_command(self, status: int, detail: Optional[dict]) -> int:
+        """Keep the 300px distance override; otherwise use the line motion."""
+        if (
+            detail
+            and detail.get('status') == status
+            and detail.get('decision_type') == 'straight'
+        ):
+            distance = float(detail.get('line_distance', math.nan))
+            if math.isfinite(distance) and abs(distance) >= 300.0:
+                return (
+                    LineStatus.Left_Turn if distance < 0.0
+                    else LineStatus.Right_Turn
+                )
+        return status
 
 
 class LineStatusPublisher:

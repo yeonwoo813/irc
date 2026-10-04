@@ -1,7 +1,34 @@
 from collections import deque
-from types import SimpleNamespace
+from pathlib import Path
+import subprocess
+import sys
+from types import MethodType, SimpleNamespace
 
 from decision.main_decision import MainDecision, Motion
+from line_status_publisher import LineTrackingController
+
+
+def test_decision_import_without_new_vision_pythonpath(tmp_path):
+    """An already-open launch terminal must still load the vision controller."""
+    source = Path(__file__).resolve().parents[1] / 'decision/main_decision.py'
+    result = subprocess.run(
+        [sys.executable, '-c', '''
+import importlib.util
+from pathlib import Path
+import runpy
+import sys
+
+# Reproduce a terminal that has not sourced the new vision Python hook.
+sys.path[:] = [p for p in sys.path
+               if not (Path(p) / 'line_status_publisher.py').is_file()]
+assert importlib.util.find_spec('line_status_publisher') is None
+module = runpy.run_path(sys.argv[1])
+controller = module['LineTrackingController']()
+assert controller.next_command(1, None) == 1
+''', str(source)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 class _Logger:
@@ -12,9 +39,18 @@ class _Logger:
         self.messages.append(message)
 
 
+class _StartupPublisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
 def _startup_gate_harness():
     logger = _Logger()
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         test_mode=False,
         mission_started=False,
         mission_armed_logged=False,
@@ -32,6 +68,10 @@ def _startup_gate_harness():
         hurdle_buffer=deque([99, 99, 99], maxlen=5),
         hurdle_ready_buffer=deque([False, False, False], maxlen=5),
         get_logger=lambda: logger,
+        motion_pub=_StartupPublisher(),
+    )
+    harness._reset_vision_decision_cycle = MethodType(
+        MainDecision._reset_vision_decision_cycle, harness,
     )
     return harness, logger
 
@@ -94,7 +134,7 @@ def test_mission_start_is_rejected_until_initial_pose_and_yolo_are_ready():
     )
 
 
-def test_mission_start_clears_prestart_vision_and_opens_gate():
+def test_mission_start_immediately_commands_one_back_to_walk():
     harness, logger = _startup_gate_harness()
     harness.webcam_yolo_ready = True
     harness.realsense_yolo_ready = True
@@ -107,7 +147,10 @@ def test_mission_start_clears_prestart_vision_and_opens_gate():
     assert result is response
     assert response.success is True
     assert harness.mission_started is True
-    assert harness.first_motion_after_start_pending is True
+    assert harness.first_motion_after_start_pending is False
+    assert harness.startup_back_to_walk_pending is True
+    assert harness.motion_end is False
+    assert [msg.command for msg in harness.motion_pub.messages] == [25]
     assert harness.current_mode == 'WaitingMode'
     assert list(harness.line_buffer) == []
     assert list(harness.line_vote_detail_buffer) == []
@@ -116,6 +159,78 @@ def test_mission_start_clears_prestart_vision_and_opens_gate():
     assert list(harness.hurdle_buffer) == []
     assert list(harness.hurdle_ready_buffer) == []
     assert any('[MISSION START]' in message for message in logger.messages)
+    MainDecision.MissionStartCallback(harness, None, response)
+    assert [msg.command for msg in harness.motion_pub.messages] == [25]
+
+
+def test_vision_reset_finishes_before_enter_and_is_not_restarted_by_enter():
+    harness, _ = _startup_gate_harness()
+    harness.motion_ready = harness.motion_end = True
+    harness.webcam_yolo_ready = harness.realsense_yolo_ready = True
+    harness.mission_vision_reset_complete = False
+    harness.vision_reset_pending = False
+    harness.vision_reset_pub = _StartupPublisher()
+    response = SimpleNamespace(success=None, message='')
+
+    MainDecision._maybe_log_mission_armed(harness)
+    token = harness.vision_reset_token
+    assert len(harness.vision_reset_pub.messages) == 1
+    assert MainDecision._mission_armed(harness) is False
+    MainDecision._maybe_log_mission_armed(harness)
+    assert len(harness.vision_reset_pub.messages) == 1
+    MainDecision.MissionStartCallback(harness, None, response)
+    assert response.success is False
+    assert harness.motion_pub.messages == []
+
+    for source in MainDecision.VISION_RESET_PARTICIPANTS:
+        MainDecision.VisionResetAckCallback(
+            harness, SimpleNamespace(data=f'{source}|{token}'),
+        )
+    assert MainDecision._mission_armed(harness) is True
+    MainDecision.MissionStartCallback(harness, None, response)
+    assert response.success is True
+    assert [msg.command for msg in harness.motion_pub.messages] == [25]
+    assert len(harness.vision_reset_pub.messages) == 1
+    assert harness.vision_reset_pending is False
+
+
+def test_enter_resets_ball_latch_without_waiting_or_resetting_line_again():
+    harness, _ = _startup_gate_harness()
+    harness.motion_ready = harness.motion_end = True
+    harness.webcam_yolo_ready = harness.realsense_yolo_ready = True
+    harness.ball_start_reset_pub = _StartupPublisher()
+    harness.vision_reset_pub = _StartupPublisher()
+    harness.ball_buffer.extend([27] * 5)
+    response = SimpleNamespace(success=None, message='')
+
+    MainDecision.MissionStartCallback(harness, None, response)
+
+    assert response.success is True
+    assert [msg.command for msg in harness.motion_pub.messages] == [25]
+    assert harness.vision_reset_pub.messages == []
+    assert len(harness.ball_start_reset_pub.messages) == 1
+    assert harness.ball_start_reset_pending is True
+    assert list(harness.ball_buffer) == [99, 99, 99]
+    MainDecision.BallResultCallback(harness, SimpleNamespace(status=27))
+    assert list(harness.ball_buffer) == [99, 99, 99]
+
+    harness.line_buffer.extend([1, 1, 1])
+    harness.hurdle_buffer.extend([99, 99, 99])
+    MainDecision.VisionResetAckCallback(
+        harness, SimpleNamespace(data='ball_start|old-token'),
+    )
+    assert harness.ball_start_reset_pending is True
+    MainDecision.VisionResetAckCallback(
+        harness,
+        SimpleNamespace(data=f'ball_start|{harness.ball_start_reset_token}'),
+    )
+    assert harness.ball_start_reset_pending is False
+    assert list(harness.line_buffer) == [1, 1, 1]
+    assert list(harness.hurdle_buffer) == [99, 99, 99]
+    MainDecision.BallResultCallback(
+        harness, SimpleNamespace(status=27, angle=0.0, ball_in_hand=False),
+    )
+    assert list(harness.ball_buffer) == [99, 99, 99, 27]
 
 
 def test_first_frames_are_blocked_until_every_vision_reset_ack_arrives():
@@ -195,6 +310,7 @@ def _activity_harness(
     events = []
     logger = _Logger()
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         ball_vision_active=ball_active,
         hoop_vision_active=hoop_active,
         webcam_ball_allowed=webcam_ball_allowed,

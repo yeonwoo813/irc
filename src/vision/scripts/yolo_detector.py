@@ -27,6 +27,7 @@ publish 값:
 """
 
 import configparser
+import os
 import cv2
 import numpy as np
 import time
@@ -51,6 +52,9 @@ from hurdle_status_publisher import HurdleStatusPublisher
 # LineDecision과 같은 기준으로 곡선 여부를 판별해, 곡선 접선각의
 # 기준점만 로봇에서 세 번째로 가까운 점으로 바꾼다.
 LINE_CURVE_A_THRESHOLD = LineDecision().curve_a
+QUIET_LOGS = os.environ.get('IRC_QUIET_LOGS', '').lower() in {
+    '1', 'true', 'yes', 'on',
+}
 
 try:
     from ultralytics import YOLO
@@ -346,6 +350,7 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "yolo_model": "best.pt",
         "yolo_conf": 0.20,
         "line_conf": 0.35,
+        "line_diagnostic_conf": 0.30,
         "line_display_conf": 0.40,
         "ball_conf": 0.20,
         "ball_detection_hold_seconds": 0.5,
@@ -414,6 +419,9 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "yolo_model": gs("yolo", "model", defaults["yolo_model"]),
         "yolo_conf": gf("yolo", "conf", defaults["yolo_conf"]),
         "line_conf": gf("yolo", "line_conf", defaults["line_conf"]),
+        "line_diagnostic_conf": gf(
+            "yolo", "line_diagnostic_conf", defaults["line_diagnostic_conf"]
+        ),
         "line_display_conf": gf(
             "yolo", "line_display_conf", defaults["line_display_conf"]
         ),
@@ -545,7 +553,9 @@ def yolo_detect(model, frame: np.ndarray, cfg: dict) -> list[ObjectDetection]:
     results = model.predict(
         source=frame,
         imgsz=cfg["yolo_imgsz"],
-        conf=cfg["yolo_conf"],
+        conf=(cfg["yolo_conf"] if QUIET_LOGS else min(
+            cfg["yolo_conf"], cfg.get("line_diagnostic_conf", 0.30)
+        )),
         device=cfg["yolo_device"],
         verbose=False,
     )
@@ -964,6 +974,69 @@ class BallDetectionHold:
         return result
 
 
+def webcam_line_evidence(
+    dets: list[ObjectDetection],
+    payload: dict,
+    frame_w: int,
+    frame_h: int,
+    cfg: dict,
+    motion_state: Optional[MotionDisplayState],
+) -> dict:
+    """Record raw candidates separately from the smoothed driving result."""
+    diagnostic_conf = float(cfg.get("line_diagnostic_conf", 0.30))
+    roi_top = int(frame_h * cfg["roi_top_ratio"])
+    roi_bottom = int(frame_h * cfg["roi_bottom_ratio"])
+    roi_left = int(frame_w * cfg["roi_left_ratio"])
+    roi_right = int(frame_w * cfg["roi_right_ratio"])
+    candidates = []
+    for d in dets:
+        if d.name != cfg["line_class"] or d.conf < diagnostic_conf:
+            continue
+        if d.conf < cfg["line_conf"]:
+            rejection_reason = "below_line_conf"
+        elif d.conf < cfg["yolo_conf"]:
+            rejection_reason = "below_yolo_conf"
+        elif not (roi_left <= d.cx <= roi_right and roi_top <= d.cy <= roi_bottom):
+            rejection_reason = "outside_roi"
+        else:
+            rejection_reason = None
+        candidates.append({
+            "conf": float(d.conf),
+            "bbox": [float(d.x1), float(d.y1), float(d.x2), float(d.y2)],
+            "center": [float(d.cx), float(d.cy)],
+            "used_for_raw_line": rejection_reason is None,
+            "rejection_reason": rejection_reason,
+        })
+
+    lost = payload["status"] == LineStatus.Line_Lost
+    smoothing_rejected = payload["smooth_valid_count"] < LINE_SMOOTHER.min_valid
+    lost_reason = None
+    if lost:
+        lost_reason = (
+            "insufficient_valid_frames"
+            if smoothing_rejected else "line_geometry_unavailable"
+        )
+    return {
+        "diagnostic_conf": diagnostic_conf,
+        "yolo_conf": float(cfg["yolo_conf"]),
+        "line_conf": float(cfg["line_conf"]),
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "max_conf": max((d["conf"] for d in candidates), default=None),
+        "raw_point_count": payload["raw_point_count"],
+        "point_count": payload["point_count"],
+        "smooth_valid_count": payload["smooth_valid_count"],
+        "smooth_window": LINE_SMOOTHER.window,
+        "smooth_min_valid": LINE_SMOOTHER.min_valid,
+        "smoothing_rejected": smoothing_rejected,
+        "status": payload["status"],
+        "lost": lost,
+        "lost_reason": lost_reason,
+        "active_motion": motion_state.active_command if motion_state else None,
+        "motion_running": motion_state.running if motion_state else False,
+    }
+
+
 def webcam_ball_evidence(
     payload: dict,
     frame_count: int,
@@ -1314,7 +1387,10 @@ def analyze_frame_yolo(
     ball_detection_hold: Optional[BallDetectionHold] = None,
 ) -> tuple[dict, np.ndarray]:
     h, w = frame.shape[:2]
-    raw_dets = yolo_detect(model, frame, cfg)
+    diagnostic_dets = yolo_detect(model, frame, cfg)
+    # 낮은 신뢰도 후보는 진단에만 사용한다. 기존 주행/공/허들 판단과
+    # 화면에는 원래 YOLO 하한을 통과한 검출만 전달한다.
+    raw_dets = [d for d in diagnostic_dets if d.conf >= cfg["yolo_conf"]]
     dets = raw_dets
     if not ball_detection_active:
         # Webcam YOLO는 라인/공/허들을 한 모델에서 추론하므로 전체
@@ -1359,6 +1435,10 @@ def analyze_frame_yolo(
     # 디버깅용으로 raw 개수도 같이 넣어둠. 알고리즘 쪽에서 안 쓰면 무시해도 됨.
     payload["raw_point_count"] = int(len(raw_line_points))
     payload["ball_detection_active"] = bool(ball_detection_active)
+    if not QUIET_LOGS:
+        payload["line_evidence"] = webcam_line_evidence(
+            diagnostic_dets, payload, w, h, cfg, motion_state
+        )
 
     vis = visualize_yolo(
         frame,
@@ -1453,6 +1533,10 @@ def main_ros2(ini_path: str = "settings.ini"):
                 self.cb_mission_vision_reset,
                 reset_qos,
             )
+            self.ball_start_reset_sub = self.create_subscription(
+                String, "/mission/ball_reset", self.cb_ball_start_reset,
+                reset_qos,
+            )
             self.mission_reset_ack_pub = self.create_publisher(
                 String,
                 "/mission/vision_reset_ack",
@@ -1508,6 +1592,13 @@ def main_ros2(ini_path: str = "settings.ini"):
 
         def cb_motion_command(self, msg: MotionCommand):
             self.motion_display_state.on_command(msg.command)
+
+        def cb_ball_start_reset(self, msg: String):
+            if not str(msg.data):
+                return
+            self.ball_start_token = str(msg.data)
+            self.raw_ball_in_hand_gate.reset()
+            self.ball_detection_hold.reset()
 
         def cb_mission_vision_reset(self, msg: String):
             token = str(msg.data)
@@ -1627,6 +1718,7 @@ def main_ros2(ini_path: str = "settings.ini"):
                 "mission_reset_token",
                 "",
             )
+            payload["ball_start_token"] = getattr(self, "ball_start_token", "")
             self.pub_raw_ball_in_hand.publish(
                 Bool(data=bool(payload.get("raw_ball_in_hand", False)))
             )
@@ -1643,6 +1735,19 @@ def main_ros2(ini_path: str = "settings.ini"):
                     rclpy.shutdown()
 
             self.frame_count += 1
+            if QUIET_LOGS:
+                return
+            # 검출/미검출 전환이 주기 요약 사이에 사라지지 않도록 매 프레임 기록.
+            line_evidence = dict(payload["line_evidence"])
+            line_evidence["frame"] = self.frame_count
+            line_evidence["image_stamp"] = {
+                "sec": int(msg.header.stamp.sec),
+                "nanosec": int(msg.header.stamp.nanosec),
+            }
+            self.get_logger().info(
+                "[WebcamLineEvidence] "
+                + json.dumps(line_evidence, separators=(",", ":"))
+            )
             # Preserve even one-frame detections between periodic summaries.
             ball_evidence = webcam_ball_evidence(
                 payload, self.frame_count, self.motion_display_state

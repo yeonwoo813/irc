@@ -162,6 +162,9 @@ class BallVisionFusionNode(Node):
             self.cb_mission_vision_reset,
             reset_qos,
         )
+        self.ball_start_reset_sub = self.create_subscription(
+            String, "/mission/ball_reset", self.cb_ball_start_reset, reset_qos,
+        )
         self.mission_reset_ack_pub = self.create_publisher(
             String,
             "/mission/vision_reset_ack",
@@ -209,6 +212,18 @@ class BallVisionFusionNode(Node):
             "frames."
         )
 
+    def cb_ball_start_reset(self, msg: String) -> None:
+        token = str(msg.data)
+        if not token:
+            return
+        self.required_ball_start_token = token
+        self.ball_start_reset_waiting = True
+        self.ball_start_sources_seen = set()
+        self._clear_ball_detection_state()
+        self._set_webcam_ball_active(False, "Enter: reset previous ball detection")
+        self.ball_in_hand = False
+        self.ball_status_publisher.reset_for_mission_start()
+
     def _accept_mission_reset_source(
         self,
         source: str,
@@ -217,6 +232,16 @@ class BallVisionFusionNode(Node):
         required = getattr(self, "required_mission_reset_token", "")
         if required and str(payload.get("mission_reset_token", "")) != required:
             return False
+        ball_token = getattr(self, "required_ball_start_token", "")
+        if ball_token and str(payload.get("ball_start_token", "")) != ball_token:
+            return False
+        if getattr(self, "ball_start_reset_waiting", False):
+            self.ball_start_sources_seen.add(source)
+            if {"webcam", "realsense"}.issubset(self.ball_start_sources_seen):
+                self.ball_start_reset_waiting = False
+                self.mission_reset_ack_pub.publish(
+                    String(data=f"ball_start|{ball_token}")
+                )
         if not getattr(self, "mission_reset_waiting", False):
             return True
 
@@ -501,7 +526,10 @@ class BallVisionFusionNode(Node):
         }
 
     def cb_raw_ball_in_hand(self, msg: Bool) -> None:
-        if getattr(self, "mission_reset_waiting", False):
+        if (
+            getattr(self, "mission_reset_waiting", False)
+            or getattr(self, "ball_start_reset_waiting", False)
+        ):
             return
         self.ball_in_hand = bool(msg.data)
 
@@ -553,7 +581,10 @@ class BallVisionFusionNode(Node):
             self.get_logger().info(f"[RealSenseBallDiagnostic] {label}")
 
     def publish_ball_features(self) -> None:
-        if getattr(self, "mission_reset_waiting", False):
+        if (
+            getattr(self, "mission_reset_waiting", False)
+            or getattr(self, "ball_start_reset_waiting", False)
+        ):
             return
         now = time.monotonic()
         rs_age = self._age(

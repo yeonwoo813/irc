@@ -5,6 +5,8 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
+from line_status_publisher import LineTrackingController
+
 from decision.main_decision import Ball, Line, MainDecision, Motion
 
 
@@ -28,6 +30,7 @@ class _Publisher:
 
 def _make_harness():
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         test_mode=False,
         motion_ready=True,
         motion_end=False,
@@ -97,6 +100,56 @@ def test_motion_end_immediately_decides_from_cached_results():
     assert harness.ball_in_hand is True
     assert harness.hurdle_angle == 3.5
     assert harness.hurdle_ready is True
+
+
+@pytest.mark.parametrize('ball_reset_pending', [False, True])
+def test_startup_back_to_walk_end_uses_cached_votes_without_new_frames(
+    ball_reset_pending,
+):
+    harness = _make_harness()
+    harness.mission_started = False
+    harness.motion_end = True
+    harness.motion_pub = _Publisher()
+    if ball_reset_pending:
+        harness.ball_start_reset_pub = _Publisher()
+    harness.pick_done = False
+    harness.turn_after_pick = False
+    harness.turn_after_shoot = False
+    harness.lost_step = 0
+    for name in (
+        'MotionCommand', 'Decision', 'LineTracking',
+        '_finish_post_shoot_detection_suppression',
+    ):
+        setattr(harness, name, MethodType(getattr(MainDecision, name), harness))
+    MainDecision.MissionStartCallback(
+        harness, None, SimpleNamespace(success=None, message=''),
+    )
+    ended = SimpleNamespace(motion_ready=True, motion_end=True)
+    # 직전 모션의 완료 메시지로 출발용 25번을 조기 종료하지 않는다.
+    MainDecision.MotionEndCallback(harness, ended)
+    assert [msg.command for msg in harness.motion_pub.messages] == [25]
+    MainDecision.MotionEndCallback(
+        harness, SimpleNamespace(motion_ready=True, motion_end=False),
+    )
+    for _ in range(5):
+        MainDecision.LineResultCallback(harness, SimpleNamespace(
+            status=Motion.Right_Half_Forward, angle=7.0, follow_point=False,
+        ))
+        MainDecision.BallResultCallback(harness, SimpleNamespace(
+            # Enter 전의 27번이 늦게 도착해도 초기화 중에는 채택하지 않는다.
+            status=Motion.Back_To_Initial if ball_reset_pending else Ball.Ball_None,
+            angle=0.0, ball_in_hand=False,
+        ))
+        MainDecision.HurdleResultCallback(harness, SimpleNamespace(
+            status=99, angle=0.0, hurdle_ready=False,
+        ))
+    assert [msg.command for msg in harness.motion_pub.messages] == [25]
+
+    # 이 콜백만으로 3번을 발행해야 한다. 이후 비전 입력은 주지 않는다.
+    MainDecision.MotionEndCallback(harness, ended)
+    assert [msg.command for msg in harness.motion_pub.messages] == [25, 3]
+    assert harness.startup_back_to_walk_pending is False
+    assert harness.current_mode == 'LineTrackingMode'
 
 
 @pytest.mark.parametrize("command", [
@@ -175,8 +228,8 @@ def test_other_motion_completions_keep_immediate_cached_decision(
     (-1, Motion.Left_Turn_Afterpick),
     (1, Motion.Right_Turn_Afterpick),
 ])
-@pytest.mark.parametrize("recovery_turn", [3, 4, 5, None])
-def test_lost_turn_sequence_forces_three_and_preserves_five_turn_limit(
+@pytest.mark.parametrize("recovery_turn", [3, 4, 5, 6, 7, 8, None])
+def test_lost_turn_sequence_forces_three_and_restarts_scan_after_eight(
     direction, command, recovery_turn
 ):
     harness = _make_harness()
@@ -196,7 +249,7 @@ def test_lost_turn_sequence_forces_three_and_preserves_five_turn_limit(
     MainDecision.LostMode(harness)
     assert harness.motion_pub.messages[-1].command == command
 
-    last_turn = recovery_turn or 5
+    last_turn = recovery_turn or 8
     for count in range(1, last_turn + 1):
         assert harness.lost_body_turn_count == count
         assert harness.lost_found_dir == direction
@@ -238,13 +291,13 @@ def test_lost_turn_sequence_forces_three_and_preserves_five_turn_limit(
 
     assert [msg.command for msg in harness.motion_pub.messages] == (
         [command] * last_turn
-        + [Motion.Back_To_Walk if recovery_turn else Motion.Backward_half]
+        + [Motion.Back_To_Walk if recovery_turn else Motion.Neck_Left]
     )
     if recovery_turn:
         assert harness.lost_back_to_walk_pending is True
         assert harness.lost_found_dir == direction
     else:
-        assert harness.lost_step == 0
+        assert harness.lost_step == 1
         assert harness.lost_found_dir == 0
         assert harness.lost_body_turn_count == 0
     assert sum(
@@ -428,6 +481,135 @@ def test_shoot_forward_preserves_possession_and_does_not_start_post_shoot():
     assert harness.turn_after_shoot is False
     assert harness.shoot_in_progress is False
     assert harness.post_shoot_detection_suppressed is False
+
+
+@pytest.mark.parametrize('command', [Motion.Back_To_Initial, Motion.Shoot_Forward])
+@pytest.mark.parametrize('verified_before_end', [False, True])
+@pytest.mark.parametrize('line_status', [Motion.Forward_4step, Line.Line_None])
+def test_far_pre_shoot_recheck_returns_via_one_completed_back_to_walk(
+    command, verified_before_end, line_status,
+):
+    harness = _make_harness()
+    harness.has_ball = True
+    harness.current_mode = 'BallMode'
+    harness.status = command
+    harness.motion_pub = _Publisher()
+    harness.ball_vision_active = False
+    harness.hoop_vision_active = True
+    harness.webcam_ball_allowed = False
+    harness.ball_count = 2
+    harness.goal_count = 1
+    # 중단됐던 Lost 단계가 있어도 보행 자세 복귀 후 새 라인으로 판단한다.
+    harness.lost_step = 4
+    harness.lost_initial_pose_done = True
+    harness.lost_back_to_walk_pending = True
+    for name in (
+        'MotionCommand', 'LineTracking', 'LostMode',
+        '_finish_post_shoot_detection_suppression',
+    ):
+        setattr(harness, name, MethodType(getattr(MainDecision, name), harness))
+
+    started = SimpleNamespace(motion_ready=True, motion_end=False)
+    ended = SimpleNamespace(motion_ready=True, motion_end=True)
+    verified = SimpleNamespace(
+        status=Ball.Ball_None, angle=0.0, ball_in_hand=True,
+        goal_distance_cm=200.0, pre_shoot_verified=True,
+    )
+    harness.MotionCommand()
+    MainDecision.MotionEndCallback(harness, started)
+    if verified_before_end:
+        MainDecision.BallResultCallback(harness, verified)
+        assert [msg.command for msg in harness.motion_pub.messages] == [command]
+    MainDecision.MotionEndCallback(harness, ended)
+    if not verified_before_end:
+        MainDecision.BallResultCallback(harness, verified)
+    assert [msg.command for msg in harness.motion_pub.messages] == [command, 25]
+    assert harness.pre_shoot_result_waiting is False
+    assert harness.back_to_walk_after_pre_shoot_cancel is True
+
+    for _ in range(3):
+        MainDecision.LineResultCallback(harness, SimpleNamespace(
+            status=line_status, angle=3.0, follow_point=True,
+        ))
+    # 이전 완료 메시지가 늦게 와도 25번 실행 확인 전에는 걷지 않는다.
+    MainDecision.MotionEndCallback(harness, ended)
+    assert len(harness.motion_pub.messages) == 2
+    MainDecision.MotionEndCallback(harness, started)
+    # 복귀 중 골대가 가까워져도 슛이 25번을 중단하지 않는다.
+    MainDecision.BallResultCallback(harness, SimpleNamespace(
+        status=Motion.Shoot, angle=0.0, ball_in_hand=True,
+        goal_distance_cm=70.0, pre_shoot_verified=False,
+    ))
+    assert len(harness.motion_pub.messages) == 2
+    # 공/허들 투표를 기다리지 않고 완료 시점의 라인으로 복귀한다.
+    MainDecision.MotionEndCallback(harness, ended)
+    expected = (
+        Motion.Back_To_Initial if line_status == Line.Line_None
+        else line_status
+    )
+    commands = [msg.command for msg in harness.motion_pub.messages]
+    assert commands == [command, Motion.Back_To_Walk, expected]
+    assert commands.count(Motion.Back_To_Walk) == 1
+    assert harness.back_to_walk_after_pre_shoot_cancel is False
+    assert harness.pre_shoot_result_waiting is False
+    assert harness.current_mode == (
+        'LostMode' if line_status == Line.Line_None else 'LineTrackingMode'
+    )
+    assert harness.lost_step == 0
+    assert harness.has_ball is True
+    assert harness.ball_in_hand is True
+    assert harness.ball_vision_active is False
+    assert harness.hoop_vision_active is True
+    assert harness.webcam_ball_allowed is False
+    assert (harness.ball_count, harness.goal_count) == (2, 1)
+
+
+@pytest.mark.parametrize('distance, verified, possession', [
+    (0.0, True, True),
+    (120.0, True, True),
+    (float('nan'), True, True),
+    (float('inf'), True, True),
+    (200.0, False, True),
+    (200.0, True, False),
+])
+def test_pre_shoot_none_does_not_cancel_without_verified_far_goal(
+    distance, verified, possession,
+):
+    harness = _make_harness()
+    harness.motion_end = True
+    harness.pre_shoot_result_waiting = True
+    MainDecision.BallResultCallback(harness, SimpleNamespace(
+        status=Ball.Ball_None, angle=0.0, ball_in_hand=possession,
+        goal_distance_cm=distance, pre_shoot_verified=verified,
+    ))
+    assert harness.pre_shoot_result_waiting is True
+    assert harness.pre_shoot_verified_result is None
+    assert harness.decision_count == 0
+
+
+def test_pre_shoot_return_waits_for_line_samples_after_walk_completion():
+    harness = _make_harness()
+    harness.back_to_walk_after_pre_shoot_cancel = True
+    harness.pre_shoot_return_to_walk_started = True
+    harness.line_buffer.clear()
+    harness.ball_buffer.clear()
+    harness.hurdle_buffer.clear()
+    harness.motion_pub = _Publisher()
+    for name in (
+        'MotionCommand', 'LineTracking',
+        '_finish_post_shoot_detection_suppression',
+    ):
+        setattr(harness, name, MethodType(getattr(MainDecision, name), harness))
+    MainDecision.MotionEndCallback(
+        harness, SimpleNamespace(motion_ready=True, motion_end=True),
+    )
+    assert harness.motion_pub.messages == []
+    for index in range(3):
+        MainDecision.LineResultCallback(harness, SimpleNamespace(
+            status=Motion.Forward_4step, angle=0.0, follow_point=False,
+        ))
+        assert len(harness.motion_pub.messages) == (1 if index == 2 else 0)
+    assert harness.motion_pub.messages[-1].command == Motion.Forward_4step
 
 
 def test_lost_back_to_initial_does_not_arm_pre_shoot_wait():
@@ -820,6 +1002,7 @@ def test_confirmed_hurdle_ignores_stale_none_in_status_vote():
 
 def test_latched_hurdle_mode_cannot_be_preempted_by_ball_detection():
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         motion_ready=True,
         line_data=True,
         ball_data=True,
@@ -870,6 +1053,7 @@ def test_latched_hurdle_mode_cannot_be_preempted_by_ball_detection():
 
 def _make_missing_post_pick_goal_harness():
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         motion_ready=True,
         line_data=True,
         ball_data=True,
@@ -980,6 +1164,7 @@ def test_hurdle_ready_false_waits_when_all_statuses_are_forward_20():
 
 def test_hurdle_mode_runs_forward_20_once_then_hurdle_go():
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         hurdle_step=0,
         hurdle_ready=True,
         hurdle_status=Motion.Left_Turn_Mission_10,
@@ -1113,6 +1298,7 @@ def test_hurdle_blocks_ball_until_crossing_without_delaying_line_return(
 
 def test_hurdle_mode_does_not_publish_none_as_motion_zero():
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         hurdle_step=0,
         hurdle_ready=False,
         hurdle_status=99,
@@ -1132,6 +1318,7 @@ def test_hurdle_mode_does_not_publish_none_as_motion_zero():
 
 def _make_missing_pre_pick_ball_harness(ball_status):
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         motion_ready=True,
         line_data=True,
         ball_data=True,
@@ -1158,6 +1345,111 @@ def _make_missing_pre_pick_ball_harness(ball_status):
     return harness
 
 
+def _make_goal_missing_harness():
+    harness = _make_harness()
+    harness.current_mode = 'BallMode'
+    harness.status = Motion.Right_Turn_Mission_5
+    harness.has_ball = True
+    harness.pick_done = False
+    harness.turn_after_pick = False
+    harness.turn_after_shoot = False
+    harness.neck_down_pending = False
+    harness.lost_step = 0
+    harness.motion_pub = _Publisher()
+    harness.line_buffer = deque([1] * 5, maxlen=5)
+    harness.ball_buffer = deque([99] * 5, maxlen=5)
+    harness.hurdle_buffer = deque([99] * 5, maxlen=5)
+    harness.hurdle_ready_buffer = deque([False] * 5, maxlen=5)
+    for name in (
+        'Decision', 'MotionCommand', 'BallMode', 'LineTracking', 'LostMode',
+        '_finish_post_shoot_detection_suppression',
+    ):
+        setattr(harness, name, MethodType(getattr(MainDecision, name), harness))
+    return harness
+
+
+@pytest.mark.parametrize('fresh_votes, expected', [
+    ([99, 99, 99], Motion.Forward_4step),
+    ([99, 99, 34], Motion.Forward_4step),
+    ([99, 34, 34], Motion.Shoot_Mid),
+    ([99, 29, 29], Motion.Right_Turn_Mission_5),
+    ([1, 29, 34], Motion.Shoot_Mid),
+])
+def test_goal_missing_waits_for_three_new_results_and_rechecks_once(
+    fresh_votes, expected,
+):
+    harness = _make_goal_missing_harness()
+    harness.ball_vote_detail_buffer.append({'sequence': -1, 'status': 99})
+    line_cache = list(harness.line_buffer)
+    hurdle_cache = list(harness.hurdle_buffer)
+    MainDecision.MotionEndCallback(
+        harness, SimpleNamespace(motion_ready=True, motion_end=True),
+    )
+
+    assert harness.goal_missing_recheck_pending is True
+    assert harness.current_mode == 'BallMode'
+    assert harness.motion_pub.messages == []
+    assert list(harness.ball_buffer) == []
+    assert list(harness.ball_vote_detail_buffer) == []
+    assert list(harness.line_buffer) == line_cache
+    assert list(harness.hurdle_buffer) == hurdle_cache
+
+    for index, status in enumerate(fresh_votes):
+        MainDecision.BallResultCallback(harness, SimpleNamespace(
+            status=status, angle=0.9, ball_in_hand=True, goal_distance_cm=67.5,
+        ))
+        if index < 2:
+            # 라인 콜백이나 중복 판단 호출이 재확인을 조기 종료하지 않는다.
+            assert harness._try_decision_from_cached_results() is False
+            assert harness.goal_missing_recheck_pending is True
+            assert harness.motion_pub.messages == []
+
+    assert [msg.command for msg in harness.motion_pub.messages] == [expected]
+    assert harness.goal_missing_recheck_pending is False
+    assert harness.motion_end is False
+
+
+def test_goal_missing_recheck_rearms_after_another_goal_motion():
+    harness = _make_goal_missing_harness()
+    ended = SimpleNamespace(motion_ready=True, motion_end=True)
+    MainDecision.MotionEndCallback(harness, ended)
+    for _ in range(3):
+        MainDecision.BallResultCallback(harness, SimpleNamespace(
+            status=29, angle=0.9, ball_in_hand=True, goal_distance_cm=67.5,
+        ))
+    assert [msg.command for msg in harness.motion_pub.messages] == [29]
+    harness.line_buffer.extend([1] * 3)
+    harness.hurdle_buffer.extend([99] * 3)
+    harness.hurdle_ready_buffer.extend([False] * 3)
+    harness.ball_buffer.extend([99] * 3)
+    MainDecision.MotionEndCallback(harness, ended)
+    assert harness.goal_missing_recheck_pending is True
+    assert [msg.command for msg in harness.motion_pub.messages] == [29]
+
+
+@pytest.mark.parametrize('excluded_state', [
+    {'has_ball': False},
+    {'current_mode': 'LineTrackingMode'},
+    {'turn_after_pick': True},
+    {'back_to_walk_after_pick': True},
+    {'turn_after_shoot': True},
+    {'back_to_walk_after_shoot': True},
+    {'hurdle_detected': True},
+])
+def test_goal_missing_recheck_does_not_delay_other_modes(excluded_state):
+    harness = _make_harness()
+    harness.current_mode = 'BallMode'
+    harness.has_ball = True
+    harness.ball_buffer = deque([99] * 5, maxlen=5)
+    for name, value in excluded_state.items():
+        setattr(harness, name, value)
+    MainDecision.MotionEndCallback(
+        harness, SimpleNamespace(motion_ready=True, motion_end=True),
+    )
+    assert not getattr(harness, 'goal_missing_recheck_pending', False)
+    assert harness.decision_count == 1
+
+
 def test_pre_pick_missing_ball_immediately_leaves_ball_mode():
     for ball_status in (Ball.Ball_None, Ball.Ball_Lost):
         harness = _make_missing_pre_pick_ball_harness(ball_status)
@@ -1169,6 +1461,7 @@ def test_pre_pick_missing_ball_immediately_leaves_ball_mode():
 
 def _make_post_pick_harness(ball_in_hand):
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         current_mode="BallMode",
         pick_done=True,
         turn_after_pick=False,
@@ -1227,6 +1520,7 @@ def test_failed_pick_runs_backward_then_turn_without_neck_up():
 )
 def test_confirmed_ball_is_not_checked_again_before_shoot(shoot_status):
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         current_mode="BallMode",
         pick_done=False,
         turn_after_pick=False,

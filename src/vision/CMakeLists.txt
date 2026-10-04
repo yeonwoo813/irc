@@ -7,6 +7,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -49,6 +50,10 @@ install(FILES
   scripts/hurdle_status_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
+
+# decision uses the vision-owned controller at MotionEnd without another
+# topic/service round trip. Keep the existing script import working as well.
+ament_python_install_module(scripts/line_status_publisher.py)
 
 install(DIRECTORY
   config

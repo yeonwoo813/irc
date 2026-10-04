@@ -38,6 +38,67 @@ def test_standalone_vision_allows_normal_webcam_handoff_by_default():
     assert DEFAULT_WEBCAM_ALLOWED_ON_START is True
 
 
+def test_enter_ball_reset_discards_queued_detections_until_both_sources_reset():
+    from ball_status_publisher import BallStatusPublisher
+
+    acknowledgements = []
+    publisher = BallStatusPublisher.__new__(BallStatusPublisher)
+    from collections import deque
+    publisher.webcam_detection_buffer = deque([True] * 5, maxlen=5)
+    publisher.webcam_ball_confirmed = True
+    publisher.back_to_initial_waiting = True
+    publisher.back_to_initial_done = False
+    publisher.pre_shoot_distance_buffer = deque(maxlen=3)
+    publisher.node = SimpleNamespace(get_logger=lambda: _Logger())
+    harness = SimpleNamespace(
+        ball_status_publisher=publisher,
+        latest_webcam={'webcam_ball_detected': True},
+        latest_realsense={'realsense_ball_detected': True},
+        latest_hoop={'detected': True},
+        ball_in_hand=True,
+        webcam_ball_active=True,
+        pub_webcam_active=_Publisher(),
+        get_logger=lambda: _Logger(),
+        required_mission_reset_token='prepared',
+        mission_reset_ack_pub=SimpleNamespace(
+            publish=lambda msg: acknowledgements.append(msg.data),
+        ),
+    )
+    harness._clear_ball_detection_state = MethodType(
+        BallVisionFusionNode._clear_ball_detection_state, harness,
+    )
+    harness._set_webcam_ball_active = MethodType(
+        BallVisionFusionNode._set_webcam_ball_active, harness,
+    )
+    BallVisionFusionNode.cb_ball_start_reset(harness, String(data='enter'))
+    assert list(publisher.webcam_detection_buffer) == []
+    assert publisher.webcam_ball_confirmed is False
+    assert publisher.back_to_initial_waiting is False
+    assert harness.latest_webcam is harness.latest_realsense is None
+    assert harness.latest_hoop == {'detected': True}
+    assert harness.ball_in_hand is False
+    assert harness.webcam_ball_active is False
+    assert harness.pub_webcam_active.values == [False]
+
+    # 이전 카메라 검출로 27번 요청이 다시 확정되지 않아야 한다.
+    stale = {'mission_reset_token': 'prepared', 'ball_start_token': ''}
+    for source in ('webcam', 'realsense'):
+        assert not BallVisionFusionNode._accept_mission_reset_source(
+            harness, source, stale,
+        )
+    assert acknowledgements == []
+    fresh = {'mission_reset_token': 'prepared', 'ball_start_token': 'enter'}
+    assert BallVisionFusionNode._accept_mission_reset_source(
+        harness, 'webcam', fresh,
+    )
+    assert harness.ball_start_reset_waiting is True
+    assert BallVisionFusionNode._accept_mission_reset_source(
+        harness, 'realsense', fresh,
+    )
+    assert harness.ball_start_reset_waiting is False
+    assert acknowledgements == ['ball_start|enter']
+
+
 def test_inactive_ball_callbacks_skip_yolo_state_processing():
     harness = SimpleNamespace(ball_detection_active=False)
 

@@ -33,6 +33,9 @@ from launch.substitutions import (
 from launch_ros.actions import Node
 
 from robot_bringup.realsense_guard import READY_MARKER
+from robot_bringup.quiet_process import (
+    configure_launch_logging, process_prefix, quiet_python_command,
+)
 
 
 def _make_webcam_node(context):
@@ -67,6 +70,7 @@ def _make_webcam_node(context):
             package="v4l2_camera",
             executable="v4l2_camera_node",
             name="webcam",
+            prefix=process_prefix('--ros'),
             output="both",
             emulate_tty=True,
             condition=IfCondition(LaunchConfiguration("start_webcam")),
@@ -139,7 +143,8 @@ def _make_stack_actions(context, webcam_nodes):
         emulate_tty=True,
         prefix=[
             shlex.quote(sys.executable)
-            + ' -m robot_bringup.realsense_guard --'
+            + ' -m robot_bringup.realsense_guard -- '
+            + process_prefix('--ros')[0]
         ],
         sigterm_timeout='3.0',
         sigkill_timeout='2.0',
@@ -179,6 +184,7 @@ def _make_stack_actions(context, webcam_nodes):
 
     rgb_stabilizer_process = ExecuteProcess(
         name="realsense_rgb_stabilizer_process",
+        prefix=process_prefix('--python'),
         cmd=[
             sys.executable,
             rgb_stabilizer_script,
@@ -200,6 +206,7 @@ def _make_stack_actions(context, webcam_nodes):
 
     yolo_process = ExecuteProcess(
         name="yolo_vision_process",
+        prefix=process_prefix('--python'),
         cmd=[sys.executable, yolo_script, settings_ini, "--ros2"],
         cwd=scripts_dir,
         output="both",
@@ -218,6 +225,7 @@ def _make_stack_actions(context, webcam_nodes):
     # can reload alone.  Child failures use exponential retry backoff.
     realsense_yolo_process = ExecuteProcess(
         name="realsense_yolo_gate_process",
+        prefix=process_prefix('--python'),
         cmd=[
             sys.executable,
             ready_gate_script,
@@ -241,9 +249,7 @@ def _make_stack_actions(context, webcam_nodes):
             "--restart-on-clean-exit",
             "true",
             "--",
-            sys.executable,
-            realsense_yolo_script,
-            settings_ini,
+            *quiet_python_command(realsense_yolo_script, settings_ini),
         ],
         cwd=scripts_dir,
         output="both",
@@ -256,6 +262,7 @@ def _make_stack_actions(context, webcam_nodes):
     # It opens immediately after RealSense publishes its first READY result.
     realsense_viewer_process = ExecuteProcess(
         name="realsense_image_view",
+        prefix=process_prefix('--python'),
         cmd=[
             sys.executable,
             ready_gate_script,
@@ -275,6 +282,8 @@ def _make_stack_actions(context, webcam_nodes):
             "--max-backoff-seconds",
             "30.0",
             "--",
+            sys.executable,
+            '-m', 'robot_bringup.quiet_process', '--ros', '--',
             "ros2",
             "run",
             "rqt_image_view",
@@ -288,6 +297,7 @@ def _make_stack_actions(context, webcam_nodes):
     # 융합 노드는 YOLO JSON 상태만 처리하며 카메라 영상을 다시 구독하지 않는다.
     ball_process = ExecuteProcess(
         name="ball_vision_fusion_process",
+        prefix=process_prefix('--python'),
         cmd=[sys.executable, ball_script],
         cwd=scripts_dir,
         output="both",
@@ -298,6 +308,7 @@ def _make_stack_actions(context, webcam_nodes):
 
     hurdle_process = ExecuteProcess(
         name="webcam_hurdle_publisher_process",
+        prefix=process_prefix('--python'),
         cmd=[sys.executable, hurdle_script],
         cwd=scripts_dir,
         output="both",
@@ -308,6 +319,7 @@ def _make_stack_actions(context, webcam_nodes):
 
     monitor_process = ExecuteProcess(
         name="vision_status_monitor_process",
+        prefix=process_prefix('--python'),
         cmd=[sys.executable, monitor_script],
         cwd=scripts_dir,
         output="both",
@@ -374,6 +386,10 @@ def _after_camera_ownership(context, camera_node, startup_actions):
 
 def generate_launch_description() -> LaunchDescription:
     declarations = [
+        DeclareLaunchArgument(
+            'quiet_logs', default_value='true',
+            description='Disable runtime logs; false restores previous logging.',
+        ),
         DeclareLaunchArgument(
             "scripts_dir",
             default_value=PathJoinSubstitution(
@@ -442,4 +458,7 @@ def generate_launch_description() -> LaunchDescription:
             description="Auto exposure/WB warmup time before locking.",
         ),
     ]
-    return LaunchDescription(declarations + [OpaqueFunction(function=_start_stack)])
+    return LaunchDescription(declarations + [
+        OpaqueFunction(function=configure_launch_logging),
+        OpaqueFunction(function=_start_stack),
+    ])

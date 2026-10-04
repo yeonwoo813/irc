@@ -54,11 +54,11 @@ class HurdleDecisionTest(unittest.TestCase):
         )
         self.assertEqual(result, (HurdleStatus.Hurdle_None, 0.0, False))
 
-    def test_hurdle_without_line_moves_backward(self) -> None:
+    def test_hurdle_without_line_requests_neck_search(self) -> None:
         result = self.decision.decide(
             self._features(line_point_count=0)
         )
-        self.assertEqual(result, (HurdleStatus.Backward_half, 0.0, False))
+        self.assertEqual(result, (HurdleStatus.Neck_Left, 0.0, False))
 
     def test_partial_line_turns_toward_line(self) -> None:
         left = self.decision.decide(

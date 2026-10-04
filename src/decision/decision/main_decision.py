@@ -1,5 +1,7 @@
 import rclpy
+import os
 import math
+import sys
 import time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -7,6 +9,23 @@ from collections import deque, Counter
 from msgs.msg import LineResult, MotionCommand, MotionEnd, BallResult, HurdleResult
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
+try:
+    from line_status_publisher import LineTrackingController
+except ModuleNotFoundError as exc:
+    if exc.name != 'line_status_publisher':
+        raise
+    # 이미 열려 있던 터미널에는 새 vision Python 경로가 없을 수 있다.
+    # ROS 패키지 경로로 기존에 설치된 vision 모듈을 찾는다.
+    from ament_index_python.packages import get_package_prefix
+
+    sys.path.insert(0, os.path.join(
+        get_package_prefix('vision'), 'lib', 'vision',
+    ))
+    from line_status_publisher import LineTrackingController
+
+QUIET_LOGS = os.environ.get('IRC_QUIET_LOGS', '').lower() in {
+    '1', 'true', 'yes', 'on',
+}
 
 # 커스텀메시지 가져오기
 
@@ -131,6 +150,11 @@ class MainDecision(Node):
         self.vision_reset_pending = False
         self.vision_reset_token = None
         self.vision_reset_acks = set()
+        self.ball_start_reset_pending = False
+        self.ball_start_reset_token = None
+        self.mission_vision_reset_complete = self.test_mode
+        self.startup_back_to_walk_pending = False
+        self.startup_back_to_walk_started = False
         # 실제 경기에서는 두 카메라의 YOLO가 첫 추론을 성공하기 전까지
         # 판단과 모션 발행을 모두 막는다. test_mode는 하드웨어 없이 판단
         # 로직만 검증하는 용도이므로 이 시작 게이트를 우회한다.
@@ -143,6 +167,8 @@ class MainDecision(Node):
         #최신 값 저장
         self.latest_line_angle = 0.0
         self.latest_line_follow_point = False
+        self.line_decision_detail = None
+        self.line_tracking = LineTrackingController()
         self.latest_ball_angle = 0.0
         self.latest_ball_in_hand = False
         self.latest_goal_distance_cm = 0.0
@@ -196,6 +222,8 @@ class MainDecision(Node):
         # 기다렸다가 전달받은 모션 상태만 실행한다.
         self.pre_shoot_result_waiting = False
         self.pre_shoot_verified_result = None
+        self.back_to_walk_after_pre_shoot_cancel = False
+        self.pre_shoot_return_to_walk_started = False
         #hurdle
         self.hurdle_step = 0
         self.hurdle_done = False
@@ -206,6 +234,7 @@ class MainDecision(Node):
         self.hurdle_go_started = False
         self.hurdle_ball_suppressed = False
         self.hurdle_previous_ball_active = True
+        MainDecision._reset_hurdle_line_search(self)
         self.hurdle_ignore_until = None
         # 첫 실제 모션 후 3초가 끝날 때까지 허들 상태를 강제로 끕니다.
         # gate가 열릴 때 이 구간의 버퍼도 폐기해 새 프레임만 사용합니다.
@@ -268,6 +297,9 @@ class MainDecision(Node):
             String,
             '/mission/vision_reset',
             vision_reset_qos,
+        )
+        self.ball_start_reset_pub = self.create_publisher(
+            String, '/mission/ball_reset', vision_reset_qos,
         )
         self.vision_reset_ack_sub = self.create_subscription(
             String,
@@ -339,11 +371,28 @@ class MainDecision(Node):
         return bool(getattr(self, 'mission_started', True))
 
     def _mission_armed(self):
-        """Return true only when pressing s may safely start decisions."""
+        """Finish preparation before Enter can start Back_To_Walk."""
         return bool(
             getattr(self, 'motion_ready', False)
             and getattr(self, 'motion_end', False)
             and MainDecision._vision_stack_ready(self)
+            and getattr(self, 'mission_vision_reset_complete', True)
+            and not getattr(self, 'vision_reset_pending', False)
+        )
+
+    def _prepare_mission_vision(self):
+        """Run the existing vision reset before the Enter waiting screen."""
+        MainDecision._reset_vision_decision_cycle(self)
+        reset_publisher = getattr(self, 'vision_reset_pub', None)
+        if reset_publisher is None:
+            self.mission_vision_reset_complete = True
+            return
+        self.vision_reset_pending = True
+        self.vision_reset_acks = set()
+        self.vision_reset_token = str(time.monotonic_ns())
+        reset_publisher.publish(String(data=self.vision_reset_token))
+        self.get_logger().info(
+            '[MISSION PREPARE] Resetting vision before Enter is enabled.'
         )
 
     def _set_mission_armed_state(self, armed):
@@ -360,6 +409,14 @@ class MainDecision(Node):
         if MainDecision._mission_has_started(self):
             MainDecision._set_mission_armed_state(self, False)
             return False
+        if (
+            not getattr(self, 'mission_vision_reset_complete', True)
+            and not getattr(self, 'vision_reset_pending', False)
+            and self.motion_ready
+            and self.motion_end
+            and MainDecision._vision_stack_ready(self)
+        ):
+            MainDecision._prepare_mission_vision(self)
         armed = MainDecision._mission_armed(self)
         MainDecision._set_mission_armed_state(self, armed)
         if not armed:
@@ -397,10 +454,13 @@ class MainDecision(Node):
             )
             return response
 
-        # Enter 이전에 저장된 결과는 첫 행동에 사용하지 않는다. MainDecision
-        # 버퍼뿐 아니라 각 비전 노드의 투표·hold·최종 확정 상태도
-        # 초기화한 뒤, 모든 reset ack가 도착한 시점 이후의 프레임만
-        # line/ball/hurdle 최초 판단에 사용한다.
+        # Enter 대기 중 다시 쌓인 공 검출/27번 요청도 폐기한다.
+        # 초기화 응답을 기다리지 않고 25번은 즉시 실행한다.
+        ball_reset_publisher = getattr(self, 'ball_start_reset_pub', None)
+        if ball_reset_publisher is not None:
+            self.ball_start_reset_pending = True
+            self.ball_start_reset_token = str(time.monotonic_ns())
+            ball_reset_publisher.publish(String(data=self.ball_start_reset_token))
         MainDecision._reset_vision_decision_cycle(self)
         self.latest_line_angle = 0.0
         self.latest_line_follow_point = False
@@ -423,30 +483,33 @@ class MainDecision(Node):
         self.first_motion_after_start_pending = True
         self.mission_start_warning_logged = False
         self.current_mode = 'WaitingMode'
-        reset_publisher = getattr(self, 'vision_reset_pub', None)
-        if reset_publisher is None:
-            # Lightweight unit-test harnesses do not construct ROS publishers.
-            self.vision_reset_pending = False
-            self.get_logger().info(
-                '[MISSION START] Start request accepted: '
-                'cleared pre-start vision data; '
-                'collecting 3 new frames per vision stream.'
-            )
-        else:
-            self.vision_reset_pending = True
-            self.vision_reset_acks = set()
-            self.vision_reset_token = str(time.monotonic_ns())
-            reset_publisher.publish(String(data=self.vision_reset_token))
-            self.get_logger().info(
-                '[MISSION START] Start request accepted: '
-                'resetting every vision cache, '
-                'vote, hold, and detection latch before collecting frames.'
-            )
+        self.startup_back_to_walk_pending = True
+        self.startup_back_to_walk_started = False
+        self.status = Motion.Back_To_Walk
+        self.get_logger().info(
+            '[MISSION START] Enter accepted: execute Back_To_Walk now; '
+            'decide from cached vision at MotionEnd.'
+        )
+        MainDecision.MotionCommand(self)
         response.success = True
-        response.message = 'Mission start accepted; resetting vision state.'
+        response.message = 'Mission start accepted; Back_To_Walk commanded.'
         return response
 
     def VisionResetAckCallback(self, msg):
+        if (
+            getattr(self, 'ball_start_reset_pending', False)
+            and str(msg.data) == (
+                f"ball_start|{self.ball_start_reset_token}"
+            )
+        ):
+            self.ball_start_reset_pending = False
+            # 공 초기화 때문에 라인/허들 캐시나 다음 보행 판단을 늦추지 않는다.
+            self.ball_buffer.clear()
+            self.ball_buffer.extend([Ball.Ball_None] * 3)
+            details = getattr(self, 'ball_vote_detail_buffer', None)
+            if details is not None:
+                details.clear()
+            return
         if not getattr(self, 'vision_reset_pending', False):
             return
 
@@ -465,14 +528,14 @@ class MainDecision(Node):
         if missing:
             return
 
-        # Reset 중 도착한 중간 결과도 모두 폐기한다. 이 시점부터
-        # 도착하는 결과만 실제 첫 행동을 결정한다.
+        # Enter 전 초기화 중 도착한 중간 결과만 폐기한다.
         MainDecision._reset_vision_decision_cycle(self)
         self.vision_reset_pending = False
+        self.mission_vision_reset_complete = True
         self.get_logger().info(
-            '[MISSION VISION RESET] complete: collecting fresh '
-            'post-s frames only.'
+            '[MISSION VISION RESET] complete: ready for Enter.'
         )
+        MainDecision._maybe_log_mission_armed(self)
 
     def _check_mission_start_latency(self):
         if (
@@ -522,6 +585,8 @@ class MainDecision(Node):
         # 재시작이나 장애로 어느 한쪽 준비 신호가 내려가면, 그 전에
         # 쌓인 결과가 재준비 직후 의사결정에 섞이지 않게 즉시 버린다.
         if not stack_ready:
+            if not MainDecision._mission_has_started(self):
+                self.mission_vision_reset_complete = False
             MainDecision._reset_vision_decision_cycle(self)
             MainDecision._maybe_log_mission_armed(self)
             if previous_stack_ready or previous_source_ready != ready:
@@ -627,6 +692,19 @@ class MainDecision(Node):
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
 
+        if getattr(self, 'startup_back_to_walk_pending', False):
+            if not self.motion_end:
+                self.startup_back_to_walk_started = True
+            elif self.startup_back_to_walk_started:
+                self.startup_back_to_walk_pending = False
+                self.startup_back_to_walk_started = False
+
+        if (
+            getattr(self, 'back_to_walk_after_pre_shoot_cancel', False)
+            and not self.motion_end
+        ):
+            self.pre_shoot_return_to_walk_started = True
+
         #허들모드 잠금해제
         if self.hurdle_go_active:
             if not self.motion_end:
@@ -692,23 +770,32 @@ class MainDecision(Node):
                         "BallStatusPublisher의 verified 결과를 기다립니다."
                     )
                 return
-            if (
+            lost_third_turn = (
                 getattr(self, 'current_mode', None) == "LostMode"
                 and getattr(self, 'lost_step', 0) == 4
                 and getattr(self, 'lost_body_turn_count', 0) == 3
+            )
+            hurdle_third_turn = (
+                getattr(self, 'current_mode', None) == "HurdleMode"
+                and getattr(self, 'hurdle_line_search_step', 0) == 4
+                and getattr(self, 'hurdle_line_turn_count', 0) == 3
+            )
+            if (
+                (lost_third_turn or hurdle_third_turn)
                 and getattr(self, 'status', None) in (
                     Motion.Left_Turn_Afterpick,
                     Motion.Right_Turn_Afterpick,
                 )
             ):
-                # Only the third forced Lost turn needs post-completion samples.
+                # 허들 탐색도 Lost와 동일하게 세 번째 회전만 새 라인을 확인한다.
                 self.line_data = False
                 self.line_buffer.clear()
                 detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
                 if detail_buffer is not None:
                     detail_buffer.clear()
+                label = 'LostForcedTurns' if lost_third_turn else 'HurdleForcedTurns'
                 self.get_logger().info(
-                    "[LostForcedTurns] completed=3: cleared line votes; "
+                    f"[{label}] completed=3: cleared line votes; "
                     "waiting for 3 new line results."
                 )
                 return
@@ -760,11 +847,22 @@ class MainDecision(Node):
                     f"seq={self.line_frame_sequence} status={line_status} "
                     f"point_count={int(getattr(line_msg, 'point_count', 0))}"
                 )
+        if (
+            getattr(self, 'current_mode', None) == "HurdleMode"
+            and not self.motion_end
+            and line_status != Line.Line_None
+        ):
+            side = getattr(self, 'hurdle_neck_scan_side', 0)
+            if side == -1 and self.status == Motion.Neck_Left:
+                self.hurdle_left_line_seen = True
+            elif side == 1 and self.status == Motion.Neck_Right:
+                self.hurdle_right_line_seen = True
         detail_buffer = getattr(self, 'line_vote_detail_buffer', None)
         if detail_buffer is not None:
             detail_buffer.append({
                 'sequence': self.line_frame_sequence,
                 'status': line_status,
+                'angle': float(line_msg.angle),
                 'point_count': int(getattr(line_msg, 'point_count', 0)),
                 'decision_type': str(
                     getattr(line_msg, 'decision_type', 'unknown')
@@ -783,7 +881,10 @@ class MainDecision(Node):
             self.get_logger().info(f"line: motion not ended yet")
             
     def BallResultCallback(self, ball_msg:BallResult):
-        if getattr(self, 'vision_reset_pending', False):
+        if (
+            getattr(self, 'vision_reset_pending', False)
+            or getattr(self, 'ball_start_reset_pending', False)
+        ):
             return
         self.latest_ball_angle = ball_msg.angle
         self.latest_ball_in_hand = bool(
@@ -805,7 +906,16 @@ class MainDecision(Node):
         if getattr(self, 'pre_shoot_result_waiting', False):
             if bool(getattr(ball_msg, 'pre_shoot_verified', False)):
                 status = int(ball_msg.status)
-                if status not in (Ball.Ball_None, Motion.Back_To_Initial):
+                goal_out_of_range = (
+                    status == Ball.Ball_None
+                    and self.latest_ball_in_hand
+                    and math.isfinite(self.latest_goal_distance_cm)
+                    and self.latest_goal_distance_cm > 120.0
+                )
+                if (
+                    status not in (Ball.Ball_None, Motion.Back_To_Initial)
+                    or goal_out_of_range
+                ):
                     self.pre_shoot_verified_result = (
                         status,
                         float(ball_msg.angle),
@@ -869,6 +979,16 @@ class MainDecision(Node):
             f"status={MOTION_NAME.get(status, 'Unknown')}, "
             f"distance={goal_distance_cm:.1f}cm, angle={angle:+.1f}deg"
         )
+        if status == Ball.Ball_None:
+            self.back_to_walk_after_pre_shoot_cancel = True
+            self.pre_shoot_return_to_walk_started = False
+            self.status = Motion.Back_To_Walk
+            self.get_logger().info(
+                "[PreShoot] 골대 120cm 초과 재확인: "
+                "슛 준비 취소, Back_To_Walk 완료 후 라인 복귀."
+            )
+            self.MotionCommand()
+            return True
         self.BallMode()
         return True
 
@@ -903,6 +1023,8 @@ class MainDecision(Node):
 
     @staticmethod
     def _log_ball_action_evidence(node, action_status):
+        if QUIET_LOGS:
+            return
         details = list(
             getattr(node, 'ball_vote_detail_buffer', [])
         )[-3:]
@@ -1029,6 +1151,8 @@ class MainDecision(Node):
         # BallStatusPublisher가 표시한 verified 결과 하나만 사용한다.
         if getattr(self, 'pre_shoot_result_waiting', False):
             return False
+        if getattr(self, 'startup_back_to_walk_pending', False):
+            return False
         if (
             getattr(self, 'vision_reset_pending', False)
             or
@@ -1043,10 +1167,25 @@ class MainDecision(Node):
         if self.line_data and self.ball_data and self.hurdle_data:
             return False
 
+        returning_from_pre_shoot = getattr(
+            self, 'back_to_walk_after_pre_shoot_cancel', False
+        )
+        if (
+            returning_from_pre_shoot
+            and not getattr(self, 'pre_shoot_return_to_walk_started', False)
+            and not self.test_mode
+        ):
+            return False
+
         if (
             len(self.line_buffer) < 3
-            or len(self.ball_buffer) < 3
-            or len(self.hurdle_buffer) < 3
+            or (
+                not returning_from_pre_shoot
+                and (
+                    len(self.ball_buffer) < 3
+                    or len(self.hurdle_buffer) < 3
+                )
+            )
         ):
             self.get_logger().info(
                 "저장된 비전 데이터 부족: "
@@ -1072,7 +1211,14 @@ class MainDecision(Node):
         line_vote_details = list(
             getattr(self, 'line_vote_detail_buffer', [])
         )[-3:]
-        if len(line_vote_details) == 3:
+        # 선택된 상태와 같은 프레임의 각도를 사용한다. 회전 루프도 기존
+        # MotionEnd 판단에서만 갱신하며 새 비전 프레임을 기다리지 않는다.
+        self.line_decision_detail = next(
+            (detail for detail in reversed(line_vote_details)
+             if detail.get('status') == self.line_status),
+            None,
+        )
+        if not QUIET_LOGS and len(line_vote_details) == 3:
             frame_logs = []
             for detail in line_vote_details:
                 angle = detail['decision_angle']
@@ -1104,6 +1250,29 @@ class MainDecision(Node):
                 f"[LineVoteFrames] selected={self.line_status} | "
                 + " | ".join(frame_logs)
             )
+
+        if returning_from_pre_shoot:
+            self.back_to_walk_after_pre_shoot_cancel = False
+            self.pre_shoot_return_to_walk_started = False
+            self.angle = self.latest_line_angle
+            self.line_follow_point = self.latest_line_follow_point
+            self._reset_vision_decision_cycle()
+            self.get_logger().info(
+                "[LineReturn] pre-shoot cancel Back_To_Walk completed: "
+                f"line_status={self.line_status}"
+            )
+            if self.line_status != Line.Line_None:
+                self.LineTracking()
+            else:
+                # 보행 자세에서 새 Lost 탐색을 시작한다.
+                self.lost_count = 0
+                self.lost_step = 0
+                self.lost_found_dir = 0
+                self.lost_body_turn_count = 0
+                self.lost_initial_pose_done = False
+                self.lost_back_to_walk_pending = False
+                self.LostMode()
+            return True
 
         if self.current_mode == "BallMode":
             ball_votes = list(self.ball_buffer)[-3:]
@@ -1150,8 +1319,9 @@ class MainDecision(Node):
         self.hurdle_ready = ready_count >= 3
 
         hurdle_status_candidates = list(self.hurdle_buffer)
+        hurdle_search_active = getattr(self, 'hurdle_line_search_step', 0) != 0
         # 허들이 확정되면 hurdle none 상태는 제외 후 판단
-        if self.hurdle_detected:
+        if self.hurdle_detected and not hurdle_search_active:
             hurdle_status_candidates = [
                 status
                 for status in hurdle_status_candidates
@@ -1163,7 +1333,7 @@ class MainDecision(Node):
                 )
                 return False
         # ready가 false인 동안에는 Forward 20을 상태 투표에서 제외
-        if not self.hurdle_ready:
+        if not self.hurdle_ready and not hurdle_search_active:
             hurdle_status_candidates = [
                 status
                 for status in hurdle_status_candidates
@@ -1600,7 +1770,18 @@ class MainDecision(Node):
 
         #step 0: Ready 전 접근명령
         if self.hurdle_step == 0:
+            if getattr(self, 'hurdle_line_search_step', 0) != 0:
+                if MainDecision._advance_hurdle_line_search(self):
+                    return
             if not self.hurdle_ready:
+                if self.hurdle_status == Motion.Neck_Left:
+                    if self.line_status != Line.Line_None:
+                        # 이미 정면 라인이 돌아왔다면 늦게 도착한 탐색 요청은
+                        # 실행하지 않고 기존 허들 정렬 결과를 기다린다.
+                        self._reset_vision_decision_cycle()
+                        return
+                    MainDecision._advance_hurdle_line_search(self)
+                    return
                 if self.hurdle_status == Hurdle.Hurdle_None:
                     self.get_logger().info(
                         "HurdleMode에서 status=99는 모션으로 발행하지 않습니다."
@@ -1629,6 +1810,70 @@ class MainDecision(Node):
             return
 
     
+    def _reset_hurdle_line_search(self):
+        self.hurdle_line_search_step = 0
+        self.hurdle_line_found_dir = 0
+        self.hurdle_line_turn_count = 0
+        self.hurdle_left_line_seen = False
+        self.hurdle_right_line_seen = False
+        self.hurdle_neck_scan_side = 0
+
+    def _advance_hurdle_line_search(self):
+        """Keep neck search and body turns inside HurdleMode."""
+        step = getattr(self, 'hurdle_line_search_step', 0)
+        if step == 0:
+            MainDecision._reset_hurdle_line_search(self)
+            self.hurdle_line_search_step = 1
+            self.hurdle_neck_scan_side = -1
+            self.status = Motion.Neck_Left
+        elif step == 1:
+            if self.hurdle_left_line_seen or self.line_status != Line.Line_None:
+                self.hurdle_line_found_dir = -1
+                self.hurdle_line_search_step = 3
+                self.hurdle_neck_scan_side = 0
+                self.status = Motion.Neck_Center
+            else:
+                self.hurdle_right_line_seen = False
+                self.hurdle_line_search_step = 2
+                self.hurdle_neck_scan_side = 1
+                self.status = Motion.Neck_Right
+        elif step == 2:
+            self.hurdle_neck_scan_side = 0
+            self.status = Motion.Neck_Center
+            if self.hurdle_right_line_seen or self.line_status != Line.Line_None:
+                self.hurdle_line_found_dir = 1
+                self.hurdle_line_search_step = 3
+            else:
+                self.hurdle_line_search_step = 5
+        elif step in (3, 4):
+            if (
+                step == 4
+                and self.hurdle_line_turn_count >= 3
+                and self.line_status != Line.Line_None
+            ):
+                MainDecision._reset_hurdle_line_search(self)
+                return False  # 25번 없이 바로 기존 허들 정렬 판단으로 복귀.
+            self.hurdle_line_search_step = 4
+            self.hurdle_line_turn_count += 1
+            self.status = (
+                Motion.Left_Turn_Afterpick
+                if self.hurdle_line_found_dir == -1
+                else Motion.Right_Turn_Afterpick
+            )
+        elif step == 5:
+            MainDecision._reset_hurdle_line_search(self)
+            self.status = Motion.Backward_half
+        else:
+            return False
+
+        self.get_logger().info(
+            f"[HurdleLineSearch] step={self.hurdle_line_search_step}, "
+            f"direction={self.hurdle_line_found_dir}, "
+            f"turns={self.hurdle_line_turn_count}, command={self.status}"
+        )
+        self.MotionCommand()
+        return True
+
     #Lost             
     def LostMode(self):
         self.current_mode = "LostMode"
@@ -1717,9 +1962,9 @@ class MainDecision(Node):
                 self.MotionCommand()
                 return
 
-            # 목 중앙 복귀 후 처음부터 탐색
+            # 좌우 모두 라인이 없으면 목 중앙 복귀 후 한 번 후진한다.
             self.lost_count = 0
-            self.lost_step = 0
+            self.lost_step = 5
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
             self.lost_left_line_seen = False
@@ -1767,7 +2012,7 @@ class MainDecision(Node):
                 MainDecision._return_from_lost_to_line_tracking(self)
                 return
             
-            if self.lost_body_turn_count < 5:
+            if self.lost_body_turn_count < 8:
                 self.lost_body_turn_count += 1
 
                 if self.lost_found_dir == -1:
@@ -1786,11 +2031,18 @@ class MainDecision(Node):
                 self.MotionCommand()
                 return
 
-            # Backward_half는 기본자세로 끝나므로
-            # lost_initial_pose_done은 유지하고 바로 새 목 탐색으로 간다.
+            # 회전 한도에 도달하면 후진하지 않고 좌우 목 탐색을 다시 한다.
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
+            MainDecision.LostMode(self)
+            return
+
+        #step 5 : 좌우 탐색 실패 후 목 중앙 복귀가 끝나면 한 번 후진
+        if self.lost_step == 5:
+            # Backward_half는 기본자세로 끝나므로 추가 자세 복귀 없이
+            # 후진 완료 후 step 0에서 라인을 확인하고 새 목 탐색을 한다.
+            self.lost_step = 0
             self.status = Motion.Backward_half
             self.MotionCommand()
             return
@@ -1821,8 +2073,10 @@ class MainDecision(Node):
         self.lost_right_line_seen = False
         self.lost_neck_scan_side = 0
 
-        #vision에서 받은 명령 그대로 실행
-        self.status = self.line_status
+        # 모션이 끝날 때마다 최신 라인 판단에 해당하는 모션을 바로 실행한다.
+        self.status = self.line_tracking.next_command(
+            self.line_status, getattr(self, 'line_decision_detail', None),
+        )
         self.MotionCommand()
 
     # 공 없음(99)과 공 놓침(45)이 아닌 공 동작 상태인지 확인
@@ -1840,6 +2094,8 @@ class MainDecision(Node):
         if detail_buffer is not None:
             detail_buffer.clear()
         self.ball_buffer.clear()
+        if getattr(self, 'ball_start_reset_pending', False):
+            self.ball_buffer.extend([Ball.Ball_None] * 3)
         ball_detail_buffer = getattr(
             self, 'ball_vote_detail_buffer', None
         )

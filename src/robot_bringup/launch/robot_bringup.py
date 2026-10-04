@@ -5,12 +5,14 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    OpaqueFunction,
     TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from robot_bringup.quiet_process import configure_launch_logging, process_prefix
 
 
 def generate_launch_description():
@@ -21,8 +23,13 @@ def generate_launch_description():
     use_decision = LaunchConfiguration('use_decision')
     decision_test_mode = LaunchConfiguration('decision_test_mode')
     webcam_device = LaunchConfiguration('webcam_device')
+    quiet_logs = LaunchConfiguration('quiet_logs')
 
     declarations = [
+        DeclareLaunchArgument(
+            'quiet_logs', default_value='true',
+            description='Disable runtime logs; false restores previous logging.',
+        ),
         DeclareLaunchArgument(
             'use_realsense',
             default_value='true',
@@ -68,6 +75,7 @@ def generate_launch_description():
         package='motion',
         executable='main',
         name='main_motion',
+        prefix=process_prefix('--ros'),
         output='both',
         emulate_tty=True,
         remappings=[
@@ -98,6 +106,7 @@ def generate_launch_description():
             'start_hurdle': use_vision,
             'start_monitor': use_vision,
             'webcam_device': webcam_device,
+            'quiet_logs': quiet_logs,
         }.items(),
     )
 
@@ -109,6 +118,7 @@ def generate_launch_description():
                 package='decision',
                 executable='main_decision',
                 name='main_decision',
+                prefix=process_prefix('--python'),
                 output='both',
                 emulate_tty=True,
                 remappings=[
@@ -127,6 +137,7 @@ def generate_launch_description():
                 package='decision',
                 executable='mission_start_keyboard',
                 name='mission_start_keyboard',
+                prefix=process_prefix('--python'),
                 output='both',
                 emulate_tty=True,
                 arguments=['--ros-args', '--log-level', 'info'],
@@ -135,5 +146,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        declarations + [vision_stack, motion_node, decision_node]
+        declarations + [
+            OpaqueFunction(function=configure_launch_logging),
+            vision_stack, motion_node, decision_node,
+        ]
     )

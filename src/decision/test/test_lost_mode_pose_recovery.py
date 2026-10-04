@@ -3,11 +3,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from line_status_publisher import LineTrackingController
+
 from decision.main_decision import Line, MainDecision, Motion
 
 
 def _lost_harness(**overrides):
     harness = SimpleNamespace(
+        line_tracking=LineTrackingController(),
         current_mode="LineTrackingMode",
         line_status=Line.Line_None,
         lost_count=0,
@@ -190,7 +193,7 @@ def test_lost_body_turn_cannot_recover_before_third_turn(
     assert harness.line_tracking_calls == 0
 
 
-@pytest.mark.parametrize("completed_turns", [3, 4, 5])
+@pytest.mark.parametrize("completed_turns", [3, 4, 5, 6, 7, 8])
 def test_lost_body_turn_line_recovery_runs_back_to_walk_first(completed_turns):
     harness = _lost_harness(
         line_status=Motion.Forward_4step,
@@ -244,23 +247,81 @@ def test_lost_recovery_returns_to_initial_if_line_disappears_during_back_to_walk
     assert harness.lost_step == 1
 
 
-def test_lost_backward_skips_back_to_initial_before_new_neck_scan():
-    harness = _lost_harness(
-        line_status=Line.Line_None,
-        lost_step=4,
-        lost_found_dir=-1,
-        lost_body_turn_count=5,
-        lost_initial_pose_done=True,
-    )
+def test_failed_neck_scan_centers_then_backs_up_once_per_scan():
+    harness = _lost_harness(lost_initial_pose_done=True)
 
-    MainDecision.LostMode(harness)
+    for _ in range(8):
+        MainDecision.LostMode(harness)
 
-    assert harness.commands == [Motion.Backward_half]
+    assert harness.commands == [
+        Motion.Neck_Left,
+        Motion.Neck_Right,
+        Motion.Neck_Center,
+        Motion.Backward_half,
+    ] * 2
     assert harness.lost_initial_pose_done is True
     assert harness.lost_step == 0
 
     MainDecision.LostMode(harness)
 
-    assert harness.commands == [Motion.Backward_half, Motion.Neck_Left]
+    assert harness.commands[-1] == Motion.Neck_Left
+    assert harness.commands.count(Motion.Backward_half) == 2
     assert Motion.Back_To_Initial not in harness.commands
-    assert harness.lost_step == 1
+
+
+def test_failed_neck_scan_recovers_line_after_backward():
+    harness = _lost_harness(lost_initial_pose_done=True)
+
+    for _ in range(4):
+        MainDecision.LostMode(harness)
+
+    assert harness.commands[-1] == Motion.Backward_half
+    harness.line_status = Motion.Forward_4step
+
+    MainDecision.LostMode(harness)
+    MainDecision.LostMode(harness)
+
+    assert harness.commands[-2:] == [
+        Motion.Back_To_Walk, Motion.Forward_4step,
+    ]
+    assert harness.commands.count(Motion.Backward_half) == 1
+    assert harness.line_tracking_calls == 1
+
+
+@pytest.mark.parametrize("direction, command", [
+    (-1, Motion.Left_Turn_Afterpick),
+    (1, Motion.Right_Turn_Afterpick),
+])
+def test_eight_body_turns_restart_neck_scan_before_backward(direction, command):
+    harness = _lost_harness(
+        line_status=Line.Line_None,
+        lost_step=3,
+        lost_found_dir=direction,
+        lost_initial_pose_done=True,
+    )
+
+    for _ in range(8):
+        MainDecision.LostMode(harness)
+
+    assert harness.commands == [command] * 8
+    assert harness.lost_body_turn_count == 8
+
+    MainDecision.LostMode(harness)
+
+    assert harness.commands == [command] * 8 + [Motion.Neck_Left]
+    assert harness.lost_initial_pose_done is True
+    assert harness.lost_found_dir == 0
+    assert harness.lost_body_turn_count == 0
+
+    for _ in range(3):
+        MainDecision.LostMode(harness)
+
+    assert harness.commands[-4:] == [
+        Motion.Neck_Left,
+        Motion.Neck_Right,
+        Motion.Neck_Center,
+        Motion.Backward_half,
+    ]
+    assert harness.commands.count(command) == 8
+    assert harness.commands.count(Motion.Backward_half) == 1
+    assert Motion.Back_To_Initial not in harness.commands

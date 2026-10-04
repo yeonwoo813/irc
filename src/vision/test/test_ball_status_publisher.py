@@ -519,6 +519,118 @@ class BallStatusPublisherWebcamMajorityTest(unittest.TestCase):
             300.0,
         )
 
+    def test_far_goal_recheck_cancels_and_rearms_after_back_to_walk(self):
+        for command in (BallStatus.Back_To_Initial, BallStatus.Shoot_Forward):
+            for distance in (120.01, 200.0):
+                with self.subTest(command=command, distance=distance):
+                    self.setUp()
+                    self.publisher.ball_in_hand = True
+                    self.publisher.shoot_initial_waiting = (
+                        command == BallStatus.Back_To_Initial
+                    )
+                    self.publisher.shoot_initial_done = (
+                        command == BallStatus.Shoot_Forward
+                    )
+                    self.publisher.pre_shoot_distance_buffer.extend(
+                        [39.2, 40.9, 267.9]
+                    )
+                    self._send_motion(command)
+                    self._send_motion_end(False)
+
+                    def publish_goal(value, stamp=None):
+                        return self.publisher.publish_ball_status(
+                            realsense_goal_distance_cm=value,
+                            realsense_goal_angle=0.0,
+                            realsense_goal_raw_detected=True,
+                            realsense_goal_frame_stamp_sec=stamp,
+                        )[0]
+
+                    self.assertEqual(publish_goal(distance), BallStatus.Ball_None)
+                    self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+                    self._send_motion_end(True)
+                    self.assertEqual(publish_goal(distance), BallStatus.Ball_None)
+                    self.assertTrue(self.node.recorder.messages[-1].pre_shoot_verified)
+                    self.assertTrue(self.publisher.pre_shoot_cancel_pending)
+                    self.assertFalse(self.publisher.pre_shoot_verified_pending)
+
+                    # 취소 결과는 한 번만 전달하고 25번 확인 전에는 재진입하지 않는다.
+                    self.assertEqual(publish_goal(70.0), BallStatus.Ball_None)
+                    self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+                    self._send_motion(BallStatus.Back_To_Walk)
+                    self.assertTrue(self.publisher.ball_in_hand)
+                    self.assertFalse(self.publisher.shoot_initial_done)
+                    self.assertFalse(self.publisher.shoot_initial_waiting)
+                    self.assertFalse(self.publisher.pre_shoot_cancel_pending)
+                    self.assertEqual(list(self.publisher.pre_shoot_distance_buffer), [])
+                    self._send_motion_end(False)
+                    self._send_motion_end(True)
+
+                    self.assertNotEqual(publish_goal(75.0, 1.0), BallStatus.Back_To_Initial)
+                    self.assertNotEqual(publish_goal(76.0, 2.0), BallStatus.Back_To_Initial)
+                    self.assertEqual(publish_goal(77.0, 3.0), BallStatus.Back_To_Initial)
+                    self._send_motion(BallStatus.Back_To_Initial)
+                    self._send_motion_end(False)
+                    self._send_motion_end(True)
+                    self.assertEqual(publish_goal(70.0, 4.0), BallStatus.Shoot)
+                    self.assertTrue(self.node.recorder.messages[-1].pre_shoot_verified)
+
+    def test_far_goal_recheck_rejects_missing_invalid_or_held_detection(self):
+        cases = [
+            {"realsense_goal_distance_cm": value}
+            for value in (None, 0.0, -1.0, float('nan'), float('inf'))
+        ] + [
+            {"realsense_goal_angle": None},
+            {"realsense_goal_angle": float('nan')},
+            {"realsense_goal_raw_detected": False},
+            {"realsense_goal_raw_detected": None},
+            {"realsense_goal_held_previous_detection": True},
+        ]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                self.setUp()
+                self.publisher.ball_in_hand = True
+                self.publisher.shoot_initial_waiting = True
+                self._send_motion(BallStatus.Back_To_Initial)
+                self._send_motion_end(False)
+                self._send_motion_end(True)
+                features = dict(
+                    realsense_goal_distance_cm=200.0,
+                    realsense_goal_angle=0.0,
+                    realsense_goal_raw_detected=True,
+                )
+                features.update(overrides)
+                self.publisher.publish_ball_status(**features)
+                self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+                self.assertFalse(self.publisher.pre_shoot_cancel_pending)
+                self.assertTrue(self.publisher.pre_shoot_verified_pending)
+
+    def test_120cm_recheck_keeps_shoot_forward_and_unrelated_walk_keeps_pose(self):
+        self.publisher.ball_in_hand = True
+        self.publisher.shoot_initial_waiting = True
+        self._send_motion(BallStatus.Back_To_Initial)
+        self._send_motion_end(False)
+        self._send_motion_end(True)
+        status, _ = self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=120.0,
+            realsense_goal_angle=0.0,
+            realsense_goal_raw_detected=True,
+        )
+        self.assertEqual(status, BallStatus.Shoot_Forward)
+        self.assertTrue(self.node.recorder.messages[-1].pre_shoot_verified)
+        self.assertFalse(self.publisher.pre_shoot_cancel_pending)
+        self._send_motion(BallStatus.Back_To_Walk)
+        self.assertTrue(self.publisher.shoot_initial_done)
+
+    def test_far_goal_without_pre_shoot_wait_does_not_start_recovery(self):
+        self.publisher.ball_in_hand = True
+        self.publisher.publish_ball_status(
+            realsense_goal_distance_cm=200.0,
+            realsense_goal_angle=0.0,
+            realsense_goal_raw_detected=True,
+        )
+        self.assertFalse(self.node.recorder.messages[-1].pre_shoot_verified)
+        self.assertFalse(self.publisher.pre_shoot_cancel_pending)
+
     def test_goal_pre_shoot_requests_initial_pose_once_within_85_cm(self):
         self.publisher.ball_in_hand = True
 

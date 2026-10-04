@@ -35,6 +35,7 @@ from __future__ import annotations
 import configparser
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -62,6 +63,9 @@ YELLOW = (0, 235, 255)
 CYAN = (245, 235, 180)
 WHITE = (255, 255, 255)
 PANEL_BG = (18, 18, 18)
+QUIET_LOGS = os.environ.get('IRC_QUIET_LOGS', '').lower() in {
+    '1', 'true', 'yes', 'on'
+}
 
 
 def _display_number(
@@ -385,6 +389,9 @@ class RealSenseYoloDetector(Node):
             self.cb_mission_vision_reset,
             reset_qos,
         )
+        self.ball_start_reset_sub = self.create_subscription(
+            String, "/mission/ball_reset", self.cb_ball_start_reset, reset_qos,
+        )
         self.mission_reset_ack_pub = self.create_publisher(
             String,
             "/mission/vision_reset_ack",
@@ -435,6 +442,16 @@ class RealSenseYoloDetector(Node):
                 f"CameraInfo fx={self.fx:.2f} fy={self.fy:.2f} "
                 f"cx={self.cx_intr:.2f} cy={self.cy_intr:.2f}"
             )
+
+    def cb_ball_start_reset(self, msg: String) -> None:
+        if not str(msg.data):
+            return
+        self.ball_start_token = str(msg.data)
+        self._reset_ball_detection_hold()
+        self._reset_ball_loss_tracking(clear_last_valid=True)
+        self.latest_ball_detection = None
+        self.latest_raw_ball_candidate = None
+        self.latest_ball_state = self._empty_ball_state(self.ball_active)
 
     def cb_mission_vision_reset(self, msg: String) -> None:
         token = str(msg.data)
@@ -774,6 +791,8 @@ class RealSenseYoloDetector(Node):
         state: Optional[Dict[str, object]],
         **extra: object,
     ) -> None:
+        if QUIET_LOGS:
+            return
         started_mono = self.ball_loss_started_mono
         duration_sec = (
             max(0.0, now_sec - started_mono)
@@ -1158,6 +1177,7 @@ class RealSenseYoloDetector(Node):
 
     def _publish_ball_state(self, state: Dict[str, object]) -> None:
         state = dict(state)
+        state["ball_start_token"] = getattr(self, "ball_start_token", "")
         state["mission_reset_token"] = getattr(
             self,
             "mission_reset_token",
@@ -1600,7 +1620,7 @@ class RealSenseYoloDetector(Node):
 
         self.frame_count += 1
         every = max(1, int(self.cfg["print_every_n_frames"]))
-        if self.frame_count % every == 0:
+        if not QUIET_LOGS and self.frame_count % every == 0:
             self.get_logger().info(
                 f"RS-YOLO process={process_ms:.1f}ms "
                 f"ball={int(bool(ball_state.get('realsense_ball_detected', False)))} "

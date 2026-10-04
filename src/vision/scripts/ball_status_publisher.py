@@ -28,6 +28,7 @@ class BallStatus:
     Right_Half_Forward_3step = 22
     Left_Turn_10 = 23
     Right_Turn_10 = 24
+    Back_To_Walk = 25
     Back_To_Initial = 27
     Left_Turn_5 = 28
     Right_Turn_5 = 29
@@ -81,7 +82,7 @@ class BallDecision:
         self.goal_mid_shoot_max_distance_cm = 68.0
         self.goal_62_shoot_min_distance_cm = 60.5
         self.goal_62_shoot_max_distance_cm = 64.0
-        self.goal_too_close_distance_cm = 58.0
+        self.goal_too_close_distance_cm = 60.5
 
         self.goal_approach_center_min = -5.0
         self.goal_approach_center_max = 5.0
@@ -161,15 +162,13 @@ class BallDecision:
 
         # y 거리를 먼저 판단한다. 입력 y 거리는 항상 양수로 들어온다.
         if webcam_ball_y_distance > self.webcam_pick_y_max_px:
-            if angle < -10.0:
-                return BallStatus.Left_Turn_10, angle
+            
             if angle < -self.webcam_angle_center_tol:
                 return BallStatus.Left_Turn_5, angle
             if angle <= self.webcam_angle_center_tol:
                 return BallStatus.Forward_half, 0.0
-            if angle <= 10.0:
-                return BallStatus.Right_Turn_5, angle
-            return BallStatus.Right_Turn_10, angle
+            return BallStatus.Right_Turn_5, angle
+            
 
         # pick 거리 안에서는 x 거리로 좌우 정렬 여부를 판단한다.
         if webcam_ball_x_distance < self.webcam_pick_x_min_px:
@@ -266,15 +265,12 @@ class BallDecision:
             center_min = self.goal_shoot_far_min
             center_max = self.goal_shoot_far_max
 
-        if angle < -self.goal_shoot_large_angle:
-            return BallStatus.Left_Turn_10, angle
         if angle < center_min:
             return BallStatus.Left_Turn_5, angle
         if angle <= center_max:
             return shoot_status, 0.0
-        if angle <= self.goal_shoot_large_angle:
-            return BallStatus.Right_Turn_5, angle
-        return BallStatus.Right_Turn_10, angle
+        return BallStatus.Right_Turn_5, angle
+
 
     #webcam 각도 값이 없을 때 안전하게 처리, 값 있으면 그대로 반환
     def webcam_angle(self, angle: Optional[float]) -> float:
@@ -314,6 +310,7 @@ class BallStatusPublisher:
         self.pre_shoot_motion_active = False
         self.pre_shoot_motion_started = False
         self.pre_shoot_verified_pending = False
+        self.pre_shoot_cancel_pending = False
         self._latest_motion_end = None
         self.ball_pub = self.node.create_publisher(BallResult, topic_name, 10)
         self.motion_command_sub = self.node.create_subscription(
@@ -354,6 +351,7 @@ class BallStatusPublisher:
         self.pre_shoot_motion_active = False
         self.pre_shoot_motion_started = False
         self.pre_shoot_verified_pending = False
+        self.pre_shoot_cancel_pending = False
 
     def reset_for_mission_start(self) -> None:
         """Discard every decision state derived before the operator starts."""
@@ -369,6 +367,17 @@ class BallStatusPublisher:
 
     def _motion_command_callback(self, msg: MotionCommand) -> None:
         command = int(msg.command)
+
+        if (
+            self.pre_shoot_cancel_pending
+            and command == BallStatus.Back_To_Walk
+        ):
+            # 공 소유는 유지하고 다음 접근에서 27번부터 다시 준비한다.
+            self._reset_shoot_cycle()
+            self._log_info(
+                "Pre-Shoot cancelled: Back_To_Walk confirmed; "
+                "shoot preparation reset, ball possession retained."
+            )
 
         if (
             self.back_to_initial_waiting
@@ -613,7 +622,7 @@ class BallStatusPublisher:
             realsense_goal_raw_detected,
             bool(realsense_goal_held_previous_detection),
         )
-        if self.shoot_command_seen:
+        if self.shoot_command_seen or self.pre_shoot_cancel_pending:
             status = BallStatus.Ball_None
             angle = 0.0
         elif self.shoot_initial_waiting or (
@@ -650,14 +659,30 @@ class BallStatusPublisher:
         msg = BallResult()
         msg.status = int(status)
         msg.angle = float(angle)
+        goal_out_of_range = bool(
+            status == BallStatus.Ball_None
+            and realsense_goal_raw_detected is True
+            and not realsense_goal_held_previous_detection
+            and realsense_goal_distance_cm is not None
+            and math.isfinite(realsense_goal_distance_cm)
+            and realsense_goal_distance_cm
+            > self.ball_decision.goal_entry_distance_cm
+            and realsense_goal_angle is not None
+            and math.isfinite(realsense_goal_angle)
+        )
         pre_shoot_verified = bool(
             self.pre_shoot_verified_pending
             and self.ball_in_hand
-            and status not in (
-                BallStatus.Ball_None,
-                BallStatus.Back_To_Initial,
+            and (
+                status not in (
+                    BallStatus.Ball_None,
+                    BallStatus.Back_To_Initial,
+                )
+                or goal_out_of_range
             )
         )
+        if pre_shoot_verified and goal_out_of_range:
+            self.pre_shoot_cancel_pending = True
         msg.pre_shoot_verified = pre_shoot_verified
         if hasattr(msg, 'ball_in_hand'):
             msg.ball_in_hand = self.ball_in_hand

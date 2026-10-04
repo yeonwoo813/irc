@@ -9,6 +9,7 @@ from msgs.msg import HurdleResult, MotionCommand, MotionEnd
 
 class HurdleStatus:
     Initial_Pose = 0
+    Neck_Left = 15
     Hurdle_Go = 19
     Left_Turn_10 = 23
     Right_Turn_10 = 24
@@ -43,8 +44,8 @@ class HurdleDecision:
 
         # 거리 구간별 허용 각도
         self.center_angle_range = (-10.0, 10.0)
-        self.right_angle_range = (0.0, 15.0)
-        self.left_angle_range = (-15.0, 0.0)
+        self.right_angle_range = (10.0, 18.0)
+        self.left_angle_range = (-15.0, -8.0)
 
         self.search_turn = HurdleStatus.Left_Turn_10
         self.back_to_initial_waiting = False
@@ -72,9 +73,9 @@ class HurdleDecision:
             self.back_to_initial_waiting = True
             return HurdleStatus.Back_To_Initial, 0.0, False
 
-        # 3. 허들은 보이는데 라인이 아예 안 보임 -> 후진
+        # 3. 라인이 없으면 HurdleMode 내부의 좌우 목 탐색을 요청한다.
         if features.line_point_count <= 0:
-            return HurdleStatus.Backward_half, 0.0, False
+            return HurdleStatus.Neck_Left, 0.0, False
 
         # 4. 라인이 한 점만 보이면 라인이 있는 방향으로 제자리 회전
         # 회전 동작이 끝난 뒤 새 웹캠 프레임으로 다시 판단함
