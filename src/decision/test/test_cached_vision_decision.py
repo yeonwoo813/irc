@@ -1368,6 +1368,66 @@ def _make_goal_missing_harness():
     return harness
 
 
+@pytest.mark.parametrize('phase', ['pick', 'shoot'])
+@pytest.mark.parametrize('line_status, expected_mode, expected_command', [
+    (Line.Line_None, 'LostMode', Motion.Back_To_Initial),
+    (Motion.Left_Half_Forward, 'LineTrackingMode', Motion.Left_Half_Forward),
+])
+def test_ball_return_uses_current_line_or_enters_lost_mode(
+    phase, line_status, expected_mode, expected_command,
+):
+    harness = _make_goal_missing_harness()
+    harness.has_ball = phase == 'pick'
+    harness.line_status = line_status
+    setattr(harness, f'back_to_walk_after_{phase}', True)
+    harness._finish_turn_after_shoot = MethodType(
+        MainDecision._finish_turn_after_shoot, harness,
+    )
+
+    harness.BallMode()
+
+    assert getattr(harness, f'back_to_walk_after_{phase}') is False
+    assert harness.current_mode == expected_mode
+    assert [msg.command for msg in harness.motion_pub.messages] == [
+        expected_command,
+    ]
+    assert harness.has_ball is (phase == 'pick')
+    assert harness.pre_shoot_result_waiting is False
+
+    if line_status == Line.Line_None:
+        # Continue the existing Lost search after its preparation motion.
+        harness.motion_end = True
+        harness.LostMode()
+        assert [msg.command for msg in harness.motion_pub.messages] == [
+            Motion.Back_To_Initial, Motion.Neck_Left,
+        ]
+
+
+@pytest.mark.parametrize('status', [Line.Line_None, Ball.Ball_Lost, 255])
+def test_unmapped_status_does_not_publish_default_initial_pose(status):
+    harness = _make_goal_missing_harness()
+    harness.status = status
+    harness.motion_end = True
+    cached_line = list(harness.line_buffer)
+
+    harness.MotionCommand()
+
+    assert harness.motion_pub.messages == []
+    assert harness.motion_end is True
+    assert list(harness.line_buffer) == cached_line
+
+
+def test_explicit_initial_pose_command_is_preserved():
+    harness = _make_goal_missing_harness()
+    harness.status = Motion.Initial_Pose
+
+    harness.MotionCommand()
+
+    assert [msg.command for msg in harness.motion_pub.messages] == [
+        Motion.Initial_Pose,
+    ]
+
+
 @pytest.mark.parametrize('fresh_votes, expected', [
     ([99, 99, 99], Motion.Forward_4step),
     ([99, 99, 34], Motion.Forward_4step),

@@ -93,8 +93,8 @@ class BallDecision:
         self.goal_shoot_62_max = 1.0
         self.goal_shoot_mid_min = -4.0
         self.goal_shoot_mid_max = 0.7
-        self.goal_shoot_far_min = -4.0
-        self.goal_shoot_far_max = 4.0
+        self.goal_shoot_far_min = -6.0
+        self.goal_shoot_far_max = 1.0
         self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준

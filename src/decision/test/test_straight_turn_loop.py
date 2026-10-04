@@ -69,13 +69,14 @@ def complete(robot, frames, *, ball=99, hurdle=99):
     return robot.motion_pub.messages[-1].command
 
 
-@pytest.mark.parametrize('sign, fine, half, turn', [(-1, 2, 4, 6), (1, 3, 5, 7)])
+@pytest.mark.parametrize('sign, fine, turn', [(-1, 2, 6), (1, 3, 7)])
 @pytest.mark.parametrize('angle, kind', [
-    (25.0, 'fine'), (25.1, 'half'), (29.9, 'half'),
+    (7.0, 'forward'), (7.01, 'fine'), (25.0, 'fine'),
+    (26.99, 'fine'), (27.0, 'fine'), (27.01, 'turn'), (29.9, 'turn'),
     (30.0, 'turn'), (43.0, 'turn'), (49.9, 'turn'),
 ])
-def test_straight_angle_selects_original_motion(robot, sign, fine, half, turn, angle, kind):
-    expected = {'fine': fine, 'half': half, 'turn': turn}[kind]
+def test_straight_angle_selects_motion_without_half_turn(robot, sign, fine, turn, angle, kind):
+    expected = {'forward': 1, 'fine': fine, 'turn': turn}[kind]
     frame = line(sign * angle)
     assert frame.status == expected
     assert complete(robot, frame) == expected
@@ -88,7 +89,7 @@ def test_existing_large_angle_motion_is_preserved(robot, angle, expected):
 
 def test_each_motion_end_rechecks_angle_without_extra_pose_or_forced_turn(robot):
     angles = [-32.0, -28.0, -23.0, 33.0, 6.0]
-    assert [complete(robot, line(angle)) for angle in angles] == [6, 4, 2, 7, 1]
+    assert [complete(robot, line(angle)) for angle in angles] == [6, 6, 2, 7, 1]
 
 
 def test_mid_motion_frames_do_not_publish_commands(robot):
@@ -105,13 +106,31 @@ def test_voted_status_uses_its_own_frame_angle(robot):
 
 
 def test_distance_corrected_angle_selects_motion_directly(robot):
-    corrected_half = line(-38.7, 159.1)
-    assert corrected_half.angle == pytest.approx(29.66, abs=0.01)
-    assert complete(robot, corrected_half) == 4
+    corrected_fine = line(-35.7, 159.1)
+    assert corrected_fine.angle == pytest.approx(26.66, abs=0.01)
+    assert complete(robot, corrected_fine) == 2
+    corrected_above_fine = line(-36.1, 159.1)
+    assert corrected_above_fine.angle == pytest.approx(27.06, abs=0.01)
+    assert complete(robot, corrected_above_fine) == 6
     corrected_turn = line(-40.7, 159.1)
     assert corrected_turn.angle == pytest.approx(31.66, abs=0.01)
     assert complete(robot, corrected_turn) == 6
     assert complete(robot, line(-22.0, 299.9)) == 1
+
+
+@pytest.mark.parametrize('sign, fine, distance_motion', [(-1, 2, 3), (1, 3, 2)])
+def test_near_conflict_steering_uses_27_degree_fine_limit(robot, sign, fine, distance_motion):
+    corrected = line(sign * 27.0, -sign * 118.0)
+    assert corrected.angle == pytest.approx(21.384, abs=0.001)
+    assert complete(robot, corrected) == fine
+    assert complete(robot, line(sign * 27.01, -sign * 118.0)) == distance_motion
+
+
+@pytest.mark.parametrize('angle, distance', [
+    (-15.2, -211.8), (-27.3, -79.9), (-19.8, -169.5),
+])
+def test_logged_half_turn_decisions_now_select_full_turn(robot, angle, distance):
+    assert complete(robot, line(angle, distance)) == 6
 
 
 @pytest.mark.parametrize('angle', [-55.0, -35.0, -23.0, 6.0, 23.0, 35.0, 55.0])

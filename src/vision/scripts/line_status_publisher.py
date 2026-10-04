@@ -56,10 +56,9 @@ class LineFeatures:
 class LineDecision:
     def __init__(self, line_center_bias_px: float = 0.0):
         self.line_center_bias_px = float(line_center_bias_px)
-        # 직진, 미세회전, 중간회전, 회전 각도 기준
+        # 직진, 미세회전, 큰 회전 각도 기준 (중간회전 4·5번은 사용하지 않음)
         self.forward_angle = 7.0
-        self.fine_turn_angle = 25.0
-        self.half_turn_angle = 30.0
+        self.fine_turn_angle = 27.0
         self.large_turn_angle = 50.0
 
         # x = a*y^2 + b*y + c 픽셀 좌표 피팅 기준
@@ -70,7 +69,7 @@ class LineDecision:
         self.steering_distance_max = 130.0
 
         # 직선에서 90~130px 구간은 거리와 각도가 서로 반대 방향이고
-        # 원본 각도가 7~30도일 때만 조향각을 사용한다. 130px 이상은
+        # 원본 각도가 7도 초과~27도 이하일 때만 조향각을 사용한다. 130px 이상은
         # 원본 각도 크기와 방향에 관계없이 항상 거리 보정각을 결합한다.
         self.steering_scale_px = 1200.0
         self.steering_limit = 10.0 
@@ -154,7 +153,7 @@ class LineDecision:
             steering_inputs_present
             and self.forward_angle
             < abs(line_angle)
-            <= self.half_turn_angle
+            <= self.fine_turn_angle
         )
         use_near_conflict_steering = bool(
             near_steering_inputs_valid
@@ -337,21 +336,14 @@ class LineDecision:
         if abs_angle <= self.forward_angle:
             return LineStatus.Forward_4step, 0.0
 
-        # 7도 초과~25도 이하: 전진하며 미세회전
+        # 7도 초과~27도 이하: 전진하며 미세회전
         if abs_angle <= self.fine_turn_angle:
             if angle < 0:
                 return LineStatus.Left_Half_Forward, abs_angle
             else:
                 return LineStatus.Right_Half_Forward, abs_angle
 
-        # 25도 초과~30도 미만: 중간 제자리회전
-        if abs_angle < self.half_turn_angle:
-            if angle < 0:
-                return LineStatus.Left_Turn_Half, abs_angle
-            else:
-                return LineStatus.Right_Turn_Half, abs_angle
-
-        # 30도 이상: 제자리회전
+        # 27도 초과: 제자리회전 (4·5번 중간회전 단계 없음)
         if angle < 0:
             return LineStatus.Left_Turn, abs_angle
         else:

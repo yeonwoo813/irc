@@ -2057,6 +2057,15 @@ class MainDecision(Node):
 
     #Line tracking 
     def LineTracking(self):  
+        # BallMode 등의 복귀 경로는 Decision의 Line_None 분기를 거치지
+        # 않고 이 함수를 직접 호출하므로 최신 라인 상태를 다시 확인한다.
+        if self.line_status == Line.Line_None:
+            self.get_logger().info(
+                "[LineReturn] line_status=99: LostMode로 전환합니다."
+            )
+            self.LostMode()
+            return
+
         self.current_mode = "LineTrackingMode"
         self._finish_post_shoot_detection_suppression(
             'post-shoot LineTrackingMode entered'
@@ -2287,7 +2296,15 @@ class MainDecision(Node):
 
         elif self.status == 35:
             motion_msg.command = Motion.Shoot_62
-        
+
+        else:
+            # 미지원 상태가 메시지 기본값 0(Initial_Pose)으로 발행되지
+            # 않게 한다. 새 판단에 쓸 비전 버퍼와 motion_end는 유지한다.
+            self.get_logger().info(
+                f"[MotionCommandRejected] unsupported status={self.status}: "
+                "모션 명령을 보내지 않습니다."
+            )
+            return
 
         if (
             motion_msg.command in (
