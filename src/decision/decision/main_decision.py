@@ -211,6 +211,7 @@ class MainDecision(Node):
         self.neck_down_pending = False
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
+        self.post_shoot_motion = None
         self.turn_shoot = Motion.Right_Turn
         # Shoot 명령 발행부터 Shoot 이후 강제회전 종료까지 공/골대
         # 검출을 모두 중지한다.
@@ -1518,11 +1519,15 @@ class MainDecision(Node):
         self.MotionCommand()
 
     def TurnAfterShoot(self):
+        shoot_13_return = (
+            getattr(self, 'post_shoot_motion', None) == Motion.Shoot
+        )
         #회전 시작 첫 호출 시에만 방향을 결정
         if self.turn_count == 0:
             if self.goal_count == 0:
                 self.turn_shoot = Motion.Right_Turn_Afterpick
-            elif self.goal_count == 1:
+            elif self.goal_count == 1 or shoot_13_return:
+                # 13번은 세 번째 이후에도 마지막 골대의 왼쪽 방향으로 탐색한다.
                 self.turn_shoot = Motion.Left_Turn_Afterpick
             else:
                 self._finish_turn_after_shoot('post-shoot turn skipped')
@@ -1531,9 +1536,10 @@ class MainDecision(Node):
 
             self.goal_count += 1
 
-        # Shoot 이후에는 짧은 30/31번 회전을 최소 4회 수행한다.
+        # 13번만 짧은 30/31번 회전을 최소 5회 수행한다.
+        # 나머지 Shoot의 최소 회전 횟수는 기존 설정을 유지한다.
         # 그 뒤부터 라인이 보이면 회전을 끝내고 보행 자세로 복귀한다.
-        min_turn_count = int(
+        min_turn_count = 5 if shoot_13_return else int(
             getattr(self, 'post_shoot_min_turn_count', 4)
         )
         if (
@@ -1550,8 +1556,8 @@ class MainDecision(Node):
             self.MotionCommand()
             return
         
-        # 라인이 안 보이면 최대 10번까지만 회전
-        if self.turn_count >= 10:
+        # 13번은 라인이 보일 때까지 계속 회전한다. 다른 슛은 기존 10회 제한.
+        if not shoot_13_return and self.turn_count >= 10:
             self._finish_turn_after_shoot('post-shoot turn limit reached')
             self.LostMode()
             return
@@ -1564,6 +1570,7 @@ class MainDecision(Node):
         """강제회전을 끝내고 다음 공의 RealSense 검출을 시작한다."""
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
+        self.post_shoot_motion = None
         self.turn_count = 0
 
         # 골대 또는 Shoot 직후 결과가 이후 판단에 섞이지 않도록 기존
@@ -1694,6 +1701,7 @@ class MainDecision(Node):
                 )
                 self.status = self.ball_status
                 #shoot 이후 처리
+                self.post_shoot_motion = self.status
                 self.has_ball = False
                 self.neck_down_pending = True
                 self.turn_after_shoot = True

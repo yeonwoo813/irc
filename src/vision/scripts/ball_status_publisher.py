@@ -80,17 +80,17 @@ class BallDecision:
         self.goal_shoot_min_distance_cm = 68.0
         self.goal_mid_shoot_min_distance_cm = 64.0
         self.goal_mid_shoot_max_distance_cm = 68.0
-        self.goal_62_shoot_min_distance_cm = 60.5
+        self.goal_62_shoot_min_distance_cm = 62.0
         self.goal_62_shoot_max_distance_cm = 64.0
-        self.goal_too_close_distance_cm = 60.5
+        self.goal_too_close_distance_cm = 62.0
 
         self.goal_approach_center_min = -5.0
         self.goal_approach_center_max = 5.0
         self.goal_approach_large_angle = 60.0
         self.goal_shoot_close_min = -8.0
         self.goal_shoot_close_max = 0.0
-        self.goal_shoot_62_min = -4.5
-        self.goal_shoot_62_max = 1.0
+        self.goal_shoot_62_min = -8.0
+        self.goal_shoot_62_max = -2.0
         self.goal_shoot_mid_min = -4.0
         self.goal_shoot_mid_max = 0.7
         self.goal_shoot_far_min = -6.0
@@ -99,9 +99,9 @@ class BallDecision:
 
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
-        self.webcam_pick_y_max_px = 90.0
+        self.webcam_pick_y_max_px = 85.0
         self.webcam_pick_x_min_px = -20.0
-        self.webcam_pick_x_max_px = 30.0
+        self.webcam_pick_x_max_px = 25.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
         # 공을 잡고 있고 골대가 120cm 이내이면 골대 기준으로 판단한다.
