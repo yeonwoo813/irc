@@ -21,7 +21,6 @@ def generate_launch_description():
     use_motion = LaunchConfiguration('use_motion')
     use_vision = LaunchConfiguration('use_vision')
     use_decision = LaunchConfiguration('use_decision')
-    decision_test_mode = LaunchConfiguration('decision_test_mode')
     webcam_device = LaunchConfiguration('webcam_device')
     quiet_logs = LaunchConfiguration('quiet_logs')
 
@@ -54,11 +53,6 @@ def generate_launch_description():
             'use_decision',
             default_value='true',
             description='Start decision package node',
-        ),
-        DeclareLaunchArgument(
-            'decision_test_mode',
-            default_value='false',
-            description='Keep motion_end true for decision-only tests',
         ),
         DeclareLaunchArgument(
             'webcam_device',
@@ -129,7 +123,6 @@ def generate_launch_description():
                     ('motion_prepare', '/motion_prepare'),
                     ('motion_command', '/motion_command'),
                 ],
-                parameters=[{'test_mode': decision_test_mode}],
                 arguments=['--ros-args', '--log-level', 'info'],
             ),
             Node(

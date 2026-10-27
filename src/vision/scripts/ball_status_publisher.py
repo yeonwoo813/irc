@@ -8,7 +8,7 @@ from msgs.msg import BallResult, MotionCommand, MotionEnd
 
 
 class BallStatus:
-    Forward_4step = 1
+    Forward = 1
     Forward_3step = 20
     Left_Half_Forward = 2
     Right_Half_Forward = 3
@@ -187,7 +187,7 @@ class BallDecision:
         if angle < self.angle_center_min:
             return BallStatus.Left_Half_Forward, angle
         if angle <= self.angle_center_max:
-            return BallStatus.Forward_4step, 0.0
+            return BallStatus.Forward, 0.0
         if angle <= 60.0:
             return BallStatus.Right_Half_Forward, angle
         return BallStatus.Right_Turn, angle
@@ -241,7 +241,7 @@ class BallDecision:
         if angle < self.goal_approach_center_min:
             return BallStatus.Left_Half_Forward, angle
         if angle <= self.goal_approach_center_max:
-            return BallStatus.Forward_4step, 0.0
+            return BallStatus.Forward, 0.0
         if angle <= self.goal_approach_large_angle:
             return BallStatus.Right_Half_Forward, angle
         return BallStatus.Right_Turn, angle

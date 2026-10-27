@@ -89,7 +89,7 @@ class ObjectDetection:
 # ═══════════════════════════════════════════════════════
 
 LINE_STATUS_NAME = {
-    LineStatus.Forward_4step: "Forward_4step",
+    LineStatus.Forward: "Forward",
     LineStatus.Left_Half_Forward: "Left_Half_Forward",
     LineStatus.Right_Half_Forward: "Right_Half_Forward",
     LineStatus.Left_Forward: "Left_Forward",

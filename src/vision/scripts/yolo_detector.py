@@ -111,7 +111,7 @@ class ObjectDetection:
 # 실제 motion 노드가 실행하는 모션 ID/이름입니다.
 MOTION_NAME = {
     0: "Initial_Pose",
-    1: "Forward_4step",
+    1: "Forward",
     2: "Left_Half_Forward",
     3: "Right_Half_Forward",
     4: "Left_Turn_Half",
@@ -205,7 +205,7 @@ def motion_overlay_lines(state: Optional[MotionDisplayState]) -> list[str]:
 # ═══════════════════════════════════════════════════════
 
 LINE_STATUS_NAME = {
-    LineStatus.Forward_4step: "Forward_4step",
+    LineStatus.Forward: "Forward",
     LineStatus.Left_Half_Forward: "Left_Half_Forward",
     LineStatus.Right_Half_Forward: "Right_Half_Forward",
     LineStatus.Left_Turn_Half: "Left_Turn_Half",

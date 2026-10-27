@@ -6,7 +6,7 @@ from rclpy.node import Node
 from msgs.msg import LineResult
 
 class LineStatus:
-    Forward_4step = 1
+    Forward = 1
     Left_Half_Forward = 2
     Right_Half_Forward = 3
     Left_Turn_Half = 4
@@ -323,7 +323,7 @@ class LineDecision:
         if angle > 0.0:
             return LineStatus.Right_Turn, abs(angle)
 
-        return LineStatus.Forward_4step, 0.0
+        return LineStatus.Forward, 0.0
 
     #직선구간에서 판단기준
     def _status_from_line_angle(self, angle: Optional[float]) -> Tuple[int, float]:
@@ -334,7 +334,7 @@ class LineDecision:
 
         # 7도 이하: 직진
         if abs_angle <= self.forward_angle:
-            return LineStatus.Forward_4step, 0.0
+            return LineStatus.Forward, 0.0
 
         # 7도 초과~27도 이하: 전진하며 미세회전
         if abs_angle <= self.fine_turn_angle:
@@ -358,7 +358,7 @@ class LineDecision:
 
         # 7도 이하: 직진
         if abs_angle <= self.curve_forward_angle:
-            return LineStatus.Forward_4step, 0.0
+            return LineStatus.Forward, 0.0
 
         # 7~22.5도: 미세회전
         if abs_angle <= self.curve_fine_turn_angle:
@@ -376,25 +376,6 @@ class LineDecision:
         if angle < 0:
             return LineStatus.Left_Turn_Curve, abs_angle
         return LineStatus.Right_Turn_Curve, abs_angle
-
-
-class LineTrackingController:
-    """Select one motion from the latest voted line result at MotionEnd."""
-
-    def next_command(self, status: int, detail: Optional[dict]) -> int:
-        """Keep the 300px distance override; otherwise use the line motion."""
-        if (
-            detail
-            and detail.get('status') == status
-            and detail.get('decision_type') == 'straight'
-        ):
-            distance = float(detail.get('line_distance', math.nan))
-            if math.isfinite(distance) and abs(distance) >= 300.0:
-                return (
-                    LineStatus.Left_Turn if distance < 0.0
-                    else LineStatus.Right_Turn
-                )
-        return status
 
 
 class LineStatusPublisher:
@@ -455,6 +436,20 @@ class LineStatusPublisher:
         else:
             decision_type = "straight"
             decision_angle = line_angle
+
+        # 직선 라인이 중심에서 300px 이상 벗어나면 Publisher에서
+        # 제자리회전 상태로 확정해 Main Decision에 전달한다.
+        if (
+            decision_type == "straight"
+            and line_distance is not None
+            and math.isfinite(line_distance)
+            and abs(line_distance) >= 300.0
+        ):
+            status = (
+                LineStatus.Left_Turn
+                if line_distance < 0.0
+                else LineStatus.Right_Turn
+            )
 
         #라인 상태를 Publish
         msg = LineResult()

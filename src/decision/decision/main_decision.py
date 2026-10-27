@@ -1,7 +1,6 @@
 import rclpy
 import os
 import math
-import sys
 import time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -9,33 +8,19 @@ from collections import deque, Counter
 from msgs.msg import LineResult, MotionCommand, MotionEnd, BallResult, HurdleResult
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
-try:
-    from line_status_publisher import LineTrackingController
-except ModuleNotFoundError as exc:
-    if exc.name != 'line_status_publisher':
-        raise
-    # 이미 열려 있던 터미널에는 새 vision Python 경로가 없을 수 있다.
-    # ROS 패키지 경로로 기존에 설치된 vision 모듈을 찾는다.
-    from ament_index_python.packages import get_package_prefix
 
-    sys.path.insert(0, os.path.join(
-        get_package_prefix('vision'), 'lib', 'vision',
-    ))
-    from line_status_publisher import LineTrackingController
-
+#로그 출력 없이 실행하기 위한 장치
 QUIET_LOGS = os.environ.get('IRC_QUIET_LOGS', '').lower() in {
     '1', 'true', 'yes', 'on',
 }
 
-# 커스텀메시지 가져오기
-
 class Motion:
     Initial_Pose = 0
-    Forward_4step = 1
+    Forward = 1
     Left_Half_Forward = 2 
     Right_Half_Forward = 3
-    Left_Turn_Half = 4 #제자리회전 1번
-    Right_Turn_Half = 5 #제자리회전 1번
+    Left_Turn_Half = 4 #사용x
+    Right_Turn_Half = 5 #사용x
     Left_Turn = 6  #line tracking 제자리회전
     Right_Turn = 7 #line tracking 제자리회전
     Forward_half = 8 #webcam ball 미세걷기
@@ -50,7 +35,7 @@ class Motion:
     Neck_Center = 17
     Neck_Down = 18
     Hurdle_Go = 19
-    Forward_3step = 20 #ball mode
+    Forward_3step = 20 #사용x
     Left_Turn_Curve = 21 #line tracking 곡선구간 회전
     Right_Turn_Curve = 22 #line tracking 곡선구간 회전
     Left_Turn_Mission_10 = 23
@@ -79,11 +64,7 @@ MOTION_NAME = {
 
 class Ball:
     Ball_None = 99
-    Ball_Forward = Motion.Forward_3step
-    Ball_Forward_1step = Motion.Forward_half
     Ball_Lost = 45
-    Ball_Right = Motion.Right_Move
-    Ball_Left = Motion.Left_Move
     Pick_Ready = Motion.Pick
     Shoot = Motion.Shoot
     Shoot_Close = Motion.Shoot_Close
@@ -103,6 +84,8 @@ class Hurdle:
 
     
 class MainDecision(Node):
+    
+    #시작직전 쌓인 데이터를 비우기
     VISION_RESET_PARTICIPANTS = frozenset({
         'webcam_yolo',
         'realsense_yolo',
@@ -113,51 +96,39 @@ class MainDecision(Node):
     def __init__(self):
         super().__init__('main_decision')
 
-        #test_mode 파라미터 선언 및 초기화
-        self.declare_parameter('test_mode', False)
-        self.declare_parameter('post_shoot_min_turn_count', 4)
-        test_mode_param = self.get_parameter('test_mode').value
-        if isinstance(test_mode_param, str):
-            self.test_mode = test_mode_param.lower() in ('true', '1', 'yes', 'on')
-        else:
-            self.test_mode = bool(test_mode_param)
-        self.post_shoot_min_turn_count = max(
-            1,
-            min(
-                10,
-                int(
-                    self.get_parameter(
-                        'post_shoot_min_turn_count'
-                    ).value
-                ),
-            ),
-        )
         #초기값 설정
         self.status = 0
         self.current_mode = "WaitingMode"
-        #test mode true/false에 따라 초기값 조정
-        self.motion_end = self.test_mode
-        self.motion_ready = self.test_mode
+        self.motion_end = False
+        self.motion_ready = False
+        
         # 실제 경기에서는 초기자세와 두 YOLO가 모두 준비되어도
         # 운영자가 Enter를 눌러 /mission/start 서비스를 호출하기 전까지
-        # 판단과 모션 명령을 잠근다. test_mode는 기존처럼 즉시 판단한다.
-        self.mission_started = self.test_mode
-        self.mission_armed_logged = False
+        # 판단과 모션 명령을 잠근다.
+        self.mission_started = False
         self.mission_armed_state = None
+        #시작과정에 오류가 있을 때 진단을 위한 초기상태저장값
+        self.mission_armed_logged = False
         self.mission_started_at = None
         self.first_motion_after_start_pending = False
         self.mission_start_warning_logged = False
+        
+        #Enter 입력 전 비전 초기화 확인용 값
         self.vision_reset_pending = False
         self.vision_reset_token = None
         self.vision_reset_acks = set()
+        self.mission_vision_reset_complete = False
+        
+        #Enter 직후 공 데이터 초기화를 위한 값
         self.ball_start_reset_pending = False
         self.ball_start_reset_token = None
-        self.mission_vision_reset_complete = self.test_mode
+        
+        #마지막 2개: Enter 직후 첫 보행 자세 복귀 모션 관리
         self.startup_back_to_walk_pending = False
         self.startup_back_to_walk_started = False
-        # 실제 경기에서는 두 카메라의 YOLO가 첫 추론을 성공하기 전까지
-        # 판단과 모션 발행을 모두 막는다. test_mode는 하드웨어 없이 판단
-        # 로직만 검증하는 용도이므로 이 시작 게이트를 우회한다.
+        
+        # 두 카메라의 YOLO가 첫 추론을 성공하기 전까지
+        # 판단과 모션 발행을 모두 막는다.
         self.webcam_yolo_ready = False
         self.realsense_yolo_ready = False
         #3개의 비전 데이터가 모두 준비되었는지 확인
@@ -167,20 +138,12 @@ class MainDecision(Node):
         #최신 값 저장
         self.latest_line_angle = 0.0
         self.latest_line_follow_point = False
-        self.line_decision_detail = None
-        self.line_tracking = LineTrackingController()
         self.latest_ball_angle = 0.0
         self.latest_ball_in_hand = False
         self.latest_goal_distance_cm = 0.0
         self.latest_hurdle_angle = 0.0
-        self.latest_hurdle_ready = False
 
-        if self.test_mode:
-            self.get_logger().info(
-                "test_mode enabled: motion_ready and motion_end will stay true"
-            )
-        else:
-            self.get_logger().info("motion_ready=true 수신 전까지 판단을 대기합니다.")
+        self.get_logger().info("motion_ready=true 수신 전까지 판단을 대기합니다.")
 
         #ball
         self.has_ball = False
@@ -193,11 +156,9 @@ class MainDecision(Node):
         self.backward_after_pick = False
         self.back_to_walk_after_pick = False
         self.turn_count = 0
-        # Pick 실패 뒤 후진/회전/보행자세 복귀가 끝날 때까지 같은 공을
-        # 다시 투표하지 않는다. 복귀가 끝나면 즉시 새 투표를 시작한다.
-        self.post_pick_failure_ball_suppressed = False
+        # Pick 실패 기록, 이후 line 복귀하면 True로 초기화
+        self.pick_failed = False
         #lost
-        self.lost_count = 0
         self.lost_step = 0
         self.lost_found_dir = 0
         self.lost_body_turn_count = 0
@@ -213,12 +174,10 @@ class MainDecision(Node):
         self.back_to_walk_after_shoot = False
         self.post_shoot_motion = None
         self.turn_shoot = Motion.Right_Turn
-        # Shoot 명령 발행부터 Shoot 이후 강제회전 종료까지 공/골대
-        # 검출을 모두 중지한다.
+        # Shoot 명령 발행부터 Shoot 이후 강제회전 종료까지 공/골대 검출을 모두 중지한다.
         self.post_shoot_detection_suppressed = False
         self.shoot_in_progress = False
         self.shoot_motion_started = False
-        # Pre-Shoot의 거리·각도 판단은 BallStatusPublisher가 담당한다.
         # MainDecision은 Back_To_Initial/Shoot_Forward 이후 verified BallResult를
         # 기다렸다가 전달받은 모션 상태만 실행한다.
         self.pre_shoot_result_waiting = False
@@ -227,7 +186,6 @@ class MainDecision(Node):
         self.pre_shoot_return_to_walk_started = False
         #hurdle
         self.hurdle_step = 0
-        self.hurdle_done = False
         self.hurdle_count = 0
         self.hurdle_ready = False
         self.hurdle_detected = False
@@ -236,13 +194,12 @@ class MainDecision(Node):
         self.hurdle_ball_suppressed = False
         self.hurdle_previous_ball_active = True
         MainDecision._reset_hurdle_line_search(self)
+        # 첫 실제 모션 후 3초가 끝날 때까지 허들 검출 금지
         self.hurdle_ignore_until = None
-        # 첫 실제 모션 후 3초가 끝날 때까지 허들 상태를 강제로 끕니다.
-        # gate가 열릴 때 이 구간의 버퍼도 폐기해 새 프레임만 사용합니다.
         self.hurdle_ignore_active = True
 
-        # 최근 5개의 비전 상태를 저장하고, line과 BallMode는
-        # 판단 시점의 최근 3개만 다수결에 사용합니다.
+        # 최근 5개의 비전 상태를 저장
+        # line과 BallMode는 판단 시점의 최근 3개만 다수결에 사용
         self.line_buffer = deque(maxlen=5)
         self.line_vote_detail_buffer = deque(maxlen=5)
         self.line_frame_sequence = 0
@@ -252,102 +209,133 @@ class MainDecision(Node):
         self.hurdle_buffer = deque(maxlen=5)
         self.hurdle_ready_buffer = deque(maxlen=5)
 
-        # subscribe
-        self.line_result_sub = self.create_subscription(LineResult, 'line_result', self.LineResultCallback, 10)
-        self.ball_result_sub = self.create_subscription(BallResult, 'ball_result', self.BallResultCallback, 10)
-        self.hurdle_result_sub = self.create_subscription(HurdleResult, 'hurdle_result', self.HurdleResultCallback, 10)
-
+        # QoS
+        # 두 YOLO의 최신 준비 상태를 유지한다.
         vision_ready_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # 최신 모션 상태와 미션 준비 상태를 유지한다.
+        motion_state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        # 비전 초기화 요청과 응답을 안정적으로 전달한다.
+        vision_reset_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        # 공·골대 비전의 최신 활성화 상태를 유지한다.
+        vision_mode_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        # subscribe
+        # yolo_vision에서 라인 상태와 각도를 받는다.
+        self.line_result_sub = self.create_subscription(
+            LineResult, 'line_result', self.LineResultCallback, 10
+        )
+        # ball_vision_fusion에서 공과 골대의 판단 결과를 받는다.
+        self.ball_result_sub = self.create_subscription(
+            BallResult, 'ball_result', self.BallResultCallback, 10
+        )
+        # webcam_hurdle_publisher에서 허들 상태와 각도를 받는다.
+        self.hurdle_result_sub = self.create_subscription(
+            HurdleResult, 'hurdle_result', self.HurdleResultCallback, 10
+        )
+        # yolo_vision에서 웹캠 YOLO의 준비 상태를 받는다.
         self.webcam_yolo_ready_sub = self.create_subscription(
             Bool,
             '/vision/webcam_yolo_ready',
             self.WebcamYoloReadyCallback,
             vision_ready_qos,
         )
+        # realsense_yolo_detector에서 RealSense YOLO 준비 상태를 받는다.
         self.realsense_yolo_ready_sub = self.create_subscription(
             Bool,
             '/vision/realsense_yolo_ready',
             self.RealSenseYoloReadyCallback,
             vision_ready_qos,
         )
-
-        #motion_ready 명령을 못 받는 상황 방지
-        motion_state_qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
+        # motion_main_node에서 모션 준비 상태와 종료 여부를 받는다.
         self.motion_end_sub = self.create_subscription(
             MotionEnd, 'motion_end', self.MotionEndCallback, motion_state_qos
         )
-        self.mission_armed_pub = self.create_publisher(
-            Bool,
-            '/mission/armed',
-            motion_state_qos,
-        )
-        vision_reset_qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-        )
-        self.vision_reset_pub = self.create_publisher(
-            String,
-            '/mission/vision_reset',
-            vision_reset_qos,
-        )
-        self.ball_start_reset_pub = self.create_publisher(
-            String, '/mission/ball_reset', vision_reset_qos,
-        )
+        # 4개 비전 노드에서 초기화 완료 응답을 받는다.
         self.vision_reset_ack_sub = self.create_subscription(
             String,
             '/mission/vision_reset_ack',
             self.VisionResetAckCallback,
             vision_reset_qos,
         )
-        MainDecision._set_mission_armed_state(self, False)
-        self.mission_start_service = self.create_service(
-            Trigger,
-            '/mission/start',
-            self.MissionStartCallback,
-        )
-        self.mission_start_watchdog = self.create_timer(
-            0.1,
-            self._check_mission_start_latency,
-        )
 
-        #publish
+        # publish
+        # mission_start_keyboard로 Enter 입력 준비 상태를 보낸다.
+        self.mission_armed_pub = self.create_publisher(
+            Bool,
+            '/mission/armed',
+            motion_state_qos,
+        )
+        # Enter 입력 준비 상태를 설정
+        self._set_mission_armed_state(False)
+        
+        # webcam·RealSense·공·허들 비전 노드로 초기화 요청을 보낸다.
+        self.vision_reset_pub = self.create_publisher(
+            String,
+            '/mission/vision_reset',
+            vision_reset_qos,
+        )
+        # webcam·RealSense·공 융합 노드로 공 초기화 요청을 보낸다.
+        self.ball_start_reset_pub = self.create_publisher(
+            String, '/mission/ball_reset', vision_reset_qos,
+        )
+        # 모션 노드와 비전 상태 판단기로 실행할 모션 번호를 보낸다.
         self.motion_pub = self.create_publisher(MotionCommand, 'motion_command', 10)
-
-        # 공과 골대의 고비용 RealSense 영상 처리를 경기 단계별로 하나만
-        # 활성화한다. TRANSIENT_LOCAL을 사용해 vision 노드가 늦게 시작해도
-        # 마지막 모드를 즉시 받을 수 있게 한다.
-        vision_mode_qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
+        # RealSense 검출기와 공 융합 노드로 공 검출 ON/OFF를 보낸다.
         self.ball_active_pub = self.create_publisher(
             Bool,
             '/vision/ball_active',
             vision_mode_qos,
         )
+        # RealSense 검출기로 골대 검출 ON/OFF를 보낸다.
         self.hoop_active_pub = self.create_publisher(
             Bool,
             '/vision/hoop_active',
             vision_mode_qos,
         )
+        # 공 융합 노드로 웹캠 공 결과 사용 여부를 보낸다.
         self.webcam_ball_allowed_pub = self.create_publisher(
             Bool,
             '/vision/webcam_ball_allowed',
             vision_mode_qos,
         )
+
+        # service
+        # mission_start_keyboard에서 Enter로 보낸 시작 요청을 받는다.
+        self.mission_start_service = self.create_service(
+            Trigger,
+            '/mission/start',
+            self.MissionStartCallback,
+        )
+
+        # timer
+        # 미션 시작 후 첫 모션 지연을 0.1초마다 확인한다.
+        self.mission_start_watchdog = self.create_timer(
+            0.1,
+            self._check_mission_start_latency,
+        )
+
+        #vision의 공 검출 상태 저장
         self.ball_vision_active = None
         self.hoop_vision_active = None
         self.webcam_ball_allowed = None
+        
+        #공 검출 결과 사용 여부 전송
         self._set_webcam_ball_allowed(
             True,
             reason='startup: wait for RealSense <= 120cm',
@@ -360,16 +348,13 @@ class MainDecision(Node):
 
     def _vision_stack_ready(self):
         """Return true only after both camera YOLO pipelines have inferred."""
-        if getattr(self, 'test_mode', False):
-            return True
         return bool(
             getattr(self, 'webcam_yolo_ready', True)
             and getattr(self, 'realsense_yolo_ready', True)
         )
 
     def _mission_has_started(self):
-        """Keep lightweight unit-test harnesses compatible by default."""
-        return bool(getattr(self, 'mission_started', True))
+        return bool(self.mission_started)
 
     def _mission_armed(self):
         """Finish preparation before Enter can start Back_To_Walk."""
@@ -469,7 +454,6 @@ class MainDecision(Node):
         self.latest_ball_in_hand = False
         self.latest_goal_distance_cm = 0.0
         self.latest_hurdle_angle = 0.0
-        self.latest_hurdle_ready = False
         self.line_status = Line.Line_None
         self.ball_status = Ball.Ball_None
         self.ball_in_hand = False
@@ -682,10 +666,6 @@ class MainDecision(Node):
 
     # 콜백함수에서 모션 종료 여부를 업데이트
     def MotionEndCallback(self, motion_end_msg:MotionEnd):
-        if self.test_mode:
-            self.motion_ready = True
-            self.motion_end = True
-            return
         #메시지 받기 이전 상태 저장
         was_ready = self.motion_ready
         was_motion_end = self.motion_end
@@ -1115,7 +1095,6 @@ class MainDecision(Node):
         )
         hurdle_ready = False if ignore_hurdle else hurdle_msg.hurdle_ready
         self.latest_hurdle_angle = 0.0 if ignore_hurdle else hurdle_msg.angle
-        self.latest_hurdle_ready = hurdle_ready
 
         if (
             not self.motion_ready
@@ -1174,7 +1153,6 @@ class MainDecision(Node):
         if (
             returning_from_pre_shoot
             and not getattr(self, 'pre_shoot_return_to_walk_started', False)
-            and not self.test_mode
         ):
             return False
 
@@ -1212,13 +1190,6 @@ class MainDecision(Node):
         line_vote_details = list(
             getattr(self, 'line_vote_detail_buffer', [])
         )[-3:]
-        # 선택된 상태와 같은 프레임의 각도를 사용한다. 회전 루프도 기존
-        # MotionEnd 판단에서만 갱신하며 새 비전 프레임을 기다리지 않는다.
-        self.line_decision_detail = next(
-            (detail for detail in reversed(line_vote_details)
-             if detail.get('status') == self.line_status),
-            None,
-        )
         if not QUIET_LOGS and len(line_vote_details) == 3:
             frame_logs = []
             for detail in line_vote_details:
@@ -1266,7 +1237,6 @@ class MainDecision(Node):
                 self.LineTracking()
             else:
                 # 보행 자세에서 새 Lost 탐색을 시작한다.
-                self.lost_count = 0
                 self.lost_step = 0
                 self.lost_found_dir = 0
                 self.lost_body_turn_count = 0
@@ -1394,7 +1364,6 @@ class MainDecision(Node):
         #우선순위 1 : hurdle mode
         # 허들이 한 번 검출되면 Hurdle_Go가 끝날 때까지 다른 모드로 전환하지 않습니다.
         if self.hurdle_detected:
-            self.lost_count = 0
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
@@ -1439,7 +1408,7 @@ class MainDecision(Node):
     def CheckBall(self):
         self.pick_done = False
         if self.ball_in_hand == True:
-            self.post_pick_failure_ball_suppressed = False
+            self.pick_failed = False
             self.has_ball = True
             MainDecision._set_webcam_ball_allowed(
                 self,
@@ -1472,7 +1441,7 @@ class MainDecision(Node):
                 self.backward_after_pick = False
                 if getattr(
                     self,
-                    'post_pick_failure_ball_suppressed',
+                    'pick_failed',
                     False,
                 ):
                     MainDecision._finish_post_pick_failure_recovery(
@@ -1504,7 +1473,7 @@ class MainDecision(Node):
             self.pick_try_count = 0
             if getattr(
                 self,
-                'post_pick_failure_ball_suppressed',
+                'pick_failed',
                 False,
             ):
                 MainDecision._finish_post_pick_failure_recovery(
@@ -1537,11 +1506,9 @@ class MainDecision(Node):
             self.goal_count += 1
 
         # 13번만 짧은 30/31번 회전을 최소 5회 수행한다.
-        # 나머지 Shoot의 최소 회전 횟수는 기존 설정을 유지한다.
+        # 나머지 Shoot은 최소 4회 회전한다.
         # 그 뒤부터 라인이 보이면 회전을 끝내고 보행 자세로 복귀한다.
-        min_turn_count = 5 if shoot_13_return else int(
-            getattr(self, 'post_shoot_min_turn_count', 4)
-        )
+        min_turn_count = 5 if shoot_13_return else 4
         if (
             self.turn_count >= min_turn_count
             and self.line_status != Line.Line_None
@@ -1617,7 +1584,7 @@ class MainDecision(Node):
             self.back_to_walk_after_pick = False
             if getattr(
                 self,
-                'post_pick_failure_ball_suppressed',
+                'pick_failed',
                 False,
             ):
                 MainDecision._finish_post_pick_failure_recovery(
@@ -1909,7 +1876,6 @@ class MainDecision(Node):
             # 이어가지 않는다. Back_To_Walk는 기본자세로 끝나는 모션이
             # 아니므로 Back_To_Initial을 반드시 실행한 뒤 새 Lost 탐색을
             # 목 왼쪽부터 다시 시작한다.
-            self.lost_count = 0
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
@@ -1971,7 +1937,6 @@ class MainDecision(Node):
                 return
 
             # 좌우 모두 라인이 없으면 목 중앙 복귀 후 한 번 후진한다.
-            self.lost_count = 0
             self.lost_step = 5
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
@@ -2004,7 +1969,6 @@ class MainDecision(Node):
                 return
 
             else:
-                self.lost_count = 0
                 self.lost_step = 0
                 self.lost_found_dir = 0
                 self.lost_body_turn_count = 0
@@ -2029,7 +1993,6 @@ class MainDecision(Node):
                 elif self.lost_found_dir == 1:
                     self.status = Motion.Right_Turn_Afterpick
                 else:
-                    self.lost_count = 0
                     self.lost_step = 0
                     self.lost_found_dir = 0
                     self.lost_body_turn_count = 0
@@ -2079,8 +2042,7 @@ class MainDecision(Node):
             'post-shoot LineTrackingMode entered'
         )
 
-        #라인을 찾고 lost count 초기화
-        self.lost_count = 0 
+        # 라인을 찾았으므로 Lost 탐색 상태 초기화
         self.lost_step = 0
         self.lost_found_dir = 0
         self.lost_body_turn_count = 0
@@ -2090,10 +2052,8 @@ class MainDecision(Node):
         self.lost_right_line_seen = False
         self.lost_neck_scan_side = 0
 
-        # 모션이 끝날 때마다 최신 라인 판단에 해당하는 모션을 바로 실행한다.
-        self.status = self.line_tracking.next_command(
-            self.line_status, getattr(self, 'line_decision_detail', None),
-        )
+        # Publisher에서 확정한 최신 라인 모션을 그대로 실행한다.
+        self.status = self.line_status
         self.MotionCommand()
 
     # 공 없음(99)과 공 놓침(45)이 아닌 공 동작 상태인지 확인
@@ -2123,7 +2083,7 @@ class MainDecision(Node):
 
     def _begin_post_pick_failure_ball_suppression(self):
         """Keep RealSense on but suppress webcam during failed-pick recovery."""
-        self.post_pick_failure_ball_suppressed = True
+        self.pick_failed = True
         self.ball_data = False
         self.ball_buffer.clear()
         MainDecision._set_webcam_ball_allowed(
@@ -2146,7 +2106,7 @@ class MainDecision(Node):
         """Restore ball processing immediately after recovery ends."""
         if not getattr(
             self,
-            'post_pick_failure_ball_suppressed',
+            'pick_failed',
             False,
         ):
             return False
@@ -2154,7 +2114,7 @@ class MainDecision(Node):
         # OFF 구간에 발행된 status=99와 과거 웹캠 투표가 새 공 판단에
         # 섞이지 않도록 검출기를 켜기 직전에 모든 판단 버퍼를 비운다.
         MainDecision._reset_vision_decision_cycle(self)
-        self.post_pick_failure_ball_suppressed = False
+        self.pick_failed = False
         self.current_mode = "LineTrackingMode"
         MainDecision._set_vision_activity(
             self,
@@ -2201,7 +2161,7 @@ class MainDecision(Node):
             motion_msg.command = Motion.Initial_Pose
             
         elif self.status == 1:
-            motion_msg.command = Motion.Forward_4step
+            motion_msg.command = Motion.Forward
         
         elif self.status == 2:
             motion_msg.command = Motion.Left_Half_Forward
@@ -2342,7 +2302,6 @@ class MainDecision(Node):
             self.hurdle_status = Hurdle.Hurdle_None
             self.hurdle_angle = 0.0
             self.latest_hurdle_angle = 0.0
-            self.latest_hurdle_ready = False
             self.hurdle_buffer.clear()
             self.hurdle_ready_buffer.clear()
 
@@ -2366,8 +2325,7 @@ class MainDecision(Node):
             )
         
         self._reset_vision_decision_cycle()
-        #test mode일 때는 true 로 유지
-        self.motion_end = True if self.test_mode else False
+        self.motion_end = False
         
         
 def main(args=None):
