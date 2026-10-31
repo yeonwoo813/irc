@@ -41,6 +41,7 @@ class BallStatus:
     Left_Turn_Shoot_3 = 36
     Right_Turn_Shoot_3 = 37
     Right_Turn_4 = 38
+    Left_Turn_4 = 39
     Ball_Lost = 45
     Ball_None = 99
 
@@ -103,10 +104,10 @@ class BallDecision:
         self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준
-        self.webcam_angle_center_tol = 5.0
-        self.webcam_pick_y_max_px = 75.0
-        self.webcam_pick_x_min_px = -20.0
-        self.webcam_pick_x_max_px = 25.0
+        self.webcam_angle_center_tol = 8.0
+        self.webcam_pick_y_max_px = 85.0
+        self.webcam_pick_x_min_px = -15.0        
+        self.webcam_pick_x_max_px = 3.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
         # 공을 잡고 있고 골대가 120cm 이내이면 골대 기준으로 판단한다.
@@ -169,7 +170,7 @@ class BallDecision:
         if webcam_ball_y_distance > self.webcam_pick_y_max_px:
             
             if angle < -self.webcam_angle_center_tol:
-                return BallStatus.Left_Turn_5, angle
+                return BallStatus.Left_Turn_4, angle
             if angle <= self.webcam_angle_center_tol:
                 return BallStatus.Forward_half, 0.0
             return BallStatus.Right_Turn_4, angle

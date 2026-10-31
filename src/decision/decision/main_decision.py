@@ -54,6 +54,7 @@ class Motion:
     Left_Turn_Shoot_3 = 36
     Right_Turn_Shoot_3 = 37
     Right_Turn_4 = 38
+    Left_Turn_4 = 39
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -2590,6 +2591,9 @@ class MainDecision(Node):
 
         elif self.status == 38:
             motion_msg.command = Motion.Right_Turn_4
+
+        elif self.status == 39:
+            motion_msg.command = Motion.Left_Turn_4
 
         else:
             # 미지원 상태가 메시지 기본값 0(Initial_Pose)으로 발행되지

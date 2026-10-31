@@ -13,6 +13,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
+from decision.input_latency_trace import InputLatencyTrace
+
 
 class MissionStartKeyboard(Node):
     def __init__(self):
@@ -26,6 +28,13 @@ class MissionStartKeyboard(Node):
         self.mission_armed = False
         self.start_requested = False
         self.armed_screen_active = False
+        self.input_trace = None
+        trace_directory = os.environ.get('IRC_INPUT_TRACE_DIR')
+        if trace_directory:
+            try:
+                self.input_trace = InputLatencyTrace(trace_directory)
+            except OSError as exc:
+                self.get_logger().warning(f'Input latency tracing unavailable: {exc}')
         self._open_terminal()
         self.poll_timer = self.create_timer(0.05, self._poll_keyboard)
         self.screen_timer = self.create_timer(0.25, self._refresh_armed_screen)
@@ -50,6 +59,9 @@ class MissionStartKeyboard(Node):
             )
             self.original_terminal_settings = termios.tcgetattr(self.tty_fd)
             tty.setcbreak(self.tty_fd, termios.TCSANOW)
+            trace = getattr(self, 'input_trace', None)
+            if trace is not None:
+                trace.record('terminal_open', **trace.terminal_state(self.tty_fd))
         except (OSError, termios.error) as exc:
             self._restore_terminal()
             self.get_logger().error(
@@ -125,13 +137,20 @@ class MissionStartKeyboard(Node):
                 pass
         self.tty_fd = None
         self.original_terminal_settings = None
+        trace = getattr(self, 'input_trace', None)
+        if trace is not None:
+            trace.close()
 
     def _poll_keyboard(self):
         if self.tty_fd is None:
             return
+        trace = getattr(self, 'input_trace', None)
+        poll_started_at = time.monotonic() if trace is not None else None
         try:
             pressed = os.read(self.tty_fd, 64)
         except BlockingIOError:
+            if trace is not None:
+                trace.note_poll(poll_started_at, time.monotonic(), empty=True)
             return
         except OSError as exc:
             self.get_logger().error(f'Keyboard read failed: {exc}')
@@ -139,6 +158,8 @@ class MissionStartKeyboard(Node):
             return
 
         read_at = time.monotonic()
+        if trace is not None:
+            trace.note_poll(poll_started_at, read_at, empty=not pressed)
         if pressed and not self.start_requested:
             self.get_logger().info(
                 f'[MISSION INPUT] read_monotonic={read_at:.6f}, '
@@ -152,6 +173,17 @@ class MissionStartKeyboard(Node):
                     f'armed={self.mission_armed}'
                 )
                 self._request_mission_start()
+                if trace is not None:
+                    # File I/O happens after the start request has been attempted.
+                    # Keep timing evidence even when quiet_logs suppresses ROS logs.
+                    trace.record(
+                        'enter_read',
+                        **trace.input_snapshot(read_at),
+                        armed=self.mission_armed,
+                        start_requested=self.start_requested,
+                        request_sent_monotonic=self.start_request_sent_at,
+                        terminal=trace.terminal_state(self.tty_fd),
+                    )
 
     def _request_mission_start(self):
         if self.pending_request is not None and not self.pending_request.done():

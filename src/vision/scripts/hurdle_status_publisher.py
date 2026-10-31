@@ -16,6 +16,8 @@ class HurdleStatus:
     Backward_half = 9
     Hurdle_Forward_20 = 26
     Back_To_Initial = 27
+    Right_Turn_4 = 38
+    Left_Turn_4 = 39
     Hurdle_None = 99
 
 
@@ -96,12 +98,12 @@ class HurdleDecision:
 
         # 6. 목표 각도보다 왼쪽이면 좌회전, 오른쪽이면 우회전
         if angle < min_angle:
-            self.search_turn = HurdleStatus.Left_Turn_10
-            return HurdleStatus.Left_Turn_10, angle, False
+            self.search_turn = HurdleStatus.Left_Turn_4
+            return HurdleStatus.Left_Turn_4, angle, False
 
         if angle > max_angle:
-            self.search_turn = HurdleStatus.Right_Turn_10
-            return HurdleStatus.Right_Turn_10, angle, False
+            self.search_turn = HurdleStatus.Right_Turn_4
+            return HurdleStatus.Right_Turn_4, angle, False
 
         # 7. 목표 각도 범위에 들어오면 Forward 20 실행 준비 완료
         return HurdleStatus.Hurdle_Forward_20, angle, True
@@ -116,7 +118,6 @@ class HurdleDecision:
             self.search_turn = HurdleStatus.Left_Turn_10
         elif line_angle > 0.0:
             self.search_turn = HurdleStatus.Right_Turn_10
-
         return self.search_turn, line_angle, False
 
 
