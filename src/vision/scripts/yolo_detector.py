@@ -1385,7 +1385,8 @@ def analyze_frame_yolo(
     raw_ball_in_hand_gate: Optional[ContinuousTrueGate] = None,
     ball_detection_active: bool = True,
     ball_detection_hold: Optional[BallDetectionHold] = None,
-) -> tuple[dict, np.ndarray]:
+    render_visualization: bool = True,
+) -> tuple[dict, Optional[np.ndarray]]:
     h, w = frame.shape[:2]
     diagnostic_dets = yolo_detect(model, frame, cfg)
     # 낮은 신뢰도 후보는 진단에만 사용한다. 기존 주행/공/허들 판단과
@@ -1440,15 +1441,17 @@ def analyze_frame_yolo(
             diagnostic_dets, payload, w, h, cfg, motion_state
         )
 
-    vis = visualize_yolo(
-        frame,
-        raw_dets,
-        raw_line_points,
-        payload,
-        roi_box,
-        cfg,
-        motion_state,
-    )
+    vis = None
+    if render_visualization:
+        vis = visualize_yolo(
+            frame,
+            raw_dets,
+            raw_line_points,
+            payload,
+            roi_box,
+            cfg,
+            motion_state,
+        )
     return payload, vis
 
 
@@ -1664,6 +1667,8 @@ def main_ros2(ini_path: str = "settings.ini"):
             payload["hurdle_result_publisher"] = "yolo_vision"
 
         def cb_image(self, msg: Image):
+            debug_subscribed = self.pub_debug.get_subscription_count() > 0
+            render_visualization = bool(self.cfg["show_window"]) or debug_subscribed
             try:
                 frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
                 if self.cfg["flip_vertical"]:
@@ -1678,6 +1683,7 @@ def main_ros2(ini_path: str = "settings.ini"):
                     raw_ball_in_hand_gate=self.raw_ball_in_hand_gate,
                     ball_detection_active=self.ball_detection_active,
                     ball_detection_hold=self.ball_detection_hold,
+                    render_visualization=render_visualization,
                 )
                 self.inference_failures = 0
             except Exception:
@@ -1724,9 +1730,12 @@ def main_ros2(ini_path: str = "settings.ini"):
             )
             self.pub_state.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
-            debug_msg = self.bridge.cv2_to_imgmsg(vis, encoding="bgr8")
-            debug_msg.header = msg.header
-            self.pub_debug.publish(debug_msg)
+            # Build ROS image messages only while a viewer is subscribed.
+            # The local preview still receives the same visualization.
+            if debug_subscribed:
+                debug_msg = self.bridge.cv2_to_imgmsg(vis, encoding="bgr8")
+                debug_msg.header = msg.header
+                self.pub_debug.publish(debug_msg)
 
             # ROS 모드에서도 settings.ini의 show_window 설정을 적용한다.
             if self.cfg["show_window"]:

@@ -485,13 +485,12 @@ class BallVisionFusionNode(Node):
         required = getattr(self, "required_mission_reset_token", "")
         if required and str(payload.get("mission_reset_token", "")) != required:
             return
-        if not bool(payload.get("detected")):
-            self.latest_hoop = self._empty_hoop_state()
-            self.latest_hoop_time = now
-            return
         distance = self._finite(payload, "realsense_goal_distance_cm")
         angle = self._finite(payload, "realsense_goal_angle")
-        if distance is None or distance <= 0.0 or angle is None:
+        if (
+            not bool(payload.get("detected"))
+            or distance is None or distance <= 0.0 or angle is None
+        ):
             self.latest_hoop = self._empty_hoop_state()
         else:
             self.latest_hoop = {
@@ -510,6 +509,14 @@ class BallVisionFusionNode(Node):
                     payload.get("held_previous_detection", False)
                 ),
             }
+        # A miss is a new inference frame too. Preserve its identity so the
+        # decision node cannot count periodic republications as new votes.
+        self.latest_hoop["realsense_goal_frame_stamp_sec"] = self._finite(
+            payload, "stamp_sec"
+        )
+        self.latest_hoop["realsense_goal_held_previous_detection"] = bool(
+            payload.get("held_previous_detection", False)
+        )
         self.latest_hoop_time = now
 
     @staticmethod
@@ -608,12 +615,12 @@ class BallVisionFusionNode(Node):
             and webcam_age <= self.webcam_timeout_sec
             and self.latest_webcam.get("webcam_ball_detected")
         )
-        hoop_valid = bool(
+        hoop_fresh = bool(
             self.latest_hoop is not None
             and hoop_age is not None
             and hoop_age <= self.hoop_timeout_sec
-            and self.latest_hoop.get("hoop_detected")
         )
+        hoop_valid = hoop_fresh and bool(self.latest_hoop.get("hoop_detected"))
 
         features: Dict[str, Any] = {
             "realsense_ball_detected": False,
@@ -659,6 +666,10 @@ class BallVisionFusionNode(Node):
                 "realsense_goal_angle",
                 "realsense_goal_x_px",
                 "realsense_goal_y_px",
+            ):
+                features[key] = self.latest_hoop[key]
+        if hoop_fresh:
+            for key in (
                 "realsense_goal_frame_stamp_sec",
                 "realsense_goal_raw_detected",
                 "realsense_goal_held_previous_detection",

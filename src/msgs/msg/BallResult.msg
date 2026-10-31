@@ -10,3 +10,7 @@ float32 goal_x_px
 float32 goal_y_px
 float32 goal_distance_cm
 bool pre_shoot_verified
+# Valid raw hoop detection (held results do not qualify), and its source frame.
+bool goal_raw_detected
+bool goal_held_previous_detection
+float64 goal_frame_stamp_sec

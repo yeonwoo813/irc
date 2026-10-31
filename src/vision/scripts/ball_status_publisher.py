@@ -37,7 +37,10 @@ class BallStatus:
     Shoot_Close = 32
     Shoot_Forward = 33
     Shoot_Mid = 34
-    Shoot_62 = 35
+    Shoot_65 = 35
+    Left_Turn_Shoot_3 = 36
+    Right_Turn_Shoot_3 = 37
+    Right_Turn_4 = 38
     Ball_Lost = 45
     Ball_None = 99
 
@@ -76,30 +79,32 @@ class BallDecision:
         # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
         # 27/33번 MotionEnd 이후 골대 판단은 pre_shoot_verified로 보낸다.
         self.goal_pre_shoot_entry_distance_cm = 83.5
-        self.goal_shoot_max_distance_cm = 74.0
-        self.goal_shoot_min_distance_cm = 68.0
-        self.goal_mid_shoot_min_distance_cm = 64.0
-        self.goal_mid_shoot_max_distance_cm = 68.0
-        self.goal_62_shoot_min_distance_cm = 62.0
-        self.goal_62_shoot_max_distance_cm = 64.0
-        self.goal_too_close_distance_cm = 62.0
+        self.goal_shoot_min_distance_cm = 70.0
+        self.goal_shoot_max_distance_cm = 72.0
+        self.goal_mid_shoot_min_distance_cm = 68.0
+        self.goal_mid_shoot_max_distance_cm = 70.0
+        self.goal_65_shoot_min_distance_cm = 65.0
+        self.goal_65_shoot_max_distance_cm = 68.0
+        self.goal_close_shoot_min_distance_cm = 63.0
+        self.goal_close_shoot_max_distance_cm = 65.0
+        self.goal_too_close_distance_cm = 63.0
 
         self.goal_approach_center_min = -5.0
         self.goal_approach_center_max = 5.0
         self.goal_approach_large_angle = 60.0
-        self.goal_shoot_close_min = -8.0
-        self.goal_shoot_close_max = 0.0
-        self.goal_shoot_62_min = -8.0
-        self.goal_shoot_62_max = -2.0
-        self.goal_shoot_mid_min = -4.0
-        self.goal_shoot_mid_max = 0.7
-        self.goal_shoot_far_min = -6.0
-        self.goal_shoot_far_max = 1.0
+        self.goal_shoot_close_min = -6.5
+        self.goal_shoot_close_max = -3.0
+        self.goal_shoot_65_min = -7.0
+        self.goal_shoot_65_max = -3.0
+        self.goal_shoot_mid_min = -5.0
+        self.goal_shoot_mid_max = -1.0
+        self.goal_shoot_far_min = -5.0
+        self.goal_shoot_far_max = 0.0
         self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 5.0
-        self.webcam_pick_y_max_px = 85.0
+        self.webcam_pick_y_max_px = 75.0
         self.webcam_pick_x_min_px = -20.0
         self.webcam_pick_x_max_px = 25.0
 
@@ -167,7 +172,7 @@ class BallDecision:
                 return BallStatus.Left_Turn_5, angle
             if angle <= self.webcam_angle_center_tol:
                 return BallStatus.Forward_half, 0.0
-            return BallStatus.Right_Turn_5, angle
+            return BallStatus.Right_Turn_4, angle
             
 
         # pick 거리 안에서는 x 거리로 좌우 정렬 여부를 판단한다.
@@ -206,17 +211,23 @@ class BallDecision:
         ):
             return BallStatus.Ball_None, 0.0
 
-        if distance <= self.goal_too_close_distance_cm:
+        if distance < self.goal_too_close_distance_cm:
             return BallStatus.Backward_half, 0.0
 
         if distance <= self.goal_shoot_max_distance_cm:
-            # Disjoint bands: Close < 61, 62 in [61, 63], Mid in (63, 68].
+            # Close [62, 65], 35번 (65, 68], Mid (68, 70], Shoot (70, 72].
             if (
-                self.goal_62_shoot_min_distance_cm
+                self.goal_close_shoot_min_distance_cm
                 <= distance
-                <= self.goal_62_shoot_max_distance_cm
+                <= self.goal_close_shoot_max_distance_cm
             ):
-                shoot_status = BallStatus.Shoot_62
+                shoot_status = BallStatus.Shoot_Close
+            elif (
+                self.goal_65_shoot_min_distance_cm
+                < distance
+                <= self.goal_65_shoot_max_distance_cm
+            ):
+                shoot_status = BallStatus.Shoot_65
             elif (
                 self.goal_mid_shoot_min_distance_cm
                 < distance
@@ -226,7 +237,7 @@ class BallDecision:
             elif distance > self.goal_shoot_min_distance_cm:
                 shoot_status = BallStatus.Shoot
             else:
-                shoot_status = BallStatus.Shoot_Close
+                return BallStatus.Ball_None, 0.0
             return self._shoot_status_from_goal_angle(angle, shoot_status)
 
         if features.shoot_initial_done:
@@ -255,9 +266,9 @@ class BallDecision:
         if shoot_status == BallStatus.Shoot_Close:
             center_min = self.goal_shoot_close_min
             center_max = self.goal_shoot_close_max
-        elif shoot_status == BallStatus.Shoot_62:
-            center_min = self.goal_shoot_62_min
-            center_max = self.goal_shoot_62_max
+        elif shoot_status == BallStatus.Shoot_65:
+            center_min = self.goal_shoot_65_min
+            center_max = self.goal_shoot_65_max
         elif shoot_status == BallStatus.Shoot_Mid:
             center_min = self.goal_shoot_mid_min
             center_max = self.goal_shoot_mid_max
@@ -265,11 +276,18 @@ class BallDecision:
             center_min = self.goal_shoot_far_min
             center_max = self.goal_shoot_far_max
 
-        if angle < center_min:
+        # 모든 슛에서 큰 각도에 동일한 5도 회전 기준 적용
+        if angle <= -15.0:
             return BallStatus.Left_Turn_5, angle
+        if angle >= 10.0:
+            return BallStatus.Right_Turn_5, angle
+
+        # 나머지 슛 정렬은 공통으로 3도 회전 적용
+        if angle < center_min:
+            return BallStatus.Left_Turn_Shoot_3, angle
         if angle <= center_max:
             return shoot_status, 0.0
-        return BallStatus.Right_Turn_5, angle
+        return BallStatus.Right_Turn_Shoot_3, angle
 
 
     #webcam 각도 값이 없을 때 안전하게 처리, 값 있으면 그대로 반환
@@ -412,7 +430,7 @@ class BallStatusPublisher:
             BallStatus.Shoot,
             BallStatus.Shoot_Close,
             BallStatus.Shoot_Mid,
-            BallStatus.Shoot_62,
+            BallStatus.Shoot_65,
         ):
             self.shoot_command_seen = True
 
@@ -638,7 +656,7 @@ class BallStatusPublisher:
                 BallStatus.Shoot,
                 BallStatus.Shoot_Close,
                 BallStatus.Shoot_Mid,
-                BallStatus.Shoot_62,
+                BallStatus.Shoot_65,
                 BallStatus.Backward_half,
             )
         ):
@@ -659,6 +677,22 @@ class BallStatusPublisher:
         msg = BallResult()
         msg.status = int(status)
         msg.angle = float(angle)
+        msg.goal_raw_detected = bool(
+            realsense_goal_raw_detected is True
+            and not realsense_goal_held_previous_detection
+            and realsense_goal_distance_cm is not None
+            and math.isfinite(realsense_goal_distance_cm)
+            and realsense_goal_distance_cm > 0.0
+            and realsense_goal_angle is not None
+            and math.isfinite(realsense_goal_angle)
+        )
+        msg.goal_held_previous_detection = bool(
+            realsense_goal_held_previous_detection
+        )
+        msg.goal_frame_stamp_sec = float(
+            realsense_goal_frame_stamp_sec
+            if realsense_goal_frame_stamp_sec is not None else math.nan
+        )
         goal_out_of_range = bool(
             status == BallStatus.Ball_None
             and realsense_goal_raw_detected is True
