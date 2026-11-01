@@ -1,0 +1,26 @@
+[Unit]
+Description=Jetson reboot event check (no resident collector)
+After=local-fs.target systemd-journald.service systemd-pstore.service nvramoopsconfig.service
+Wants=nvramoopsconfig.service
+RequiresMountsFor=/var/lib/jetson-reboot-recorder /var/log/jetson-reboots
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=@LOG_GROUP@
+ExecStart=/usr/bin/python3 /usr/local/lib/jetson-reboot-recorder/recorder.py check
+TimeoutStartSec=60
+TimeoutStopSec=10
+UMask=0027
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

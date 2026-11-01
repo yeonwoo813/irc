@@ -106,8 +106,8 @@ class BallDecision:
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 8.0
         self.webcam_pick_y_max_px = 85.0
-        self.webcam_pick_x_min_px = -15.0        
-        self.webcam_pick_x_max_px = 3.0
+        self.webcam_pick_x_min_px = -20.0        
+        self.webcam_pick_x_max_px = 10.0
 
     def decide(self, features: BallFeatures) -> Tuple[int, float]:
         # 공을 잡고 있고 골대가 120cm 이내이면 골대 기준으로 판단한다.

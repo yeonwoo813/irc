@@ -1,0 +1,17 @@
+[Unit]
+Description=Record Jetson shutdown request (%i)
+DefaultDependencies=no
+After=jetson-reboot-recorder.service
+Before=shutdown.target umount.target final.target
+
+[Service]
+Type=oneshot
+User=root
+Group=@LOG_GROUP@
+ExecStart=/usr/bin/python3 /usr/local/lib/jetson-reboot-recorder/recorder.py mark %i
+TimeoutStartSec=5
+UMask=0027
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=%i.target
