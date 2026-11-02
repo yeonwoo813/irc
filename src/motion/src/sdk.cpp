@@ -1541,7 +1541,7 @@ void SDK_Motion::define_motions()
         {2054,1251,2336,2087,2051,2041,2763,1616,1508,2024,2017,2109,2016,1652,1049,1970,2116,2435,3060,2144,1970,1965}
     };
 
-    for (int repeat = 0; repeat < 12; ++repeat)
+    for (int repeat = 0; repeat < 13; ++repeat)
     {
         motion_pre_hurdle_walk.poses.insert(
             motion_pre_hurdle_walk.poses.end(),
@@ -1549,7 +1549,7 @@ void SDK_Motion::define_motions()
             pre_hurdle_walk_cycle.end());
         motion_pre_hurdle_walk.durations.insert(
             motion_pre_hurdle_walk.durations.end(),
-            {0.05, 0.05, 0.05, 0.045, 0.045, 0.045});
+            {0.055, 0.055, 0.055, 0.04, 0.04, 0.04});
         motion_pre_hurdle_walk.blends.insert(
             motion_pre_hurdle_walk.blends.end(),
             {BlendType::Stop, BlendType::Stop, BlendType::Stop,
