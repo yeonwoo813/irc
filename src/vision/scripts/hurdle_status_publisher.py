@@ -44,9 +44,9 @@ class HurdleDecision:
         # 로봇 중심선에서 두 번째 라인점까지의 거리 기준
         self.center_distance_px = 100.0
 
-        # 거리 구간별 허용 각도
-        self.center_angle_range = (-10.0, 10.0)
-        self.right_angle_range = (10.0, 18.0)
+        # -100px 경계 양쪽에서 +8~+12도를 함께 허용해 왕복 보정을 줄인다.
+        self.center_angle_range = (-10.0, 12.0)
+        self.right_angle_range = (8.0, 18.0)
         self.left_angle_range = (-15.0, -8.0)
 
         self.search_turn = HurdleStatus.Left_Turn_10

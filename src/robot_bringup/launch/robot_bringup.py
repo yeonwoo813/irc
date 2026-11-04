@@ -27,7 +27,7 @@ def generate_launch_description():
     declarations = [
         DeclareLaunchArgument(
             'quiet_logs', default_value='true',
-            description='Disable runtime logs; false restores previous logging.',
+            description='Disable runtime logs; false enables bounded asynchronous logs.',
         ),
         DeclareLaunchArgument(
             'use_realsense',

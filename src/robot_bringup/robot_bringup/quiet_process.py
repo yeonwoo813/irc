@@ -1,4 +1,4 @@
-"""Reversible logging suppression without changing robot startup or commands."""
+"""Select quiet or bounded asynchronous logging without changing node PIDs."""
 
 import argparse
 import logging
@@ -7,6 +7,8 @@ from pathlib import Path
 import runpy
 import shlex
 import sys
+
+from robot_bringup.async_logs import CONSOLE_ONLY_ROS_ARGS, start_relay
 
 
 QUIET_ENV = 'IRC_QUIET_LOGS'
@@ -62,18 +64,25 @@ def main(argv=None):
     if not command:
         parser.error('process command required after --')
 
-    if not quiet_enabled():
-        os.execvp(command[0], command)
-
-    # Native library prints and SDK stdout bypass ROS logging. Keep them out
-    # of launch's pipes too. /dev/tty remains available for the Enter prompt.
-    with open(os.devnull, 'wb') as sink:
-        os.dup2(sink.fileno(), 1)
-        os.dup2(sink.fileno(), 2)
-    logging.disable(logging.CRITICAL)
+    quiet = quiet_enabled()
+    if quiet:
+        # Native library prints and SDK stdout bypass ROS logging. Keep them
+        # out of launch's pipes too. /dev/tty remains available for Enter.
+        with open(os.devnull, 'wb') as sink:
+            os.dup2(sink.fileno(), 1)
+            os.dup2(sink.fileno(), 2)
+        logging.disable(logging.CRITICAL)
+        ros_args = ROS_QUIET_ARGS
+    else:
+        start_relay()
+        ros_args = CONSOLE_ONLY_ROS_ARGS
+        os.environ['PYTHONUNBUFFERED'] = '1'
+        # runpy keeps this interpreter's streams; exec creates fresh ones.
+        for stream in (sys.stdout, sys.stderr):
+            stream.reconfigure(line_buffering=True, write_through=True)
 
     if options.ros:
-        os.execvp(command[0], command + ROS_QUIET_ARGS)
+        os.execvp(command[0], command + ros_args)
 
     # Keep custom script arguments unchanged, including the readiness gate's
     # '-- child command'. Inject ROS options only when rclpy initializes.
@@ -81,10 +90,11 @@ def main(argv=None):
 
     original_init = rclpy.init
 
-    def quiet_init(*, args=None, **kwargs):
-        return original_init(args=quiet_ros_args(args), **kwargs)
+    def configured_init(*, args=None, **kwargs):
+        configured_args = list(sys.argv if args is None else args) + ros_args
+        return original_init(args=configured_args, **kwargs)
 
-    rclpy.init = quiet_init
+    rclpy.init = configured_init
     if Path(command[0]).name.startswith('python'):
         command = command[1:]
     script = command[0]
