@@ -1725,6 +1725,11 @@ def main_ros2(ini_path: str = "settings.ini"):
                 "",
             )
             payload["ball_start_token"] = getattr(self, "ball_start_token", "")
+            # Keep the original camera stamp even when ball geometry is held.
+            payload["image_stamp"] = {
+                "sec": int(msg.header.stamp.sec),
+                "nanosec": int(msg.header.stamp.nanosec),
+            }
             self.pub_raw_ball_in_hand.publish(
                 Bool(data=bool(payload.get("raw_ball_in_hand", False)))
             )

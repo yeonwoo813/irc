@@ -14,3 +14,7 @@ bool pre_shoot_verified
 bool goal_raw_detected
 bool goal_held_previous_detection
 float64 goal_frame_stamp_sec
+# ROS capture time and webcam detection (including hold) for the post-27 recheck.
+float64 webcam_frame_stamp_sec
+bool webcam_ball_detected
+float64 result_stamp_sec

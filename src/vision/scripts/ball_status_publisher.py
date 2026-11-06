@@ -1,4 +1,5 @@
 import math
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -42,6 +43,7 @@ class BallStatus:
     Right_Turn_Shoot_3 = 37
     Right_Turn_4 = 38
     Left_Turn_4 = 39
+    Shoot_60 = 40
     Ball_Lost = 45
     Ball_None = 99
 
@@ -78,21 +80,25 @@ class BallDecision:
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
         # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
-        # 27/33번 MotionEnd 이후 골대 판단은 pre_shoot_verified로 보낸다.
+        # 27번 뒤에는 새 검출을 재확인하고, 33번 뒤에는 verified 결과를 쓴다.
         self.goal_pre_shoot_entry_distance_cm = 83.5
-        self.goal_shoot_min_distance_cm = 70.0
         self.goal_shoot_max_distance_cm = 72.0
-        self.goal_mid_shoot_min_distance_cm = 68.0
+        self.goal_shoot_min_distance_cm = 70.0
         self.goal_mid_shoot_max_distance_cm = 70.0
-        self.goal_65_shoot_min_distance_cm = 65.0
+        self.goal_mid_shoot_min_distance_cm = 68.0
         self.goal_65_shoot_max_distance_cm = 68.0
-        self.goal_close_shoot_min_distance_cm = 63.0
+        self.goal_65_shoot_min_distance_cm = 65.0
         self.goal_close_shoot_max_distance_cm = 65.0
-        self.goal_too_close_distance_cm = 63.0
+        self.goal_close_shoot_min_distance_cm = 63.0
+        self.goal_60_shoot_max_distance_cm = 63.0
+        self.goal_60_shoot_min_distance_cm = 60.0
+        self.goal_too_close_distance_cm = 60.0
 
         self.goal_approach_center_min = -5.0
         self.goal_approach_center_max = 5.0
         self.goal_approach_large_angle = 60.0
+        self.goal_shoot_60_min = -6.5
+        self.goal_shoot_60_max = -3.0
         self.goal_shoot_close_min = -6.5
         self.goal_shoot_close_max = -3.0
         self.goal_shoot_65_min = -7.0
@@ -216,10 +222,16 @@ class BallDecision:
             return BallStatus.Backward_half, 0.0
 
         if distance <= self.goal_shoot_max_distance_cm:
-            # Close [62, 65], 35번 (65, 68], Mid (68, 70], Shoot (70, 72].
+            # 60 [60, 63], Close (63, 65], 65 (65, 68], Mid (68, 70], Shoot (70, 72].
             if (
-                self.goal_close_shoot_min_distance_cm
+                self.goal_60_shoot_min_distance_cm
                 <= distance
+                <= self.goal_60_shoot_max_distance_cm
+            ):
+                shoot_status = BallStatus.Shoot_60
+            elif (
+                self.goal_close_shoot_min_distance_cm
+                < distance
                 <= self.goal_close_shoot_max_distance_cm
             ):
                 shoot_status = BallStatus.Shoot_Close
@@ -264,7 +276,10 @@ class BallDecision:
         angle: float,
         shoot_status: int,
     ) -> Tuple[int, float]:
-        if shoot_status == BallStatus.Shoot_Close:
+        if shoot_status == BallStatus.Shoot_60:
+            center_min = self.goal_shoot_60_min
+            center_max = self.goal_shoot_60_max
+        elif shoot_status == BallStatus.Shoot_Close:
             center_min = self.goal_shoot_close_min
             center_max = self.goal_shoot_close_max
         elif shoot_status == BallStatus.Shoot_65:
@@ -312,6 +327,9 @@ class BallStatusPublisher:
         # 발행하지 않는다.
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
+        self.pick_return_motion_active = False
+        self.pick_return_motion_started = False
+        self.webcam_resume_after = None
         self.pick_command_seen = False
         # Pick 이후 비전에서 true를 한 번 확인하면 Shoot 완료까지
         # 유지하는 공 소유 상태입니다.
@@ -330,6 +348,10 @@ class BallStatusPublisher:
         self.pre_shoot_motion_started = False
         self.pre_shoot_verified_pending = False
         self.pre_shoot_cancel_pending = False
+        self.pre_shoot_motion_name = None
+        self.shoot_return_motion_active = False
+        self.shoot_return_motion_started = False
+        self.shoot_resume_after = None
         self._latest_motion_end = None
         self.ball_pub = self.node.create_publisher(BallResult, topic_name, 10)
         self.motion_command_sub = self.node.create_subscription(
@@ -355,6 +377,13 @@ class BallStatusPublisher:
         self.webcam_ball_confirmed = False
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
+        self.pick_return_motion_active = False
+        self.pick_return_motion_started = False
+        self.webcam_resume_after = None
+
+    def _clock_seconds(self) -> float:
+        get_clock = getattr(self.node, 'get_clock', None)
+        return get_clock().now().nanoseconds * 1e-9 if callable(get_clock) else 0.0
 
     def set_detection_enabled(self, enabled: bool) -> None:
         """Enable voting only for frames captured after the mode switch."""
@@ -371,6 +400,10 @@ class BallStatusPublisher:
         self.pre_shoot_motion_started = False
         self.pre_shoot_verified_pending = False
         self.pre_shoot_cancel_pending = False
+        self.pre_shoot_motion_name = None
+        self.shoot_return_motion_active = False
+        self.shoot_return_motion_started = False
+        self.shoot_resume_after = None
 
     def reset_for_mission_start(self) -> None:
         """Discard every decision state derived before the operator starts."""
@@ -388,11 +421,33 @@ class BallStatusPublisher:
         command = int(msg.command)
 
         if (
-            self.pre_shoot_cancel_pending
-            and command == BallStatus.Back_To_Walk
+            command == BallStatus.Back_To_Walk
+            and self.back_to_initial_done
+            and not self.ball_in_hand
+            and not self.pick_command_seen
+        ):
+            # The decision node timed out after the pick-only 27. Do not
+            # confirm another webcam approach while motion 25 is running.
+            self._reset_webcam_detection_cycle()
+            self.pick_return_motion_active = True
+            self.pick_return_motion_started = self._latest_motion_end is False
+            self._log_info('[PickRecheck] returning to walk; suspend webcam entry.')
+
+        goal_pose_return = bool(
+            self.shoot_initial_done
+            and self.pre_shoot_motion_name == 'Back_To_Initial'
+        )
+        if (
+            command == BallStatus.Back_To_Walk
+            and self.ball_in_hand
+            and not self.shoot_command_seen
+            and (goal_pose_return or self.pre_shoot_cancel_pending)
         ):
             # 공 소유는 유지하고 다음 접근에서 27번부터 다시 준비한다.
             self._reset_shoot_cycle()
+            if goal_pose_return:
+                self.shoot_return_motion_active = True
+                self.shoot_return_motion_started = self._latest_motion_end is False
             self._log_info(
                 "Pre-Shoot cancelled: Back_To_Walk confirmed; "
                 "shoot preparation reset, ball possession retained."
@@ -432,6 +487,7 @@ class BallStatusPublisher:
             BallStatus.Shoot_Close,
             BallStatus.Shoot_Mid,
             BallStatus.Shoot_65,
+            BallStatus.Shoot_60,
         ):
             self.shoot_command_seen = True
 
@@ -467,6 +523,7 @@ class BallStatusPublisher:
             )
 
     def _wait_for_pre_shoot_motion(self, motion_name: str) -> None:
+        self.pre_shoot_motion_name = motion_name
         self.pre_shoot_motion_active = True
         self.pre_shoot_motion_started = self._latest_motion_end is False
         self.pre_shoot_verified_pending = False
@@ -478,6 +535,31 @@ class BallStatusPublisher:
     def _motion_end_callback(self, msg: MotionEnd) -> None:
         motion_ended = bool(msg.motion_end)
         self._latest_motion_end = motion_ended
+
+        if self.shoot_return_motion_active:
+            if not motion_ended:
+                self.shoot_return_motion_started = True
+            elif self.shoot_return_motion_started:
+                self.shoot_return_motion_active = False
+                self.shoot_return_motion_started = False
+                self.shoot_resume_after = time.monotonic()
+                self.pre_shoot_distance_buffer.clear()
+                self.last_pre_shoot_goal_stamp_sec = None
+                self._log_info(
+                    '[GoalPoseRecheck] 25 completed: rearm pose entry with new goals.'
+                )
+            return
+
+        if self.pick_return_motion_active:
+            if not motion_ended:
+                self.pick_return_motion_started = True
+            elif self.pick_return_motion_started:
+                self._reset_webcam_detection_cycle()
+                self.webcam_resume_after = self._clock_seconds()
+                self._log_info(
+                    '[PickRecheck] walk restored; restart webcam entry with new frames.'
+                )
+            return
 
         if not self.pre_shoot_motion_active:
             return
@@ -507,6 +589,7 @@ class BallStatusPublisher:
             not self.ball_in_hand
             or self.shoot_initial_done
             or self.shoot_initial_waiting
+            or self.shoot_return_motion_active
             or held_previous_detection
             or raw_detected is False
             or distance_cm is None
@@ -522,9 +605,16 @@ class BallStatusPublisher:
                 return False
             if not math.isfinite(frame_stamp_sec):
                 return False
+            if (
+                self.shoot_resume_after is not None
+                and frame_stamp_sec <= self.shoot_resume_after
+            ):
+                return False
             if frame_stamp_sec == self.last_pre_shoot_goal_stamp_sec:
                 return False
             self.last_pre_shoot_goal_stamp_sec = frame_stamp_sec
+        elif self.shoot_resume_after is not None:
+            return False
 
         self.pre_shoot_distance_buffer.append(float(distance_cm))
         if len(self.pre_shoot_distance_buffer) < 3:
@@ -568,6 +658,7 @@ class BallStatusPublisher:
         webcam_ball_x_px: Optional[float] = None,
         webcam_ball_y_px: Optional[float] = None,
         ball_in_hand: bool = False,
+        webcam_frame_stamp_sec: Optional[float] = None,
     ) -> Tuple[int, float]:
         # 함수 인자는 비전의 원본 값이고, self.ball_in_hand는
         # Shoot 완료까지 유지되는 확정값이다.
@@ -583,10 +674,19 @@ class BallStatusPublisher:
         if not self.ball_in_hand:
             self._reset_shoot_cycle()
 
+        webcam_entry_allowed = not self.pick_return_motion_active and (
+            self.webcam_resume_after is None
+            or (
+                webcam_frame_stamp_sec is not None
+                and math.isfinite(webcam_frame_stamp_sec)
+                and webcam_frame_stamp_sec > self.webcam_resume_after
+            )
+        )
         if (
             self.detection_enabled
             and not self.back_to_initial_done
             and not self.webcam_ball_confirmed
+            and webcam_entry_allowed
         ):
             # 손에 든 공은 다음 공의 최초 웹캠 검출로 집계하지
             # 않는다.
@@ -658,6 +758,7 @@ class BallStatusPublisher:
                 BallStatus.Shoot_Close,
                 BallStatus.Shoot_Mid,
                 BallStatus.Shoot_65,
+                BallStatus.Shoot_60,
                 BallStatus.Backward_half,
             )
         ):
@@ -675,9 +776,30 @@ class BallStatusPublisher:
                 status = BallStatus.Ball_None
                 angle = 0.0
 
+        if self.shoot_return_motion_active:
+            # Update normal approach votes during 25, but never prepare/shoot
+            # in the return pose. The decision node owns the completion gate.
+            if (
+                realsense_goal_distance_cm is not None
+                and math.isfinite(realsense_goal_distance_cm)
+                and 0.0 < realsense_goal_distance_cm <= self.ball_decision.goal_entry_distance_cm
+                and realsense_goal_angle is not None
+                and math.isfinite(realsense_goal_angle)
+            ):
+                status, angle = self.ball_decision._goal_status_from_angle(
+                    realsense_goal_angle
+                )
+            else:
+                status, angle = BallStatus.Ball_None, 0.0
+
         msg = BallResult()
         msg.status = int(status)
         msg.angle = float(angle)
+        msg.webcam_frame_stamp_sec = float(
+            webcam_frame_stamp_sec if webcam_frame_stamp_sec is not None else math.nan
+        )
+        msg.webcam_ball_detected = bool(webcam_ball_detected)
+        msg.result_stamp_sec = self._clock_seconds()
         msg.goal_raw_detected = bool(
             realsense_goal_raw_detected is True
             and not realsense_goal_held_previous_detection
@@ -716,7 +838,12 @@ class BallStatusPublisher:
                 or goal_out_of_range
             )
         )
-        if pre_shoot_verified and goal_out_of_range:
+        if (
+            pre_shoot_verified and goal_out_of_range
+            and self.pre_shoot_motion_name != 'Back_To_Initial'
+        ):
+            # 27 now has a bounded three-frame recheck in MainDecision.
+            # One far frame must not suppress its subsequent recovery frames.
             self.pre_shoot_cancel_pending = True
         msg.pre_shoot_verified = pre_shoot_verified
         if hasattr(msg, 'ball_in_hand'):

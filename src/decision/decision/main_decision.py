@@ -55,6 +55,7 @@ class Motion:
     Right_Turn_Shoot_3 = 37
     Right_Turn_4 = 38
     Left_Turn_4 = 39
+    Shoot_60 = 40
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -74,6 +75,7 @@ class Ball:
     Shoot_Close = Motion.Shoot_Close
     Shoot_Mid = Motion.Shoot_Mid
     Shoot_65 = Motion.Shoot_65
+    Shoot_60 = Motion.Shoot_60
 
 class Line:
     Line_None = 99
@@ -154,6 +156,16 @@ class MainDecision(Node):
         self.pick_try_count = 0
         self.pick_done = False
         self.ball_in_hand = False
+        self.declare_parameter('pick_recheck_timeout_sec', 0.5)
+        self.pick_recheck_timeout_sec = float(
+            self.get_parameter('pick_recheck_timeout_sec').value
+        )
+        if (
+            not math.isfinite(self.pick_recheck_timeout_sec)
+            or self.pick_recheck_timeout_sec <= 0
+        ):
+            raise ValueError('pick_recheck_timeout_sec must be finite and positive')
+        MainDecision._reset_pick_recheck(self)
         #pick이후 회전
         self.ball_count = 0
         self.turn_after_pick = False
@@ -185,8 +197,7 @@ class MainDecision(Node):
         self.post_shoot_detection_suppressed = False
         self.shoot_in_progress = False
         self.shoot_motion_started = False
-        # MainDecision은 Back_To_Initial/Shoot_Forward 이후 verified BallResult를
-        # 기다렸다가 전달받은 모션 상태만 실행한다.
+        # 골대 27 뒤에는 새 검출 2/3을 확인하고, 33 뒤에는 verified를 기다린다.
         self.pre_shoot_result_waiting = False
         self.pre_shoot_verified_result = None
         self.back_to_walk_after_pre_shoot_cancel = False
@@ -340,6 +351,12 @@ class MainDecision(Node):
         self.goal_recheck_timer = self.create_timer(
             0.02, self._check_goal_recheck_timeout,
         )
+        self.goal_pose_recheck_timer = self.create_timer(
+            0.02, self._check_goal_pose_recheck_timeout,
+        )
+        self.pick_recheck_timer = self.create_timer(
+            0.02, self._check_pick_recheck_timeout,
+        )
         self.post_pick_failure_timer = self.create_timer(
             0.02, self._check_post_pick_failure_wait,
         )
@@ -384,6 +401,7 @@ class MainDecision(Node):
         """Run the existing vision reset before the Enter waiting screen."""
         MainDecision._reset_vision_decision_cycle(self)
         MainDecision._reset_goal_recheck(self, clear_seen=True)
+        MainDecision._reset_pick_recheck(self)
         reset_publisher = getattr(self, 'vision_reset_pub', None)
         if reset_publisher is None:
             self.mission_vision_reset_complete = True
@@ -469,6 +487,7 @@ class MainDecision(Node):
         self.latest_ball_in_hand = False
         self.latest_goal_distance_cm = 0.0
         MainDecision._reset_goal_recheck(self, clear_seen=True)
+        MainDecision._reset_pick_recheck(self)
         self.latest_hurdle_angle = 0.0
         self.line_status = Line.Line_None
         self.ball_status = Ball.Ball_None
@@ -690,6 +709,11 @@ class MainDecision(Node):
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
 
+        if MainDecision._handle_pick_recheck_motion_end(self, received_at):
+            return
+        if MainDecision._handle_goal_pose_recheck_motion_end(self, received_at):
+            return
+
         if (
             getattr(self, 'post_pick_failure_return_pending', False)
             and getattr(self, 'post_pick_failure_wait_until', None) is None
@@ -910,6 +934,15 @@ class MainDecision(Node):
             ball_msg,
             self.ball_frame_sequence,
         )
+        if getattr(self, 'pick_recheck_deadline', None) is not None:
+            # Keep normal decision samples while the separate webcam recheck
+            # owns motion selection. They remain usable when returning to walk.
+            self.ball_buffer.append(int(ball_msg.status))
+            self.ball_vote_detail_buffer.append(detail)
+            MainDecision._collect_pick_recheck_vote(self, detail)
+            return
+        if getattr(self, 'pick_recheck_motion_active', False):
+            return
         self.latest_goal_detail = detail
         if (
             getattr(self, 'has_ball', False)
@@ -925,13 +958,27 @@ class MainDecision(Node):
                 )
             self.goal_seen_within_80cm = True
 
+        if MainDecision._goal_pose_recheck_blocks_decision(self):
+            # Keep normal inputs current for the eventual return from 25.
+            # Neither old verified messages nor ordinary votes own this phase.
+            if getattr(self, 'goal_return_to_walk_pending', False) and detail['status'] not in (
+                Motion.Forward, Motion.Left_Half_Forward, Motion.Right_Half_Forward,
+                Motion.Left_Turn, Motion.Right_Turn, Ball.Ball_None,
+            ):
+                detail = dict(detail, status=Ball.Ball_None)
+            self.ball_buffer.append(detail['status'])
+            self.ball_vote_detail_buffer.append(detail)
+            if getattr(self, 'goal_pose_recheck_deadline', None) is not None:
+                MainDecision._collect_goal_pose_recheck_vote(self, detail)
+            return
+
         if getattr(self, 'goal_recheck_deadline', None) is not None:
             MainDecision._collect_goal_recheck_vote(self, detail)
             return
 
         if getattr(self, 'pre_shoot_result_waiting', False):
             # Preserve the motion's final votes even while the separate
-            # 27/33 verified-result path is waiting.
+            # 33 verified-result path is waiting.
             self.ball_buffer.append(int(ball_msg.status))
             if MainDecision._maybe_begin_goal_recheck(self):
                 MainDecision._collect_goal_recheck_vote(self, detail)
@@ -966,6 +1013,19 @@ class MainDecision(Node):
             return
 
         ball_status = ball_msg.status
+        if (
+            ball_status == Motion.Back_To_Initial
+            and MainDecision._goal_approach_can_request_pose(self)
+        ):
+            self.goal_initial_pending = True
+        elif (
+            ball_status == Motion.Back_To_Initial
+            and getattr(self, 'has_ball', False)
+            and getattr(self, 'goal_initial_done', False)
+        ):
+            # A delayed repetition must not start the same pose a second time.
+            ball_status = Ball.Ball_None
+            detail['status'] = ball_status
         if getattr(self, 'hurdle_ball_suppressed', False):
             # Keep samples flowing, but reject in-flight ball detections.
             ball_status = Ball.Ball_None
@@ -1058,13 +1118,287 @@ class MainDecision(Node):
                 getattr(ball_msg, 'goal_held_previous_detection', False)
             ),
             'goal_frame_stamp_sec': finite_value('goal_frame_stamp_sec'),
+            'webcam_frame_stamp_sec': finite_value('webcam_frame_stamp_sec'),
+            'webcam_ball_detected': bool(
+                getattr(ball_msg, 'webcam_ball_detected', False)
+            ),
+            'result_stamp_sec': finite_value('result_stamp_sec'),
         }
+
+    def _reset_pick_recheck(self):
+        self.pick_recheck_motion_active = False
+        self.pick_recheck_motion_started = False
+        self.pick_recheck_deadline = None
+        self.pick_recheck_votes = deque(maxlen=3)
+        self.pick_recheck_last_frame_stamp = -math.inf
+        self.pick_return_to_walk_pending = False
+        self.pick_return_to_walk_started = False
+
+    def _pick_recheck_blocks_decision(self):
+        return bool(
+            getattr(self, 'pick_recheck_motion_active', False)
+            or getattr(self, 'pick_recheck_deadline', None) is not None
+            or getattr(self, 'pick_return_to_walk_pending', False)
+        )
+
+    def _handle_pick_recheck_motion_end(self, received_at):
+        if getattr(self, 'pick_recheck_motion_active', False):
+            if not self.motion_end:
+                self.pick_recheck_motion_started = True
+            elif self.pick_recheck_motion_started:
+                self.pick_recheck_motion_active = False
+                self.pick_recheck_motion_started = False
+                timeout = getattr(self, 'pick_recheck_timeout_sec', 0.5)
+                self.pick_recheck_deadline = received_at + timeout
+                # Camera header stamps and this boundary use the ROS clock;
+                # the bounded wait itself uses monotonic time.
+                self.pick_recheck_last_frame_stamp = (
+                    self.get_clock().now().nanoseconds * 1e-9
+                )
+                self.pick_recheck_votes.clear()
+                MainDecision._reset_vision_decision_cycle(self)
+                self.get_logger().info(
+                    '[PickRecheck] pick 27 completed: wait for 2 of 3 new '
+                    f'webcam frames (hold included), timeout={timeout:.3f}s'
+                )
+            return True
+        if getattr(self, 'pick_return_to_walk_pending', False):
+            if not self.motion_end:
+                self.pick_return_to_walk_started = True
+            elif self.pick_return_to_walk_started:
+                self.pick_return_to_walk_pending = False
+                self.pick_return_to_walk_started = False
+                self.current_mode = 'LineTrackingMode'
+                self.get_logger().info(
+                    '[PickRecheck] 25 completed: decide immediately from cached vision results.'
+                )
+                self._try_decision_from_cached_results()
+            return True
+        return False
+
+    def _collect_pick_recheck_vote(self, detail):
+        MainDecision._check_pick_recheck_timeout(self)
+        if getattr(self, 'pick_recheck_deadline', None) is None:
+            return
+        stamp = detail['webcam_frame_stamp_sec']
+        if (
+            not math.isfinite(stamp)
+            or stamp <= self.pick_recheck_last_frame_stamp
+            or stamp > self.get_clock().now().nanoseconds * 1e-9
+        ):
+            return
+        self.pick_recheck_last_frame_stamp = stamp
+        valid = bool(
+            detail['webcam_ball_detected']
+            and detail['status'] in (
+                Motion.Forward_half, Motion.Left_Move, Motion.Right_Move,
+                Motion.Left_Turn_4, Motion.Right_Turn_4, Motion.Pick,
+            )
+        )
+        self.pick_recheck_votes.append((valid, detail))
+        if len(self.pick_recheck_votes) < 3 or sum(
+            valid for valid, _ in self.pick_recheck_votes
+        ) < 2:
+            return
+        # Detection confirmation is separate from motion selection. Preserve
+        # the existing 3-result vote and the two-Pick-votes requirement.
+        votes = [
+            dict(item, status=item['status'] if seen else Ball.Ball_None)
+            for seen, item in self.pick_recheck_votes
+        ]
+        statuses = [item['status'] for item in votes]
+        selected, count = Counter(statuses).most_common(1)[0]
+        if count == 1:
+            if Motion.Pick in statuses:
+                return
+            selected = next(
+                item['status']
+                for seen, item in reversed(self.pick_recheck_votes) if seen
+            )
+        evidence = next(
+            item for item in reversed(votes) if item['status'] == selected
+        )
+        self.pick_recheck_deadline = None
+        MainDecision._reset_vision_decision_cycle(self)
+        self.ball_buffer.extend(statuses)
+        self.ball_vote_detail_buffer.extend(votes)
+        self.ball_status = selected
+        self.ball_angle = evidence['decision_angle']
+        self.ball_in_hand = False
+        self.get_logger().info(
+            f'[PickRecheck] webcam reacquired: votes={statuses}, command={selected}'
+        )
+        self.BallMode()
+
+    def _check_pick_recheck_timeout(self):
+        deadline = getattr(self, 'pick_recheck_deadline', None)
+        if deadline is None or time.monotonic() < deadline:
+            return
+        if (
+            not self.motion_ready or not self.motion_end
+            or not MainDecision._mission_has_started(self)
+            or not MainDecision._vision_stack_ready(self)
+            or getattr(self, 'vision_reset_pending', False)
+            or getattr(self, 'ball_start_reset_pending', False)
+        ):
+            return
+        self.pick_recheck_deadline = None
+        self.pick_return_to_walk_pending = True
+        self.pick_return_to_walk_started = False
+        self.status = Motion.Back_To_Walk
+        self.get_logger().info(
+            '[PickRecheck] timeout: execute 25 once before resuming approach.'
+        )
+        self.MotionCommand()
+
+    def _goal_approach_can_request_pose(self):
+        return bool(
+            getattr(self, 'has_ball', False)
+            and getattr(self, 'hoop_vision_active', False)
+            and self.current_mode in ('BallMode', 'LineTrackingMode')
+            and not getattr(self, 'goal_initial_done', False)
+            and not MainDecision._goal_pose_recheck_blocks_decision(self)
+            and not getattr(self, 'pre_shoot_result_waiting', False)
+            and not getattr(self, 'hurdle_detected', False)
+            and not getattr(self, 'hurdle_ball_suppressed', False)
+            and not getattr(self, 'turn_after_pick', False)
+            and not getattr(self, 'back_to_walk_after_pick', False)
+            and not getattr(self, 'post_shoot_detection_suppressed', False)
+        )
+
+    def _reset_goal_pose_recheck(self):
+        self.goal_initial_pending = False
+        self.goal_initial_done = False
+        self.goal_pose_motion_active = False
+        self.goal_pose_motion_started = False
+        self.goal_pose_recheck_deadline = None
+        self.goal_pose_recheck_votes = deque(maxlen=3)
+        self.goal_pose_last_frame_stamp = -math.inf
+        self.goal_return_to_walk_pending = False
+        self.goal_return_to_walk_started = False
+
+    def _goal_pose_recheck_blocks_decision(self):
+        return bool(
+            getattr(self, 'goal_pose_motion_active', False)
+            or getattr(self, 'goal_pose_recheck_deadline', None) is not None
+            or getattr(self, 'goal_return_to_walk_pending', False)
+        )
+
+    def _handle_goal_pose_recheck_motion_end(self, received_at):
+        if getattr(self, 'goal_pose_motion_active', False):
+            if not self.motion_end:
+                self.goal_pose_motion_started = True
+            elif self.goal_pose_motion_started:
+                self.goal_pose_motion_active = False
+                self.goal_pose_motion_started = False
+                self.goal_pose_recheck_deadline = received_at + 0.5
+                # RealSense result stamps, unlike webcam headers, are monotonic.
+                self.goal_pose_last_frame_stamp = received_at
+                self.goal_pose_recheck_votes.clear()
+                MainDecision._reset_vision_decision_cycle(self)
+                self.get_logger().info(
+                    '[GoalPoseRecheck] 27 completed: wait for 2 of 3 fresh '
+                    'raw goal detections, timeout=0.500s'
+                )
+            return True
+        if getattr(self, 'goal_return_to_walk_pending', False):
+            if not self.motion_end:
+                self.goal_return_to_walk_started = True
+            elif self.goal_return_to_walk_started:
+                self.goal_return_to_walk_pending = False
+                self.goal_return_to_walk_started = False
+                self.current_mode = 'LineTrackingMode'
+                self.get_logger().info(
+                    '[GoalPoseRecheck] 25 completed: resume cached vision decision'
+                )
+                self._try_decision_from_cached_results()
+            return True
+        return False
+
+    def _collect_goal_pose_recheck_vote(self, detail):
+        MainDecision._check_goal_pose_recheck_timeout(self)
+        if getattr(self, 'goal_pose_recheck_deadline', None) is None:
+            return
+        stamp = detail['goal_frame_stamp_sec']
+        if (
+            not math.isfinite(stamp)
+            or stamp <= self.goal_pose_last_frame_stamp
+            or stamp > time.monotonic()
+        ):
+            return
+        self.goal_pose_last_frame_stamp = stamp
+        valid = bool(
+            detail['goal_raw_detected']
+            and not detail['goal_held_previous_detection']
+            and math.isfinite(detail['goal_distance_cm'])
+            and 0.0 < detail['goal_distance_cm'] <= 120.0
+            and detail['status'] in (
+                Motion.Forward, Motion.Left_Half_Forward, Motion.Right_Half_Forward,
+                Motion.Left_Turn, Motion.Right_Turn, Motion.Backward_half,
+                Motion.Left_Turn_Mission_5, Motion.Right_Turn_Mission_5,
+                Motion.Left_Turn_Shoot_3, Motion.Right_Turn_Shoot_3,
+                Motion.Shoot_Forward, Motion.Shoot, Motion.Shoot_Close,
+                Motion.Shoot_Mid, Motion.Shoot_65, Motion.Shoot_60,
+            )
+        )
+        vote = dict(detail, status=detail['status'] if valid else Ball.Ball_None)
+        self.goal_pose_recheck_votes.append(vote)
+        votes = list(self.goal_pose_recheck_votes)
+        if len(votes) < 3 or sum(v['status'] != Ball.Ball_None for v in votes) < 2:
+            return
+        statuses = [v['status'] for v in votes]
+        selected, count = Counter(statuses).most_common(1)[0]
+        if count == 1:
+            selected = next(s for s in reversed(statuses) if s != Ball.Ball_None)
+        evidence = next(v for v in reversed(votes) if v['status'] == selected)
+        self.goal_pose_recheck_deadline = None
+        MainDecision._reset_vision_decision_cycle(self)
+        self.ball_buffer.extend(statuses)
+        self.ball_vote_detail_buffer.extend(votes)
+        self.ball_status = selected
+        self.ball_angle = evidence['decision_angle']
+        self.latest_ball_angle = self.ball_angle
+        self.latest_goal_distance_cm = evidence['goal_distance_cm']
+        self.ball_in_hand = self.has_ball
+        self.get_logger().info(
+            f'[GoalPoseRecheck] reacquired: votes={statuses}, command={selected}'
+        )
+        self.BallMode()
+
+    def _check_goal_pose_recheck_timeout(self):
+        deadline = getattr(self, 'goal_pose_recheck_deadline', None)
+        if deadline is None or time.monotonic() < deadline:
+            return
+        if (
+            not self.motion_ready or not self.motion_end
+            or not MainDecision._mission_has_started(self)
+            or not MainDecision._vision_stack_ready(self)
+            or getattr(self, 'vision_reset_pending', False)
+            or getattr(self, 'ball_start_reset_pending', False)
+        ):
+            return
+        MainDecision._reset_goal_recheck(self, clear_seen=True)
+        self.pre_shoot_result_waiting = False
+        self.pre_shoot_verified_result = None
+        self.goal_return_to_walk_pending = True
+        self.goal_return_to_walk_started = False
+        # Unconfirmed pose-time shot votes must not survive the return to walk.
+        # Keep line/hurdle samples, including when no more frames arrive.
+        self.ball_buffer.clear()
+        self.ball_buffer.extend([Ball.Ball_None] * 3)
+        self.ball_vote_detail_buffer.clear()
+        self.status = Motion.Back_To_Walk
+        self.get_logger().info(
+            '[GoalPoseRecheck] timeout: execute 25 once; retain possession'
+        )
+        self.MotionCommand()
 
     def _reset_goal_recheck(self, clear_seen=False):
         self.goal_recheck_deadline = None
         self.goal_recheck_votes = deque(maxlen=3)
         self.goal_recheck_last_frame_stamp = -math.inf
         if clear_seen:
+            MainDecision._reset_goal_pose_recheck(self)
             self.goal_seen_within_80cm = False
             self.goal_motion_end_at = None
             self.latest_goal_detail = None
@@ -1083,6 +1417,11 @@ class MainDecision(Node):
         )
 
     def _maybe_begin_goal_recheck(self):
+        if MainDecision._goal_pose_recheck_blocks_decision(self) or (
+            getattr(self, 'goal_initial_pending', False)
+            and MainDecision._goal_approach_can_request_pose(self)
+        ):
+            return False
         if getattr(self, 'goal_recheck_deadline', None) is not None:
             return True
         if not MainDecision._goal_recheck_allowed(self):
@@ -1176,12 +1515,14 @@ class MainDecision(Node):
         )
 
     def _check_goal_recheck_timeout(self):
+        if MainDecision._goal_pose_recheck_blocks_decision(self):
+            return
         deadline = getattr(self, 'goal_recheck_deadline', None)
         if not MainDecision._goal_recheck_allowed(self):
             if deadline is not None:
                 MainDecision._reset_goal_recheck(self, clear_seen=True)
             return
-        # 27/33 can otherwise wait forever when the camera stops delivering
+        # 33 can otherwise wait forever when the camera stops delivering
         # results after MotionEnd. The same deadline covers that path.
         ended_at = getattr(self, 'goal_motion_end_at', None)
         if (
@@ -1214,7 +1555,10 @@ class MainDecision(Node):
         self.get_logger().info(
             f'[GoalRecheck] finished: {reason}, command={status}'
         )
-        if status in (Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65):
+        if status in (
+            Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
+            Ball.Shoot_60,
+        ):
             MainDecision._execute_shoot(self, status)
         else:
             self.BallMode()
@@ -1283,6 +1627,7 @@ class MainDecision(Node):
             return
         if (
             getattr(self, 'goal_recheck_deadline', None) is not None
+            or MainDecision._goal_pose_recheck_blocks_decision(self)
             or getattr(self, 'post_shoot_detection_suppressed', False)
             or getattr(self, 'back_to_walk_after_shoot', False)
         ):
@@ -1354,6 +1699,10 @@ class MainDecision(Node):
 
     #모션 종료 후 저장된 비전값으로 다음 행동 결정
     def _try_decision_from_cached_results(self):
+        if MainDecision._pick_recheck_blocks_decision(self):
+            return False
+        if MainDecision._goal_pose_recheck_blocks_decision(self):
+            return False
         if getattr(self, 'post_pick_failure_wait_until', None) is not None:
             # 콜백은 계속 버퍼를 갱신하되, 1초 대기 중 다른 모션은 금지한다.
             MainDecision._check_post_pick_failure_wait(self)
@@ -1368,7 +1717,7 @@ class MainDecision(Node):
             return False
         if MainDecision._maybe_begin_goal_recheck(self):
             return False
-        # Pre-Shoot Back_To_Initial/Shoot_Forward 뒤에는 일반 투표 대신
+        # Pre-Shoot Shoot_Forward 뒤에는 일반 투표 대신
         # BallStatusPublisher가 표시한 verified 결과 하나만 사용한다.
         if getattr(self, 'pre_shoot_result_waiting', False):
             return False
@@ -1539,6 +1888,13 @@ class MainDecision(Node):
             self.ball_status = Counter(
                 self.ball_buffer
             ).most_common(1)[0][0]
+        # The publisher already confirmed entry with distinct goal frames.
+        # Retain the existing input gates and Decision's hurdle priority.
+        if (
+            getattr(self, 'goal_initial_pending', False)
+            and MainDecision._goal_approach_can_request_pose(self)
+        ):
+            self.ball_status = Motion.Back_To_Initial
         # ready도 최근 최대 5개 허들 프레임을 다수결 판단 - 3개이상일때만
         ready_count = sum(self.hurdle_ready_buffer)
         self.hurdle_ready = ready_count >= 3
@@ -1601,6 +1957,10 @@ class MainDecision(Node):
 
 ###### 판단 로직 시작 #######
     def Decision(self):
+        if MainDecision._pick_recheck_blocks_decision(self):
+            return
+        if MainDecision._goal_pose_recheck_blocks_decision(self):
+            return
         if getattr(self, 'post_pick_failure_return_pending', False):
             return
         if (
@@ -1620,6 +1980,7 @@ class MainDecision(Node):
         #우선순위 1 : hurdle mode
         # 허들이 한 번 검출되면 Hurdle_Go가 끝날 때까지 다른 모드로 전환하지 않습니다.
         if self.hurdle_detected:
+            self.goal_initial_pending = False
             self.lost_step = 0
             self.lost_found_dir = 0
             self.lost_body_turn_count = 0
@@ -1935,6 +2296,7 @@ class MainDecision(Node):
             #shoot 준비완료
             if self.ball_status in (
                 Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
+                Ball.Shoot_60,
             ):
                 MainDecision._execute_shoot(self, self.ball_status)
                 return
@@ -1947,6 +2309,7 @@ class MainDecision(Node):
         #공이 없는데 ShootReady이면 무시
         if self.ball_status in (
             Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
+            Ball.Shoot_60,
         ):
             self.LineTracking()
             return
@@ -2450,7 +2813,21 @@ class MainDecision(Node):
         self.MotionCommand()
 
     def MotionCommand(self):
+        if (
+            getattr(self, 'pick_recheck_motion_active', False)
+            or getattr(self, 'pick_recheck_deadline', None) is not None
+        ):
+            return
         if getattr(self, 'post_pick_failure_wait_until', None) is not None:
+            return
+        if (
+            getattr(self, 'goal_pose_motion_active', False)
+            or getattr(self, 'goal_pose_recheck_deadline', None) is not None
+            or (
+                getattr(self, 'goal_return_to_walk_pending', False)
+                and self.status != Motion.Back_To_Walk
+            )
+        ):
             return
         if not MainDecision._mission_has_started(self):
             self.get_logger().info(
@@ -2595,6 +2972,9 @@ class MainDecision(Node):
         elif self.status == 39:
             motion_msg.command = Motion.Left_Turn_4
 
+        elif self.status == 40:
+            motion_msg.command = Motion.Shoot_60
+
         else:
             # 미지원 상태가 메시지 기본값 0(Initial_Pose)으로 발행되지
             # 않게 한다. 새 판단에 쓸 비전 버퍼와 motion_end는 유지한다.
@@ -2612,12 +2992,22 @@ class MainDecision(Node):
             and getattr(self, 'has_ball', False)
             and getattr(self, 'current_mode', None) == "BallMode"
         ):
-            self.pre_shoot_result_waiting = True
             self.pre_shoot_verified_result = None
-            self.get_logger().info(
-                f"[PreShoot] {MOTION_NAME[motion_msg.command]} 실행: "
-                "MotionEnd 이후 BallStatusPublisher 결과를 기다립니다."
-            )
+            if motion_msg.command == Motion.Back_To_Initial:
+                MainDecision._reset_goal_pose_recheck(self)
+                MainDecision._reset_goal_recheck(self)
+                self.goal_initial_done = True
+                self.goal_pose_motion_active = True
+                self.pre_shoot_result_waiting = False
+                self.get_logger().info(
+                    '[GoalPoseRecheck] 27 issued: verify fresh goals after MotionEnd'
+                )
+            else:
+                self.pre_shoot_result_waiting = True
+                self.get_logger().info(
+                    '[PreShoot] Shoot_Forward 실행: '
+                    'MotionEnd 이후 BallStatusPublisher 결과를 기다립니다.'
+                )
         
         if (
             motion_msg.command != Motion.Initial_Pose
@@ -2635,6 +3025,16 @@ class MainDecision(Node):
             self.hurdle_buffer.clear()
             self.hurdle_ready_buffer.clear()
 
+        if (
+            motion_msg.command == Motion.Back_To_Initial
+            and getattr(self, 'current_mode', None) == 'BallMode'
+            and not getattr(self, 'has_ball', False)
+        ):
+            MainDecision._reset_pick_recheck(self)
+            self.pick_recheck_motion_active = True
+        if motion_msg.command == Motion.Back_To_Walk and getattr(self, 'has_ball', False):
+            self.goal_initial_pending = False
+            self.goal_initial_done = False
         self.motion_pub.publish(motion_msg)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')
         self.get_logger().info(
@@ -2655,10 +3055,15 @@ class MainDecision(Node):
             )
         
         if (
-            getattr(self, 'post_pick_failure_return_pending', False)
+            (
+                getattr(self, 'post_pick_failure_return_pending', False)
+                or getattr(self, 'pick_return_to_walk_pending', False)
+                or getattr(self, 'goal_return_to_walk_pending', False)
+            )
             and motion_msg.command == Motion.Back_To_Walk
         ):
-            # 1초 동안 모은 결과를 보존하고 25번 중에도 최신 값으로 갱신한다.
+            # Preserve samples collected while waiting and update them during
+            # motion 25, so MotionEnd can decide without another frame wait.
             self.line_data = False
             self.ball_data = False
             self.hurdle_data = False

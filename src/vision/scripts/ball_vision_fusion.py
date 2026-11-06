@@ -400,8 +400,17 @@ class BallVisionFusionNode(Node):
             payload,
         ):
             return
+        stamp = payload.get("image_stamp") or {}
+        try:
+            frame_stamp = float(stamp["sec"]) + float(stamp["nanosec"]) * 1e-9
+        except (KeyError, TypeError, ValueError):
+            frame_stamp = math.nan
+        evidence = {
+            "webcam_frame_stamp_sec": frame_stamp,
+        }
         if not bool(payload.get("ball_detected", False)):
             self.latest_webcam = self._empty_webcam_state()
+            self.latest_webcam.update(evidence)
             self.latest_webcam_time = now
             return
 
@@ -409,6 +418,7 @@ class BallVisionFusionNode(Node):
         ball_y = self._finite(payload, "ball_y")
         if ball_x is None or ball_y is None or ball_x < 0.0 or ball_y < 0.0:
             self.latest_webcam = self._empty_webcam_state()
+            self.latest_webcam.update(evidence)
             self.latest_webcam_time = now
             return
 
@@ -447,6 +457,7 @@ class BallVisionFusionNode(Node):
             angle = math.degrees(math.atan2(x_offset, focal_px))
 
         self.latest_webcam = {
+            **evidence,
             "webcam_ball_detected": True,
             "webcam_ball_x_distance": float(x_distance),
             "webcam_ball_y_distance": float(y_distance),
@@ -633,6 +644,7 @@ class BallVisionFusionNode(Node):
             "webcam_ball_distance_px": None,
             "webcam_ball_x_px": None,
             "webcam_ball_y_px": None,
+            "webcam_frame_stamp_sec": None,
             "ball_in_hand": bool(self.ball_in_hand),
             "realsense_goal_distance_cm": None,
             "realsense_goal_angle": None,
@@ -660,6 +672,17 @@ class BallVisionFusionNode(Node):
                 features[key] = self.latest_webcam[key]
             features["webcam_ball_x_px"] = self.latest_webcam["raw_ball_x"]
             features["webcam_ball_y_px"] = self.latest_webcam["raw_ball_y"]
+        # Misses are votes too. Preserve frame identity across fusion ticks.
+        # webcam_valid deliberately includes the detector's existing hold.
+        if (
+            self.ball_detection_active
+            and self.latest_webcam is not None
+            and webcam_age is not None
+            and webcam_age <= self.webcam_timeout_sec
+        ):
+            features["webcam_frame_stamp_sec"] = self.latest_webcam.get(
+                "webcam_frame_stamp_sec"
+            )
         if hoop_valid:
             for key in (
                 "realsense_goal_distance_cm",
