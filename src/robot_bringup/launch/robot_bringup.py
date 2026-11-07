@@ -27,7 +27,12 @@ def generate_launch_description():
     declarations = [
         DeclareLaunchArgument(
             'quiet_logs', default_value='true',
-            description='Disable runtime logs; false enables bounded asynchronous logs.',
+            description='Hide runtime console logs; diagnostic warnings are still recorded.',
+        ),
+        DeclareLaunchArgument('vision_diagnostics', default_value='true'),
+        DeclareLaunchArgument(
+            'show_preview', default_value='false',
+            description='Open both camera detection/status views.',
         ),
         DeclareLaunchArgument(
             'use_realsense',
@@ -101,6 +106,8 @@ def generate_launch_description():
             'start_monitor': use_vision,
             'webcam_device': webcam_device,
             'quiet_logs': quiet_logs,
+            'vision_diagnostics': LaunchConfiguration('vision_diagnostics'),
+            'show_preview': LaunchConfiguration('show_preview'),
         }.items(),
     )
 

@@ -44,6 +44,7 @@ class BallStatus:
     Right_Turn_4 = 38
     Left_Turn_4 = 39
     Shoot_60 = 40
+    Ball_ForwardHalf_2 = 41
     Ball_Lost = 45
     Ball_None = 99
 
@@ -70,8 +71,8 @@ class BallFeatures:
 
 class BallDecision:
     def __init__(self):
-        # 120cm 이하이면 공 모드
-        self.ball_entry_distance_cm = 120.0
+        # 150cm 이하이면 공 모드. Fusion의 웹캠 활성화도 이 값을 참조한다.
+        self.ball_entry_distance_cm = 150.0
 
         # Realsense 직진 각도 범위
         self.angle_center_min = -2.5
@@ -81,7 +82,7 @@ class BallDecision:
         self.goal_entry_distance_cm = 120.0
         # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
         # 27번 뒤에는 새 검출을 재확인하고, 33번 뒤에는 verified 결과를 쓴다.
-        self.goal_pre_shoot_entry_distance_cm = 83.5
+        self.goal_pre_shoot_entry_distance_cm = 85.0
         self.goal_shoot_max_distance_cm = 72.0
         self.goal_shoot_min_distance_cm = 70.0
         self.goal_mid_shoot_max_distance_cm = 70.0
@@ -97,10 +98,10 @@ class BallDecision:
         self.goal_approach_center_min = -5.0
         self.goal_approach_center_max = 5.0
         self.goal_approach_large_angle = 60.0
-        self.goal_shoot_60_min = -6.5
-        self.goal_shoot_60_max = -3.0
-        self.goal_shoot_close_min = -6.5
-        self.goal_shoot_close_max = -3.0
+        self.goal_shoot_60_min = -7.0
+        self.goal_shoot_60_max = -3.5
+        self.goal_shoot_close_min = -7.0
+        self.goal_shoot_close_max = -3.5
         self.goal_shoot_65_min = -7.0
         self.goal_shoot_65_max = -3.0
         self.goal_shoot_mid_min = -5.0
@@ -112,6 +113,7 @@ class BallDecision:
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 8.0
         self.webcam_pick_y_max_px = 85.0
+        self.webcam_forward_half_2_y_max_px = 140.0
         self.webcam_pick_x_min_px = -20.0        
         self.webcam_pick_x_max_px = 10.0
 
@@ -178,6 +180,8 @@ class BallDecision:
             if angle < -self.webcam_angle_center_tol:
                 return BallStatus.Left_Turn_4, angle
             if angle <= self.webcam_angle_center_tol:
+                if webcam_ball_y_distance <= self.webcam_forward_half_2_y_max_px:
+                    return BallStatus.Ball_ForwardHalf_2, 0.0
                 return BallStatus.Forward_half, 0.0
             return BallStatus.Right_Turn_4, angle
             

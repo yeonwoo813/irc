@@ -17,6 +17,10 @@ ROS_QUIET_ARGS = [
     '--disable-stdout-logs', '--disable-rosout-logs',
     '--disable-external-lib-logs',
 ]
+ROS_DIAGNOSTIC_ARGS = [
+    '--ros-args', '--log-level', 'warn',
+    '--disable-stdout-logs', '--disable-external-lib-logs',
+]
 
 
 def quiet_enabled():
@@ -64,6 +68,22 @@ def main(argv=None):
     if not command:
         parser.error('process command required after --')
 
+    if os.environ.get('IRC_VISION_TRACE_SOCKET'):
+        # Single process-identity checkpoint, including native camera drivers.
+        # This is diagnostic-only and may never prevent the real process start.
+        try:
+            from vision_trace import TraceProbe
+            roles = {'v4l2_camera_node': 'webcam_driver',
+                     'realsense2_camera_node': 'realsense_driver',
+                     'main_decision': 'decision', 'main': 'motion'}
+            role = next((roles[Path(arg).name] for arg in command if Path(arg).name in roles), None)
+            if role:
+                probe = TraceProbe(role)
+                probe.mark('process_start')
+                probe.close()
+        except (ImportError, OSError):
+            pass
+
     quiet = quiet_enabled()
     if quiet:
         # Native library prints and SDK stdout bypass ROS logging. Keep them
@@ -72,7 +92,9 @@ def main(argv=None):
             os.dup2(sink.fileno(), 1)
             os.dup2(sink.fileno(), 2)
         logging.disable(logging.CRITICAL)
-        ros_args = ROS_QUIET_ARGS
+        # Keep WARN/ERROR in the small /rosout stream even in competition's
+        # quiet mode. Console, per-node files and per-frame INFO stay disabled.
+        ros_args = ROS_DIAGNOSTIC_ARGS if os.environ.get('IRC_VISION_TRACE_SOCKET') else ROS_QUIET_ARGS
     else:
         start_relay()
         ros_args = CONSOLE_ONLY_ROS_ARGS

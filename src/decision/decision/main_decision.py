@@ -2,12 +2,15 @@ import rclpy
 import os
 import math
 import time
+import json
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from collections import deque, Counter
 from msgs.msg import LineResult, MotionCommand, MotionEnd, BallResult, HurdleResult
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
+from decision.vision_startup_gate import VisionStartupGate
 
 #로그 출력 없이 실행하기 위한 장치
 QUIET_LOGS = os.environ.get('IRC_QUIET_LOGS', '').lower() in {
@@ -56,6 +59,7 @@ class Motion:
     Right_Turn_4 = 38
     Left_Turn_4 = 39
     Shoot_60 = 40
+    Ball_ForwardHalf_2 = 41
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -137,6 +141,12 @@ class MainDecision(Node):
         # 판단과 모션 발행을 모두 막는다.
         self.webcam_yolo_ready = False
         self.realsense_yolo_ready = False
+        self.declare_parameter('vision_start_stable_sec', 3.0)
+        self.declare_parameter('vision_start_max_age_sec', 0.5)
+        self.vision_startup_gate = VisionStartupGate(
+            stable_sec=float(self.get_parameter('vision_start_stable_sec').value),
+            max_age_sec=float(self.get_parameter('vision_start_max_age_sec').value),
+        )
         #3개의 비전 데이터가 모두 준비되었는지 확인
         self.line_data = False
         self.ball_data = False
@@ -281,6 +291,20 @@ class MainDecision(Node):
             self.RealSenseYoloReadyCallback,
             vision_ready_qos,
         )
+        # 실제 추론 완료마다 오는 작은 메타데이터만 수신한다. 영상 복사 없음.
+        frame_health_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.webcam_frame_health_sub = self.create_subscription(
+            String, '/vision/webcam_frame_health',
+            lambda msg: self._vision_frame_health('webcam', msg), frame_health_qos,
+        )
+        self.realsense_frame_health_sub = self.create_subscription(
+            String, '/vision/realsense_frame_health',
+            lambda msg: self._vision_frame_health('realsense', msg), frame_health_qos,
+        )
         # motion_main_node에서 모션 준비 상태와 종료 여부를 받는다.
         self.motion_end_sub = self.create_subscription(
             MotionEnd, 'motion_end', self.MotionEndCallback, motion_state_qos
@@ -343,6 +367,11 @@ class MainDecision(Node):
         )
 
         # timer
+        # Enter 대기 중 중단되어도 준비 표시를 철회한다. 경기 중에는 관여하지 않음.
+        self.vision_startup_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.vision_startup_timer = self.create_timer(
+            0.05, self._check_vision_startup, clock=self.vision_startup_clock,
+        )
         # 미션 시작 후 첫 모션 지연을 0.1초마다 확인한다.
         self.mission_start_watchdog = self.create_timer(
             0.1,
@@ -369,7 +398,7 @@ class MainDecision(Node):
         #공 검출 결과 사용 여부 전송
         self._set_webcam_ball_allowed(
             True,
-            reason='startup: wait for RealSense <= 120cm',
+            reason='startup: wait for RealSense ball entry range',
         )
         self._set_vision_activity(
             ball_active=True,
@@ -387,6 +416,28 @@ class MainDecision(Node):
     def _mission_has_started(self):
         return bool(self.mission_started)
 
+    def _startup_vision_ready(self):
+        gate = getattr(self, 'vision_startup_gate', None)
+        return gate is not None and gate.ready(time.monotonic())
+
+    def _vision_frame_health(self, source, msg):
+        if (
+            MainDecision._mission_has_started(self)
+            or not self.mission_vision_reset_complete
+            or self.vision_reset_pending
+        ):
+            return
+        try:
+            report = json.loads(msg.data)
+        except (TypeError, ValueError):
+            report = {}
+        self.vision_startup_gate.observe(source, report, time.monotonic())
+        MainDecision._maybe_log_mission_armed(self)
+
+    def _check_vision_startup(self):
+        if not MainDecision._mission_has_started(self):
+            MainDecision._maybe_log_mission_armed(self)
+
     def _mission_armed(self):
         """Finish preparation before Enter can start Back_To_Walk."""
         return bool(
@@ -395,6 +446,7 @@ class MainDecision(Node):
             and MainDecision._vision_stack_ready(self)
             and getattr(self, 'mission_vision_reset_complete', True)
             and not getattr(self, 'vision_reset_pending', False)
+            and MainDecision._startup_vision_ready(self)
         )
 
     def _prepare_mission_vision(self):
@@ -409,6 +461,7 @@ class MainDecision(Node):
         self.vision_reset_pending = True
         self.vision_reset_acks = set()
         self.vision_reset_token = str(time.monotonic_ns())
+        self.vision_startup_gate.reset(self.vision_reset_token, time.monotonic())
         reset_publisher.publish(String(data=self.vision_reset_token))
         self.get_logger().info(
             '[MISSION PREPARE] Resetting vision before Enter is enabled.'
@@ -437,6 +490,11 @@ class MainDecision(Node):
         ):
             MainDecision._prepare_mission_vision(self)
         armed = MainDecision._mission_armed(self)
+        if getattr(self, 'mission_armed_state', False) and not armed:
+            self.get_logger().info(
+                '[MISSION VISION WAIT] Start readiness lost; '
+                'checking continuous fresh frames again.'
+            )
         MainDecision._set_mission_armed_state(self, armed)
         if not armed:
             self.mission_armed_logged = False
@@ -463,13 +521,14 @@ class MainDecision(Node):
             return response
 
         if not MainDecision._mission_armed(self):
+            MainDecision._maybe_log_mission_armed(self)
             response.success = False
             response.message = (
-                'Mission is not armed: wait for initial pose and both YOLOs.'
+                'Mission is not armed: wait for initial pose, vision reset, '
+                'and continuous fresh frames/inference from both cameras.'
             )
             self.get_logger().info(
-                '[MISSION START REJECTED] Wait for initial pose and both '
-                'YOLO pipelines to become ready.'
+                '[MISSION START REJECTED] ' + response.message
             )
             return response
 
@@ -552,8 +611,11 @@ class MainDecision(Node):
         MainDecision._reset_vision_decision_cycle(self)
         self.vision_reset_pending = False
         self.mission_vision_reset_complete = True
+        self.vision_startup_gate.reset(self.vision_reset_token, time.monotonic())
         self.get_logger().info(
-            '[MISSION VISION RESET] complete: ready for Enter.'
+            '[MISSION VISION RESET] complete: checking fresh webcam and '
+            f'RealSense RGB/depth inference for {self.vision_startup_gate.stable_sec:.1f}s '
+            f'(max age/gap {self.vision_startup_gate.max_age_sec:.2f}s) before Enter.'
         )
         MainDecision._maybe_log_mission_armed(self)
 
@@ -607,6 +669,12 @@ class MainDecision(Node):
         if not stack_ready:
             if not MainDecision._mission_has_started(self):
                 self.mission_vision_reset_complete = False
+                # 재시작 전 노드의 늦은 ACK로 준비가 완료되지 않게 한다.
+                self.vision_reset_pending = False
+                self.vision_reset_acks.clear()
+                self.vision_startup_gate.reset(
+                    self.vision_reset_token, time.monotonic(),
+                )
             MainDecision._reset_vision_decision_cycle(self)
             MainDecision._maybe_log_mission_armed(self)
             if previous_stack_ready or previous_source_ready != ready:
@@ -626,7 +694,7 @@ class MainDecision(Node):
         return True
 
     def _set_webcam_ball_allowed(self, allowed, reason=''):
-        """Allow webcam ball output; Fusion still applies the 120cm gate."""
+        """Allow webcam ball output; Fusion applies the ball entry distance gate."""
         allowed = bool(allowed)
         if getattr(self, 'webcam_ball_allowed', None) == allowed:
             return False
@@ -1191,7 +1259,8 @@ class MainDecision(Node):
         valid = bool(
             detail['webcam_ball_detected']
             and detail['status'] in (
-                Motion.Forward_half, Motion.Left_Move, Motion.Right_Move,
+                Motion.Forward_half, Motion.Ball_ForwardHalf_2,
+                Motion.Left_Move, Motion.Right_Move,
                 Motion.Left_Turn_4, Motion.Right_Turn_4, Motion.Pick,
             )
         )
@@ -2184,7 +2253,7 @@ class MainDecision(Node):
         if callable(logger):
             logger().info(
                 f"[PostShoot] {reason}: RealSense 공 ON, 골대 OFF, "
-                "웹캠 공은 120cm까지 OFF"
+                "웹캠 공은 RealSense 공 진입 거리 도달 시 ON"
             )
 
     def _finish_post_shoot_detection_suppression(self, reason):
@@ -2974,6 +3043,9 @@ class MainDecision(Node):
 
         elif self.status == 40:
             motion_msg.command = Motion.Shoot_60
+
+        elif self.status == 41:
+            motion_msg.command = Motion.Ball_ForwardHalf_2
 
         else:
             # 미지원 상태가 메시지 기본값 0(Initial_Pose)으로 발행되지

@@ -39,6 +39,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from collections import deque
+from frame_health import frame_health
+from vision_trace import TraceProbe, image_stamp
+
+TRACE = TraceProbe('webcam')
 
 from line_status_publisher import (
     LineDecision,
@@ -139,6 +143,7 @@ MOTION_NAME = {
     26: "Hurdle_Forward_20",
     27: "Back_To_Initial",
     33: "Shoot_Forward",
+    41: "Ball_ForwardHalf_2",
 }
 
 
@@ -550,6 +555,7 @@ def release_cuda_cache() -> None:
 
 
 def yolo_detect(model, frame: np.ndarray, cfg: dict) -> list[ObjectDetection]:
+    TRACE.mark('predict')
     results = model.predict(
         source=frame,
         imgsz=cfg["yolo_imgsz"],
@@ -559,6 +565,7 @@ def yolo_detect(model, frame: np.ndarray, cfg: dict) -> list[ObjectDetection]:
         device=cfg["yolo_device"],
         verbose=False,
     )
+    TRACE.mark('predicted')
 
     dets: list[ObjectDetection] = []
     result = results[0]
@@ -1459,7 +1466,7 @@ def analyze_frame_yolo(
 #  ROS2 노드
 # ═══════════════════════════════════════════════════════
 
-def main_ros2(ini_path: str = "settings.ini"):
+def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
     import rclpy
     from msgs.msg import MotionCommand, MotionEnd
     from rclpy.node import Node
@@ -1469,6 +1476,10 @@ def main_ros2(ini_path: str = "settings.ini"):
     from cv_bridge import CvBridge
 
     cfg = load_config(ini_path)
+    if preview_enabled is not None:
+        # Launch owns the external viewers; never run GUI events in inference.
+        cfg["show_window"] = False
+        cfg["publish_debug_image"] = bool(preview_enabled)
 
     class YoloVisionNode(Node):
         def __init__(self):
@@ -1480,7 +1491,7 @@ def main_ros2(ini_path: str = "settings.ini"):
             self.last_model_reload = 0.0
             self.motion_display_state = MotionDisplayState()
             self.mission_reset_token = ""
-            # 공 결과는 RealSense 거리가 120cm 이내가 된 뒤 별도 신호로
+            # 공 결과는 RealSense 거리가 공 진입 기준 이내가 된 뒤 별도 신호로
             # 활성화한다. 라인/허들 YOLO 추론은 이 값과 무관하게 계속한다.
             self.ball_detection_active = False
             self.raw_ball_in_hand_gate = ContinuousTrueGate(
@@ -1493,7 +1504,9 @@ def main_ros2(ini_path: str = "settings.ini"):
                     self.cfg.get("ball_detection_hold_seconds", 0.5)
                 )
             )
+            TRACE.mark('model_load')
             self.model = load_yolo_model(self.cfg)
+            TRACE.mark('model_ready')
             # Keep only the newest full-resolution webcam frame while TensorRT
             # is busy.  The standard sensor-data profile has a deeper queue.
             image_qos = QoSProfile(
@@ -1508,6 +1521,9 @@ def main_ros2(ini_path: str = "settings.ini"):
                 image_qos,
             )
             self.pub_state = self.create_publisher(String, "/line_tracker/state", 10)
+            self.frame_health_pub = self.create_publisher(
+                String, '/vision/webcam_frame_health', image_qos,
+            )
             ready_qos = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
@@ -1667,7 +1683,13 @@ def main_ros2(ini_path: str = "settings.ini"):
             payload["hurdle_result_publisher"] = "yolo_vision"
 
         def cb_image(self, msg: Image):
-            debug_subscribed = self.pub_debug.get_subscription_count() > 0
+            TRACE.mark('callback', image_stamp(msg))
+            received_monotonic = time.monotonic()
+            received_ros_ns = self.get_clock().now().nanoseconds
+            debug_subscribed = (
+                self.cfg.get("publish_debug_image", True)
+                and self.pub_debug.get_subscription_count() > 0
+            )
             render_visualization = bool(self.cfg["show_window"]) or debug_subscribed
             try:
                 frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -1687,6 +1709,7 @@ def main_ros2(ini_path: str = "settings.ini"):
                 )
                 self.inference_failures = 0
             except Exception:
+                TRACE.mark('error')
                 self.inference_failures += 1
                 self.raw_ball_in_hand_gate.reset()
                 self.pub_raw_ball_in_hand.publish(Bool(data=False))
@@ -1704,7 +1727,9 @@ def main_ros2(ini_path: str = "settings.ini"):
                     try:
                         self.model = None
                         release_cuda_cache()
+                        TRACE.mark('model_load')
                         self.model = load_yolo_model(self.cfg)
+                        TRACE.mark('model_ready')
                         self.get_logger().warn("TensorRT model reloaded after inference failure")
                     except Exception:
                         self.get_logger().error(
@@ -1718,6 +1743,7 @@ def main_ros2(ini_path: str = "settings.ini"):
                 self.get_logger().info(
                     "[VisionStartup] webcam YOLO first inference READY"
                 )
+            TRACE.mark('publish')
             self.publish_hurdle_status(payload)
             payload["mission_reset_token"] = getattr(
                 self,
@@ -1737,6 +1763,7 @@ def main_ros2(ini_path: str = "settings.ini"):
 
             # Build ROS image messages only while a viewer is subscribed.
             # The local preview still receives the same visualization.
+            TRACE.mark('preview')
             if debug_subscribed:
                 debug_msg = self.bridge.cv2_to_imgmsg(vis, encoding="bgr8")
                 debug_msg.header = msg.header
@@ -1749,6 +1776,11 @@ def main_ros2(ini_path: str = "settings.ini"):
                     rclpy.shutdown()
 
             self.frame_count += 1
+            self.frame_health_pub.publish(String(data=json.dumps(frame_health(
+                [msg], received_monotonic, received_ros_ns,
+                self.mission_reset_token,
+            ), separators=(',', ':'))))
+            TRACE.mark('complete')
             if QUIET_LOGS:
                 return
             # 검출/미검출 전환이 주기 요약 사이에 사라지지 않도록 매 프레임 기록.
@@ -1869,9 +1901,14 @@ def main_standalone(ini_path: str = "settings.ini"):
 
 
 if __name__ == "__main__":
+    import argparse
     import sys
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--preview", choices=("true", "false"))
+    options, _ = parser.parse_known_args()
+    preview = None if options.preview is None else options.preview == "true"
     ini = next((a for a in sys.argv[1:] if a.endswith(".ini")), "settings.ini")
     if "--ros2" in sys.argv:
-        main_ros2(ini)
+        main_ros2(ini, preview_enabled=preview)
     else:
         main_standalone(ini)

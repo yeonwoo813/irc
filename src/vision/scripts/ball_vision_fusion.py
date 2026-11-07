@@ -20,6 +20,7 @@ from ball_status_publisher import BallStatusPublisher
 
 
 DEFAULT_WEBCAM_ALLOWED_ON_START = True
+WEBCAM_BALL_MIN_CENTER_Y_PX = 15.0
 
 
 class BallVisionFusionNode(Node):
@@ -41,7 +42,7 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("active_on_start", True)
         # vision_stack.launch.py can be run without MainDecision for camera
         # testing. In that mode no publisher exists for
-        # /vision/webcam_ball_allowed, so allow the normal RealSense <= 120 cm
+        # /vision/webcam_ball_allowed, so allow the normal RealSense ball-entry
         # handoff by default. MainDecision still overrides this permission
         # during pick/shoot suppression phases.
         self.declare_parameter(
@@ -281,7 +282,7 @@ class BallVisionFusionNode(Node):
         self._clear_ball_detection_state()
         self._set_webcam_ball_active(
             False,
-            "ball mission started: wait for RealSense <= 120cm"
+            "ball mission started: wait for RealSense ball entry range"
             if requested
             else "ball detection disabled",
         )
@@ -299,7 +300,7 @@ class BallVisionFusionNode(Node):
             False,
             "webcam permission disabled"
             if not requested
-            else "webcam permission enabled: wait for RealSense <= 120cm",
+            else "webcam permission enabled: wait for RealSense ball entry range",
         )
 
     def cb_realsense_yolo_state(self, msg: String) -> None:
@@ -344,11 +345,12 @@ class BallVisionFusionNode(Node):
             detected
             and getattr(self, "webcam_ball_allowed", False)
             and not getattr(self, "webcam_ball_active", False)
-            and distance <= 120.0
+            and distance <= self.ball_status_publisher.ball_decision.ball_entry_distance_cm
         ):
             self._set_webcam_ball_active(
                 True,
-                f"RealSense ball distance {distance:.1f}cm <= 120.0cm",
+                f"RealSense ball distance {distance:.1f}cm <= "
+                f"{self.ball_status_publisher.ball_decision.ball_entry_distance_cm:.1f}cm",
             )
 
     @staticmethod
@@ -416,7 +418,15 @@ class BallVisionFusionNode(Node):
 
         ball_x = self._finite(payload, "ball_x")
         ball_y = self._finite(payload, "ball_y")
-        if ball_x is None or ball_y is None or ball_x < 0.0 or ball_y < 0.0:
+        # YOLO's ball_y is the bbox center in the original image (top = 0).
+        # Filter both raw and held detections before any decision votes while
+        # preserving the detector's full-frame output and bounding-box display.
+        if (
+            ball_x is None
+            or ball_y is None
+            or ball_x < 0.0
+            or ball_y <= WEBCAM_BALL_MIN_CENTER_Y_PX
+        ):
             self.latest_webcam = self._empty_webcam_state()
             self.latest_webcam.update(evidence)
             self.latest_webcam_time = now

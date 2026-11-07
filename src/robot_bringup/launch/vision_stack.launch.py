@@ -6,6 +6,9 @@
 
 기본 Vision 스크립트 위치:
   ~/irc/src/vision/scripts
+
+화면 없이 실행: ros2 launch robot_bringup vision_stack.launch.py
+검출 화면 확인: ros2 launch robot_bringup vision_stack.launch.py show_preview:=true
 """
 
 import glob
@@ -13,6 +16,9 @@ import os
 import shlex
 import stat
 import sys
+import tempfile
+import time
+import uuid
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -32,6 +38,7 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 
+from robot_bringup.depth_settings import depth_parameters
 from robot_bringup.realsense_guard import READY_MARKER
 from robot_bringup.quiet_process import (
     configure_launch_logging, process_prefix, quiet_python_command,
@@ -100,7 +107,34 @@ def _start_stack(context):
     # Resolve/validate the webcam before returning ANY process actions.  An
     # exception in a later OpaqueFunction used to leave the driver orphaned.
     webcam_nodes = _make_webcam_node(context)
-    return _make_stack_actions(context, webcam_nodes)
+    diagnostics = _diagnostics_actions(context)
+    return diagnostics + _make_stack_actions(context, webcam_nodes)
+
+
+def _diagnostics_actions(context):
+    if not IfCondition(LaunchConfiguration('vision_diagnostics', default='true')).evaluate(context):
+        context.environment.pop('IRC_VISION_TRACE_SOCKET', None)
+        return []
+    # A private per-launch address prevents packets from another run mixing in.
+    # Creating it never opens a camera, GPU or robot device.
+    try:
+        socket_dir = tempfile.mkdtemp(prefix='irc-vdiag-')
+    except OSError as exc:
+        print(f'[VisionDiagnostics] Disabled: cannot create trace socket directory: {exc}', flush=True)
+        context.environment.pop('IRC_VISION_TRACE_SOCKET', None)
+        return []
+    socket_path = os.path.join(socket_dir, 'trace.sock')
+    run_id = 'run-' + time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
+    root = LaunchConfiguration('vision_diagnostics_dir').perform(context)
+    context.environment['IRC_VISION_TRACE_SOCKET'] = socket_path
+    return [ExecuteProcess(
+        name='vision_diagnostics',
+        cmd=[sys.executable, '-m', 'robot_bringup.vision_diagnostics',
+             '--socket', socket_path, '--directory', os.path.join(root, run_id),
+             '--settings', LaunchConfiguration('settings_ini')],
+        output='both', respawn=True, respawn_delay=2.0,
+        sigterm_timeout='2.0', sigkill_timeout='1.0',
+    )]
 
 
 def _make_stack_actions(context, webcam_nodes):
@@ -109,7 +143,22 @@ def _make_stack_actions(context, webcam_nodes):
     start_realsense = LaunchConfiguration("start_realsense")
     start_yolo = LaunchConfiguration("start_yolo")
     start_realsense_yolo = LaunchConfiguration("start_realsense_yolo")
-    start_realsense_viewer = LaunchConfiguration("start_realsense_viewer")
+    # Read the chosen INI on every launch, including headless operation.
+    # Validate before returning any camera/process actions.
+    depth_settings = (
+        depth_parameters(settings_ini.perform(context))
+        if IfCondition(start_realsense).evaluate(context) else {}
+    )
+    webcam_preview = (
+        IfCondition(LaunchConfiguration("start_webcam_viewer")).evaluate(context)
+        and IfCondition(LaunchConfiguration("start_webcam")).evaluate(context)
+        and IfCondition(start_yolo).evaluate(context)
+    )
+    realsense_preview = (
+        IfCondition(LaunchConfiguration("start_realsense_viewer")).evaluate(context)
+        and IfCondition(start_realsense).evaluate(context)
+        and IfCondition(start_realsense_yolo).evaluate(context)
+    )
     realsense_view_topic = LaunchConfiguration("realsense_view_topic")
     start_ball = LaunchConfiguration("start_ball")
     start_hurdle = LaunchConfiguration("start_hurdle")
@@ -162,6 +211,8 @@ def _make_stack_actions(context, webcam_nodes):
                 "enable_accel": False,
                 "rgb_camera.color_profile": "640,480,30",
                 "depth_module.depth_profile": "640,480,30",
+                "depth_module.hdr_enabled": False,
+                **depth_settings,
                 "enable_sync": True,
                 "align_depth.enable": True,
                 "pointcloud.enable": False,
@@ -207,7 +258,8 @@ def _make_stack_actions(context, webcam_nodes):
     yolo_process = ExecuteProcess(
         name="yolo_vision_process",
         prefix=process_prefix('--python'),
-        cmd=[sys.executable, yolo_script, settings_ini, "--ros2"],
+        cmd=[sys.executable, yolo_script, settings_ini, "--ros2",
+             "--preview", "true" if webcam_preview else "false"],
         cwd=scripts_dir,
         output="both",
         emulate_tty=True,
@@ -249,7 +301,10 @@ def _make_stack_actions(context, webcam_nodes):
             "--restart-on-clean-exit",
             "true",
             "--",
-            *quiet_python_command(realsense_yolo_script, settings_ini),
+            *quiet_python_command(
+                realsense_yolo_script, settings_ini,
+                "--preview", "true" if realsense_preview else "false",
+            ),
         ],
         cwd=scripts_dir,
         output="both",
@@ -258,41 +313,55 @@ def _make_stack_actions(context, webcam_nodes):
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
-    # Do not allocate the rqt viewer while either TensorRT engine is loading.
-    # It opens immediately after RealSense publishes its first READY result.
-    realsense_viewer_process = ExecuteProcess(
-        name="realsense_image_view",
-        prefix=process_prefix('--python'),
-        cmd=[
-            sys.executable,
-            ready_gate_script,
-            "--node-name",
-            "realsense_viewer_gate",
-            "--waiting-message",
-            "RealSense viewer needs the first successful YOLO inference. "
-            "If this persists, check camera frame/USB errors above.",
-            "--gate-topic",
-            "/vision/realsense_yolo_ready",
-            "--gate-enabled",
-            start_realsense_yolo,
-            "--source-enabled",
-            start_realsense,
-            "--initial-backoff-seconds",
-            "5.0",
-            "--max-backoff-seconds",
-            "30.0",
-            "--",
-            sys.executable,
-            '-m', 'robot_bringup.quiet_process', '--ros', '--',
-            "ros2",
-            "run",
-            "rqt_image_view",
-            "rqt_image_view",
-            realsense_view_topic,
-        ],
-        output="both",
-        condition=IfCondition(start_realsense_viewer),
+    # Both external viewers wait until engine initialization is finished.
+    # In webcam-only mode there is no RealSense readiness publisher to wait for.
+    wait_for_realsense = (
+        IfCondition(start_realsense).evaluate(context)
+        and IfCondition(start_realsense_yolo).evaluate(context)
     )
+    preview_ready_topic = (
+        "/vision/realsense_yolo_ready" if wait_for_realsense
+        else "/vision/webcam_yolo_ready"
+    )
+    viewer_processes = []
+    if (
+        IfCondition(LaunchConfiguration("start_depth_viewer")).evaluate(context)
+        and IfCondition(start_realsense).evaluate(context)
+    ):
+        viewer_processes.append(ExecuteProcess(
+            name="realsense_depth_tuner",
+            prefix=process_prefix('--python'),
+            cmd=[sys.executable, ready_gate_script,
+                 "--node-name", "depth_viewer_gate",
+                 "--gate-topic", preview_ready_topic,
+                 "--gate-enabled", "true" if wait_for_realsense else "false",
+                 "--restart-on-clean-exit", "false",
+                 "--", sys.executable, "-m", "robot_bringup.depth_tuner",
+                 "--settings", settings_ini, "--camera-node", "/camera"],
+            additional_env={"FASTDDS_BUILTIN_TRANSPORTS": "UDPv4"},
+            output="both",
+        ))
+    for name, topic, enabled in (
+        ("webcam", "/line_tracker/debug_image", webcam_preview),
+        ("realsense", realsense_view_topic, realsense_preview),
+    ):
+        if not enabled:
+            continue
+        viewer_processes.append(ExecuteProcess(
+            name=f"{name}_image_view",
+            prefix=process_prefix('--python'),
+            cmd=[
+                sys.executable, ready_gate_script,
+                "--node-name", f"{name}_viewer_gate",
+                "--waiting-message", "Preview is waiting for YOLO readiness.",
+                "--gate-topic", preview_ready_topic,
+                "--", "ros2", "run", "rqt_image_view", "rqt_image_view", topic,
+            ],
+            # Isolate the viewers from stale Fast DDS SHM ports; camera and
+            # inference nodes retain their existing transport configuration.
+            additional_env={"FASTDDS_BUILTIN_TRANSPORTS": "UDPv4"},
+            output="both",
+        ))
 
     # 융합 노드는 YOLO JSON 상태만 처리하며 카메라 영상을 다시 구독하지 않는다.
     ball_process = ExecuteProcess(
@@ -349,7 +418,7 @@ def _make_stack_actions(context, webcam_nodes):
         *webcam_nodes,
         yolo_process,
         realsense_yolo_process,
-        realsense_viewer_process,
+        *viewer_processes,
         delayed_vision,
     ]
     if not IfCondition(start_realsense).evaluate(context):
@@ -388,8 +457,12 @@ def generate_launch_description() -> LaunchDescription:
     declarations = [
         DeclareLaunchArgument(
             'quiet_logs', default_value='true',
-            description='Disable runtime logs; false enables bounded asynchronous logs.',
+            description='Hide runtime console logs; diagnostic warnings are still recorded.',
         ),
+        DeclareLaunchArgument('vision_diagnostics', default_value='true',
+                             description='Record bounded camera health metadata, without images.'),
+        DeclareLaunchArgument('vision_diagnostics_dir', default_value=PathJoinSubstitution([
+            EnvironmentVariable('HOME'), '.ros', 'vision_diagnostics'])),
         DeclareLaunchArgument(
             "scripts_dir",
             default_value=PathJoinSubstitution(
@@ -421,9 +494,23 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("start_yolo", default_value="true"),
         DeclareLaunchArgument("start_realsense_yolo", default_value="true"),
         DeclareLaunchArgument(
+            "show_preview", default_value="false",
+            description="Open detection views and the depth exposure tuner; overrides INI preview settings.",
+        ),
+        DeclareLaunchArgument(
+            "start_webcam_viewer",
+            default_value=LaunchConfiguration("show_preview"),
+            description="Open the webcam detection/status view.",
+        ),
+        DeclareLaunchArgument(
             "start_realsense_viewer",
-            default_value="true",
-            description="Open an rqt_image_view window for RealSense YOLO.",
+            default_value=LaunchConfiguration("show_preview"),
+            description="Open the RealSense detection/status view and enable its debug images.",
+        ),
+        DeclareLaunchArgument(
+            "start_depth_viewer",
+            default_value=LaunchConfiguration("show_preview"),
+            description="Open aligned depth with live exposure controls and INI save; also works without YOLO.",
         ),
         DeclareLaunchArgument(
             "realsense_view_topic",

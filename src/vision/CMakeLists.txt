@@ -28,6 +28,14 @@ if(BUILD_TESTING)
     test/test_detector_activation.py
   )
   ament_add_pytest_test(
+    test_frame_health
+    test/test_frame_health.py
+  )
+  ament_add_pytest_test(
+    test_detector_frame_health
+    test/test_detector_frame_health.py
+  )
+  ament_add_pytest_test(
     test_realsense_yolo_detector
     test/test_realsense_yolo_detector.py
   )
@@ -45,6 +53,8 @@ install(PROGRAMS
 )
 
 install(FILES
+  scripts/frame_health.py
+  scripts/vision_trace.py
   scripts/line_status_publisher.py
   scripts/ball_status_publisher.py
   scripts/hurdle_status_publisher.py
@@ -54,6 +64,10 @@ install(FILES
 # decision uses the vision-owned controller at MotionEnd without another
 # topic/service round trip. Keep the existing script import working as well.
 ament_python_install_module(scripts/line_status_publisher.py)
+# Humble's module macro rejects a second module at the same destination.
+# The call above already exports this Python path for downstream packages.
+ament_get_python_install_dir(vision_python_install_dir)
+install(FILES scripts/vision_trace.py DESTINATION ${vision_python_install_dir})
 
 install(DIRECTORY
   config

@@ -32,6 +32,7 @@ ignores it. Hoop detection and visualization use ``backboard`` only.
 
 from __future__ import annotations
 
+import argparse
 import configparser
 import json
 import math
@@ -52,6 +53,10 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
+from frame_health import frame_health
+from vision_trace import TraceProbe, image_stamp
+
+TRACE = TraceProbe('realsense')
 
 try:
     from ultralytics import YOLO
@@ -241,16 +246,20 @@ def load_config(ini_path: str) -> Dict[str, object]:
 
 
 class RealSenseYoloDetector(Node):
-    def __init__(self, ini_path: str) -> None:
+    def __init__(self, ini_path: str, preview_enabled=None) -> None:
         super().__init__("realsense_yolo_detector")
 
         if YOLO is None:
             raise RuntimeError("ultralytics is not installed")
 
         self.cfg = load_config(ini_path)
+        if preview_enabled is not None:
+            self.cfg["publish_debug_image"] = bool(preview_enabled)
         model_path = str(self.cfg["model"])
         self.get_logger().info(f"Loading RealSense YOLO: {model_path}")
+        TRACE.mark('model_load')
         self.model = YOLO(model_path, task="detect")
+        TRACE.mark('model_ready')
 
         self.bridge = CvBridge()
 
@@ -322,6 +331,9 @@ class RealSenseYoloDetector(Node):
         )
         # 노드 재시작 시 이전 인스턴스의 latched READY를 제거한다.
         self.yolo_ready_pub.publish(Bool(data=False))
+        self.frame_health_pub = self.create_publisher(
+            String, '/vision/realsense_frame_health', self.image_qos,
+        )
 
         self.ball_state_pub = self.create_publisher(
             String, "/realsense_yolo/ball_state", self.state_qos
@@ -410,6 +422,13 @@ class RealSenseYoloDetector(Node):
             "/camera/aligned_depth_to_color/image_raw",
             qos_profile=self.image_qos,
         )
+        # Observe each existing subscription BEFORE pairing, without another
+        # image subscription or copy. Independent CameraInfo in the recorder
+        # distinguishes driver progress when this executor itself is blocked.
+        self.color_sub.registerCallback(
+            lambda msg: TRACE.mark('raw_color', image_stamp(msg)))
+        self.depth_sub.registerCallback(
+            lambda msg: TRACE.mark('raw_depth', image_stamp(msg)))
         self.sync = ApproximateTimeSynchronizer(
             [self.color_sub, self.depth_sub],
             queue_size=2,
@@ -1463,12 +1482,16 @@ class RealSenseYoloDetector(Node):
         )
 
     def cb_images(self, color_msg: Image, depth_msg: Image) -> None:
+        TRACE.mark('callback', image_stamp(color_msg), image_stamp(depth_msg))
+        received_monotonic = time.monotonic()
+        received_ros_ns = self.get_clock().now().nanoseconds
         debug_requested = self._debug_view_requested()
         if (
             not self.ball_active
             and not self.hoop_active
             and not debug_requested
         ):
+            TRACE.mark('inactive')
             return
 
         now = time.monotonic()
@@ -1480,11 +1503,13 @@ class RealSenseYoloDetector(Node):
             now - self.last_inference_time >= (1.0 / max_fps) * 0.90
         )
         if not should_infer and not debug_requested:
+            TRACE.mark('throttled')
             return
 
         try:
             frame = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
         except Exception as exc:
+            TRACE.mark('error')
             self.get_logger().warning(f"Color conversion failed: {exc}")
             failure = self._empty_ball_state(self.ball_active)
             failure["realsense_diagnostic"] = {
@@ -1507,6 +1532,7 @@ class RealSenseYoloDetector(Node):
                 depth_msg, desired_encoding="passthrough"
             )
         except Exception as exc:
+            TRACE.mark('error')
             self.get_logger().warning(f"Depth conversion failed: {exc}")
             failure = self._empty_ball_state(self.ball_active)
             failure["realsense_diagnostic"] = {
@@ -1540,8 +1566,11 @@ class RealSenseYoloDetector(Node):
             return
 
         try:
+            TRACE.mark('predict')
             dets = self._run_yolo(frame)
+            TRACE.mark('predicted')
         except Exception as exc:
+            TRACE.mark('error')
             self.get_logger().error(f"YOLO inference failed: {exc}")
             failure = self._empty_ball_state(self.ball_active)
             failure["realsense_diagnostic"] = {
@@ -1603,11 +1632,13 @@ class RealSenseYoloDetector(Node):
         self.latest_hoop_state = hoop_state
         self.latest_process_ms = process_ms
 
+        TRACE.mark('publish')
         if self.ball_active:
             self._publish_ball_state(ball_state)
         if self.hoop_active:
             self._publish_hoop_state(hoop_state)
 
+        TRACE.mark('preview')
         self._publish_debug_views(
             frame,
             color_msg,
@@ -1619,6 +1650,11 @@ class RealSenseYoloDetector(Node):
         )
 
         self.frame_count += 1
+        self.frame_health_pub.publish(String(data=json.dumps(frame_health(
+            [color_msg, depth_msg], received_monotonic, received_ros_ns,
+            self.mission_reset_token,
+        ), separators=(',', ':'))))
+        TRACE.mark('complete')
         every = max(1, int(self.cfg["print_every_n_frames"]))
         if not QUIET_LOGS and self.frame_count % every == 0:
             self.get_logger().info(
@@ -1637,8 +1673,12 @@ def main() -> None:
         ini_path = command_line[0]
         command_line = command_line[1:]
 
-    rclpy.init(args=command_line if command_line else None)
-    node = RealSenseYoloDetector(ini_path)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--preview", choices=("true", "false"))
+    options, ros_args = parser.parse_known_args(command_line)
+    preview = None if options.preview is None else options.preview == "true"
+    rclpy.init(args=ros_args)
+    node = RealSenseYoloDetector(ini_path, preview_enabled=preview)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
