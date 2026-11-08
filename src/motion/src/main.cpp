@@ -18,10 +18,12 @@ constexpr int kNeckUpMotionId = 14;
 constexpr int kNeckDownMotionId = 18;
 
 // 실제 측정한 값으로 반드시 변경
-constexpr int32_t kNeckUpRaw = 3093;
-constexpr int32_t kNeckDownRaw = 2735;
+constexpr int32_t kNeckUpRaw = 1044;
+constexpr int32_t kNeckDownRaw = 679;
 
-constexpr double kNeckMotionDuration = 0.5;
+// 목을 올리고 내리는 시간을 각각 초 단위로 설정합니다.
+constexpr double kNeckUpMotionDuration = 0.3;
+constexpr double kNeckDownMotionDuration = 0.5;
 }
 
 MainNode::MainNode()
@@ -246,6 +248,10 @@ bool MainNode::StartNeckMotion(
         motion_id == kNeckUpMotionId
             ? kNeckUpRaw
             : kNeckDownRaw;
+    const double duration_seconds =
+        motion_id == kNeckUpMotionId
+            ? kNeckUpMotionDuration
+            : kNeckDownMotionDuration;
 
     JoinFinishedMotionThread();
 
@@ -300,7 +306,7 @@ bool MainNode::StartNeckMotion(
             initial_motion,
             start_raw,
             goal_raw,
-            kNeckMotionDuration);
+            duration_seconds);
     }
     catch (const std::exception& error)
     {

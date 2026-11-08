@@ -1,5 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
+import math
 import time
 from typing import Callable, Optional, Tuple
 
@@ -18,6 +19,8 @@ class HurdleStatus:
     Back_To_Initial = 27
     Right_Turn_4 = 38
     Left_Turn_4 = 39
+    Hurdle_Forward_320 = 42
+    Hurdle_Forward_150 = 43
     Hurdle_None = 99
 
 
@@ -38,11 +41,19 @@ class HurdleFeatures:
     # 왼쪽(-), 오른쪽(+)
     line_angle_deg: float = 0.0
 
+    # 라인-허들 교점에서 로봇 하단 중심점까지의 화면상 직선거리.
+    hurdle_line_intersection_valid: bool = False
+    hurdle_intersection_distance_px: Optional[float] = None
+
 
 class HurdleDecision:
     def __init__(self):
         # 로봇 중심선에서 두 번째 라인점까지의 거리 기준
         self.center_distance_px = 100.0
+        # 최초 허들 진입 거리와 정렬 후 전진 모션 선택 거리는 별도로 둔다.
+        self.entry_distance_px = 400.0
+        self.short_forward_distance_px = 320.0
+        self.near_forward_distance_px = 150.0
 
         # -100px 경계 양쪽에서 +8~+12도를 함께 허용해 왕복 보정을 줄인다.
         self.center_angle_range = (-10.0, 12.0)
@@ -58,6 +69,27 @@ class HurdleDecision:
         self.search_turn = HurdleStatus.Left_Turn_10
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
+
+    @staticmethod
+    def intersection_distance(features: HurdleFeatures) -> Optional[float]:
+        if not features.hurdle_line_intersection_valid:
+            return None
+        try:
+            distance = float(features.hurdle_intersection_distance_px)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return distance if math.isfinite(distance) and distance >= 0.0 else None
+
+    def entry_reason(self, features: HurdleFeatures) -> str:
+        """Filter initial confirmation only; preserve the raw webcam detection."""
+        if not features.hurdle_detected:
+            return 'no_hurdle'
+        if features.line_point_count <= 0:
+            return 'no_line'
+        distance = self.intersection_distance(features)
+        if features.line_point_count < 2 or distance is None:
+            return 'invalid_intersection'
+        return 'within_range' if distance <= self.entry_distance_px else 'too_far'
 
     def decide(self, features: HurdleFeatures) -> Tuple[int, float, bool]:
         # 1. 허들이 없음
@@ -105,8 +137,18 @@ class HurdleDecision:
             self.search_turn = HurdleStatus.Right_Turn_4
             return HurdleStatus.Right_Turn_4, angle, False
 
-        # 7. 목표 각도 범위에 들어오면 Forward 20 실행 준비 완료
-        return HurdleStatus.Hurdle_Forward_20, angle, True
+        # 7. 정렬 후 유효한 교점 거리로 전진 모션을 선택한다.
+        # 미검출/누락 값을 0px로 간주해 짧은 전진을 실행하지 않는다.
+        cross_distance = self.intersection_distance(features)
+        if cross_distance is None:
+            return HurdleStatus.Hurdle_None, angle, False
+        if cross_distance <= self.near_forward_distance_px:
+            forward = HurdleStatus.Hurdle_Forward_150
+        elif cross_distance <= self.short_forward_distance_px:
+            forward = HurdleStatus.Hurdle_Forward_320
+        else:
+            forward = HurdleStatus.Hurdle_Forward_20
+        return forward, angle, True
 
     def _search_for_line(
         self,
@@ -144,10 +186,12 @@ class HurdleStatusPublisher:
         self._crossing_started = False
         self._cooldown_until = 0.0
         self._latest_motion_end: Optional[bool] = None
-        # 원본 검출 5개 중 3개 이상일 때만 허들을 확정합니다.
-        # 확정 후에는 Hurdle_Go 종료까지 원본 검출값을 무시하고 유지합니다.
+        # 진입 조건을 만족한 검출이 5개 중 3개 이상일 때 허들을 확정합니다.
+        # 확정 후에는 거리/검출 변화와 관계없이 Hurdle_Go 종료까지 유지합니다.
         self.hurdle_detection_buffer = deque(maxlen=5)
         self.hurdle_detected = False
+        self.entry_eligible = False
+        self.entry_reason = 'no_hurdle'
         self.hurdle_pub = self.node.create_publisher(
             HurdleResult,
             topic_name,
@@ -172,9 +216,11 @@ class HurdleStatusPublisher:
             get_logger().info(message)
 
     def _reset_hurdle_detection(self) -> None:
-        """Drop both raw votes and every state derived from those votes."""
+        """Drop entry votes and every state derived from those votes."""
         self.hurdle_detected = False
         self.hurdle_detection_buffer.clear()
+        self.entry_eligible = False
+        self.entry_reason = 'no_hurdle'
         self.hurdle_decision.reset_detection_cycle()
 
     def reset_for_mission_start(self) -> None:
@@ -305,41 +351,51 @@ class HurdleStatusPublisher:
         line_follow_angle_deg: Optional[float] = None,
         line_second_point_distance_px: float = 0.0,
         line_angle_deg: float = 0.0,
+        hurdle_line_intersection_valid: bool = False,
+        hurdle_intersection_distance_px: Optional[float] = None,
     ) -> Tuple[int, float, bool]:
         suppression_reason = self.suppression_reason()
+        features = HurdleFeatures(
+            hurdle_detected=bool(hurdle_detected),
+            line_point_count=line_point_count,
+            line_follow_angle_deg=line_follow_angle_deg,
+            line_second_point_distance_px=line_second_point_distance_px,
+            line_angle_deg=line_angle_deg,
+            hurdle_line_intersection_valid=hurdle_line_intersection_valid,
+            hurdle_intersection_distance_px=hurdle_intersection_distance_px,
+        )
         if suppression_reason is not None:
             if suppression_reason == 'startup':
                 # 출발선 검출은 False 샘플로도 저장하지 않고 완전히 버립니다.
                 self._reset_hurdle_detection()
+            self.entry_eligible = False
+            self.entry_reason = suppression_reason
             status, angle, ready = (
                 HurdleStatus.Hurdle_None,
                 0.0,
                 False,
             )
         else:
+            self.entry_reason = self.hurdle_decision.entry_reason(features)
+            self.entry_eligible = self.entry_reason in ('no_line', 'within_range')
             if not self.hurdle_detected:
-                self.hurdle_detection_buffer.append(bool(hurdle_detected))
+                self.hurdle_detection_buffer.append(self.entry_eligible)
                 detected_count = sum(self.hurdle_detection_buffer)
                 if (
                     len(self.hurdle_detection_buffer) == 5
                     and detected_count >= 3
+                    and self.entry_eligible
                 ):
                     self.hurdle_detected = True
                     self._log_info(
                         "Hurdle confirmed by 5-frame majority: "
                         f"true={detected_count}, "
                         f"false={5 - detected_count}; "
+                        f"entry={self.entry_reason}; "
                         "hurdle_detected=true until Hurdle_Go completes."
                     )
 
-            features = HurdleFeatures(
-                hurdle_detected=self.hurdle_detected,
-                line_point_count=line_point_count,
-                line_follow_angle_deg=line_follow_angle_deg,
-                line_second_point_distance_px=line_second_point_distance_px,
-                line_angle_deg=line_angle_deg,
-            )
-
+            features.hurdle_detected = self.hurdle_detected
             status, angle, ready = self.hurdle_decision.decide(features)
 
         msg = HurdleResult()

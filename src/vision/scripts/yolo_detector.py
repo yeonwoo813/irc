@@ -15,6 +15,7 @@ publish 값:
 - target_x, target_y
 - follow_distance
 - line_second_point_distance_px, hurdle_line_angle_deg
+- hurdle_line_intersection_x/y, hurdle_intersection_distance_px (화면상 거리)
 - ball / hurdle detection 정보
 - raw_ball_in_hand (/raw_ball_in_hand)
 - webcam ball result gate (/vision/webcam_ball_active)
@@ -144,6 +145,8 @@ MOTION_NAME = {
     27: "Back_To_Initial",
     33: "Shoot_Forward",
     41: "Ball_ForwardHalf_2",
+    42: "Hurdle_Forward_320",
+    43: "Hurdle_Forward_150",
 }
 
 
@@ -1065,6 +1068,67 @@ def webcam_ball_evidence(
     }
 
 
+def add_hurdle_line_intersection(
+    payload: dict,
+    line_points: list[tuple[float, float]],
+    frame_w: int,
+    frame_h: int,
+) -> dict:
+    """허들 박스의 가로 중심선과 라인의 교점까지 화면상 직선거리를 계산한다.
+
+    add_ball_geometry가 설정한 보정된 로봇 하단 기준점을 공유한다.
+    교점은 허들 박스 안에 있어야 하며, 화면 표시와 허들 전진 선택에 사용한다.
+    """
+    payload.update({
+        "hurdle_line_intersection_valid": False,
+        "hurdle_line_intersection_x": None,
+        "hurdle_line_intersection_y": None,
+        "hurdle_intersection_distance_px": None,
+    })
+    if not payload.get("hurdle_detected", False) or len(line_points) < 2:
+        return payload
+
+    bbox = payload.get("hurdle_bbox", [])
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return payload
+    try:
+        x1, y1, x2, y2 = map(float, bbox)
+    except (TypeError, ValueError):
+        return payload
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+        return payload
+
+    # 같은 높이의 점들로는 x=f(y)를 결정할 수 없다.
+    degree = 1 if len(line_points) <= 3 else 2
+    if len({y for _x, y in line_points}) <= degree:
+        return payload
+    coeffs = fit_line(line_points) if degree == 1 else fit_poly2(line_points)
+    if coeffs is None:
+        return payload
+
+    cross_y = (y1 + y2) / 2.0
+    cross_x = float(np.polyval(coeffs, cross_y))
+    if not (
+        math.isfinite(cross_x)
+        and 0.0 <= cross_x < frame_w
+        and 0.0 <= cross_y < frame_h
+        and min(x1, x2) <= cross_x <= max(x1, x2)
+    ):
+        return payload
+
+    distance = math.hypot(
+        cross_x - float(payload["robot_center_x"]),
+        cross_y - float(payload["robot_center_y"]),
+    )
+    payload.update({
+        "hurdle_line_intersection_valid": True,
+        "hurdle_line_intersection_x": cross_x,
+        "hurdle_line_intersection_y": cross_y,
+        "hurdle_intersection_distance_px": distance,
+    })
+    return payload
+
+
 def make_vision_payload(dets: list[ObjectDetection], line_points: list[tuple[float, float]], frame_w: int, frame_h: int, cfg: dict) -> dict:
     center_offset_x = float(cfg.get("robot_center_offset_x_px", 25.0))
     payload = make_line_payload(
@@ -1082,6 +1146,7 @@ def make_vision_payload(dets: list[ObjectDetection], line_points: list[tuple[flo
         center_offset_x,
     )
     payload["raw_ball_in_hand"] = is_raw_ball_in_hand(payload, cfg)
+    payload = add_hurdle_line_intersection(payload, line_points, frame_w, frame_h)
     return payload
 
 
@@ -1248,6 +1313,17 @@ def visualize_yolo(
                     cv2.LINE_AA,
                 )
 
+    # 허들-라인 교점과 실제 거리 계산에 사용한 로봇 하단 기준점을 표시한다.
+    if payload.get("hurdle_line_intersection_valid", False):
+        cross_point = (
+            int(round(payload["hurdle_line_intersection_x"])),
+            int(round(payload["hurdle_line_intersection_y"])),
+        )
+        cv2.line(vis, (robot_x, robot_y), cross_point, light_sky_blue, 2, cv2.LINE_AA)
+        cv2.circle(vis, (robot_x, robot_y), 5, light_sky_blue, -1)
+        cv2.drawMarker(vis, cross_point, light_sky_blue, cv2.MARKER_CROSS, 20, 2)
+        cv2.circle(vis, cross_point, 8, light_sky_blue, 1, cv2.LINE_AA)
+
     def draw_text_panel(
         panel_lines,
         panel_y,
@@ -1343,12 +1419,19 @@ def visualize_yolo(
     hurdle_detected = bool(payload.get("hurdle_detected", False))
     if hurdle_detected:
         hurdle_line_angle = payload.get("hurdle_line_angle_deg")
+        hurdle_cross_distance = payload.get("hurdle_intersection_distance_px")
         hurdle_lines = [
             f"HURDLE:YES conf:{float(payload.get('hurdle_conf', 0.0)):.2f}",
             (
                 f"line angle:{float(hurdle_line_angle):+.1f}deg"
                 if hurdle_line_angle is not None
                 else "line angle:N/A"
+            ),
+            (
+                f"cross dist:{float(hurdle_cross_distance):.1f}px"
+                if payload.get("hurdle_line_intersection_valid", False)
+                and hurdle_cross_distance is not None
+                else "cross dist:N/A"
             ),
         ]
         draw_text_panel(
@@ -1675,11 +1758,20 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
                     or 0.0,
                     line_angle_deg=payload.get("hurdle_line_angle_deg")
                     or 0.0,
+                    hurdle_line_intersection_valid=bool(
+                        payload.get("hurdle_line_intersection_valid", False)
+                    ),
+                    hurdle_intersection_distance_px=payload.get(
+                        "hurdle_intersection_distance_px"
+                    ),
                 )
             )
             payload["hurdle_status"] = int(hurdle_status)
             payload["hurdle_status_angle"] = float(hurdle_angle)
             payload["hurdle_ready"] = bool(hurdle_ready)
+            payload["hurdle_entry_eligible"] = self.hurdle_status_publisher.entry_eligible
+            payload["hurdle_entry_reason"] = self.hurdle_status_publisher.entry_reason
+            payload["hurdle_confirmed"] = self.hurdle_status_publisher.hurdle_detected
             payload["hurdle_result_publisher"] = "yolo_vision"
 
         def cb_image(self, msg: Image):

@@ -148,6 +148,8 @@ class WebcamHurdlePublisherNode(Node):
             "line_follow_angle_deg": None,
             "line_second_point_distance_px": None,
             "hurdle_line_angle_deg": None,
+            "hurdle_line_intersection_valid": False,
+            "hurdle_intersection_distance_px": None,
         }
 
     @staticmethod
@@ -189,9 +191,20 @@ class WebcamHurdlePublisherNode(Node):
         detected = bool(payload.get("hurdle_detected", False))
         confidence = self._finite_float(payload.get("hurdle_conf"), 0.0)
         detected = bool(detected and confidence >= self.webcam_min_conf)
+        cross_distance = self._optional_finite_float(
+            payload.get("hurdle_intersection_distance_px")
+        )
+        cross_valid = bool(
+            detected
+            and payload.get("hurdle_line_intersection_valid", False)
+            and cross_distance is not None
+            and cross_distance >= 0.0
+        )
 
         self.latest_webcam = {
             "webcam_hurdle_detected": detected,
+            "hurdle_line_intersection_valid": cross_valid,
+            "hurdle_intersection_distance_px": cross_distance if cross_valid else None,
             "webcam_hurdle_x": self._finite_float(
                 payload.get("hurdle_x"), -1.0
             ),
@@ -279,6 +292,12 @@ class WebcamHurdlePublisherNode(Node):
                 line_follow_angle_deg=line_follow_angle,
                 line_second_point_distance_px=second_point_distance,
                 line_angle_deg=line_angle,
+                hurdle_line_intersection_valid=bool(
+                    state.get("hurdle_line_intersection_valid", False)
+                ),
+                hurdle_intersection_distance_px=state.get(
+                    "hurdle_intersection_distance_px"
+                ),
             )
         )
         suppression_reason = (
@@ -307,6 +326,9 @@ class WebcamHurdlePublisherNode(Node):
             "hurdle_status": int(status),
             "hurdle_status_angle": float(published_angle),
             "hurdle_ready": bool(hurdle_ready),
+            "hurdle_entry_eligible": self.hurdle_status_publisher.entry_eligible,
+            "hurdle_entry_reason": self.hurdle_status_publisher.entry_reason,
+            "hurdle_confirmed": self.hurdle_status_publisher.hurdle_detected,
             "detection_suppressed": suppression_reason is not None,
             "suppression_reason": suppression_reason,
             "cooldown_remaining_sec": cooldown_remaining_sec,
@@ -314,6 +336,8 @@ class WebcamHurdlePublisherNode(Node):
             "line_follow_angle_deg": line_follow_angle,
             "line_second_point_distance_px": second_point_distance,
             "hurdle_line_angle_deg": line_angle,
+            "hurdle_line_intersection_valid": state.get("hurdle_line_intersection_valid", False),
+            "hurdle_intersection_distance_px": state.get("hurdle_intersection_distance_px"),
             "webcam": state,
         }
         self.pub_vision_state.publish(
@@ -325,8 +349,12 @@ class WebcamHurdlePublisherNode(Node):
             self.get_logger().info(
                 "hurdle_webcam "
                 f"detected={int(webcam_detected)} "
+                f"entry_eligible={int(self.hurdle_status_publisher.entry_eligible)} "
+                f"entry_reason={self.hurdle_status_publisher.entry_reason} "
+                f"confirmed={int(self.hurdle_status_publisher.hurdle_detected)} "
                 f"line_points={line_point_count} "
                 f"distance={second_point_distance} "
+                f"cross_distance={state.get('hurdle_intersection_distance_px')}px "
                 f"angle={published_angle:+.1f}deg "
                 f"status={status} "
                 f"ready={int(hurdle_ready)} "

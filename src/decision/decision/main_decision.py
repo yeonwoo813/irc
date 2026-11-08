@@ -60,6 +60,8 @@ class Motion:
     Left_Turn_4 = 39
     Shoot_60 = 40
     Ball_ForwardHalf_2 = 41
+    Hurdle_Forward_320 = 42
+    Hurdle_Forward_150 = 43
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -70,6 +72,12 @@ MOTION_NAME = {
     for name, value in vars(Motion).items()
     if not name.startswith('_') and isinstance(value, int)
 }
+
+HURDLE_FORWARD_MOTIONS = (
+    Motion.Hurdle_Forward_20,
+    Motion.Hurdle_Forward_320,
+    Motion.Hurdle_Forward_150,
+)
 
 class Ball:
     Ball_None = 99
@@ -215,6 +223,7 @@ class MainDecision(Node):
         MainDecision._reset_goal_recheck(self, clear_seen=True)
         #hurdle
         self.hurdle_step = 0
+        self.hurdle_forward_started = False
         self.hurdle_count = 0
         self.hurdle_ready = False
         self.hurdle_detected = False
@@ -555,6 +564,8 @@ class MainDecision(Node):
         self.hurdle_ready = False
         self.hurdle_detected = False
         self.hurdle_ignore_until = None
+        self.hurdle_step = 0
+        self.hurdle_forward_started = False
         self.hurdle_ignore_active = True
         self.mission_started = True
         MainDecision._set_mission_armed_state(self, False)
@@ -776,6 +787,18 @@ class MainDecision(Node):
         #최신 상태 갱신
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
+
+        # 26/42/43번은 실제 실행 시작(false) 후 완료(true)를 확인해야 한다.
+        # 전진 중 교점을 놓쳐도 새 비전 투표 없이 19번으로 이어간다.
+        if (
+            getattr(self, 'current_mode', None) == 'HurdleMode'
+            and getattr(self, 'hurdle_step', 0) == 1
+        ):
+            if not self.motion_end:
+                self.hurdle_forward_started = True
+            else:
+                MainDecision._finish_hurdle_forward(self)
+            return
 
         if MainDecision._handle_pick_recheck_motion_end(self, received_at):
             return
@@ -1533,6 +1556,7 @@ class MainDecision(Node):
         # No hurdle latch from the failed alignment may hijack recovery.
         self.hurdle_detected = False
         self.hurdle_step = 0
+        self.hurdle_forward_started = False
         self.hurdle_ball_suppressed = False
         MainDecision._reset_hurdle_line_search(self)
         MainDecision._reset_vision_decision_cycle(self)
@@ -1802,6 +1826,12 @@ class MainDecision(Node):
         ):
             return False
 
+        if (
+            getattr(self, 'current_mode', None) == 'HurdleMode'
+            and getattr(self, 'hurdle_step', 0) == 1
+        ):
+            return MainDecision._finish_hurdle_forward(self)
+
         # 이미 현재 종료 사이클의 판단을 시작했다면 중복 명령을 막습니다.
         if self.line_data and self.ball_data and self.hurdle_data:
             return False
@@ -1982,23 +2012,45 @@ class MainDecision(Node):
                     "허들모드에 유효한 허들 상태가 없어 새 프레임을 기다립니다."
                 )
                 return False
-        # ready가 false인 동안에는 Forward 20을 상태 투표에서 제외
+        forward_statuses = HURDLE_FORWARD_MOTIONS
+        # ready가 false인 동안에는 모든 허들 전진 모션을 상태 투표에서 제외
         if not self.hurdle_ready and not hurdle_search_active:
             hurdle_status_candidates = [
                 status
                 for status in hurdle_status_candidates
-                if status != Motion.Hurdle_Forward_20
+                if status not in forward_statuses
             ]
             if not hurdle_status_candidates:
                 self.get_logger().info(
                     "hurdle_ready=false이지만 허들 상태가 모두 "
-                    "Hurdle_Forward_20이어서 새 프레임을 기다립니다."
+                    "전진(26/42/43)이어서 새 프레임을 기다립니다."
                 )
                 return False
 
         self.hurdle_status = Counter(
             hurdle_status_candidates
         ).most_common(1)[0][0]
+
+        if self.hurdle_detected and self.hurdle_ready and not hurdle_search_active:
+            # 각도/거리 조건을 함께 만족한 결과에서만 26/42/43을 선택한다.
+            # 교점 미검출(99)이 최신이면 과거 ready 표로 전진하지 않는다.
+            forward_votes = Counter(
+                status for status, ready in zip(
+                    self.hurdle_buffer, self.hurdle_ready_buffer
+                )
+                if ready and status in forward_statuses
+            )
+            ranked = forward_votes.most_common()
+            if (
+                self.hurdle_buffer[-1] == Hurdle.Hurdle_None
+                or sum(forward_votes.values()) < 3
+                or (len(ranked) > 1 and ranked[0][1] == ranked[1][1])
+            ):
+                self.get_logger().info(
+                    "허들 전진 거리 투표 미확정: 새 프레임을 기다립니다."
+                )
+                return False
+            self.hurdle_status = ranked[0][0]
 
         # 연속값과 나머지 상태 플래그는 콜백에서 저장한 최신값을 사용합니다.
         self.angle = self.latest_line_angle
@@ -2455,6 +2507,10 @@ class MainDecision(Node):
                 if MainDecision._advance_hurdle_line_search(self):
                     return
             if not self.hurdle_ready:
+                # 목 탐색을 막 끝냈을 때 남은 전진 상태도 ready 없이 실행하지 않는다.
+                if self.hurdle_status in HURDLE_FORWARD_MOTIONS:
+                    self._reset_vision_decision_cycle()
+                    return
                 if self.hurdle_status == Motion.Neck_Left:
                     if self.line_status != Line.Line_None:
                         # 이미 정면 라인이 돌아왔다면 늦게 도착한 탐색 요청은
@@ -2473,22 +2529,40 @@ class MainDecision(Node):
                 self.MotionCommand()
                 return
 
-            #Ready 후 20번 종종걸음
+            # 정렬/거리 투표가 선택한 전진 모션을 한 번만 실행한다.
+            if self.hurdle_status not in HURDLE_FORWARD_MOTIONS:
+                self._reset_vision_decision_cycle()
+                return
             self.hurdle_step = 1
-            self.status = Motion.Hurdle_Forward_20
+            self.hurdle_forward_started = False
+            self.status = self.hurdle_status
             self.MotionCommand()
             return
         
         #step 1: 허들 넘기 실행
         elif self.hurdle_step == 1:
-            self.hurdle_step = 0
-            self.hurdle_count += 1
+            MainDecision._finish_hurdle_forward(self)
 
-            self.status = Motion.Hurdle_Go
-            self.hurdle_go_active = True
-            self.hurdle_go_started = False
-            self.MotionCommand()
-            return
+    def _finish_hurdle_forward(self):
+        """Finish any approach motion before crossing, even without vision."""
+        if (
+            getattr(self, 'hurdle_step', 0) != 1
+            or not getattr(self, 'hurdle_forward_started', False)
+            or not self.motion_end
+            or not self.motion_ready
+            or getattr(self, 'vision_reset_pending', False)
+            or not MainDecision._mission_has_started(self)
+            or not MainDecision._vision_stack_ready(self)
+        ):
+            return False
+        self.hurdle_step = 0
+        self.hurdle_forward_started = False
+        self.hurdle_count += 1
+        self.status = Motion.Hurdle_Go
+        self.hurdle_go_active = True
+        self.hurdle_go_started = False
+        self.MotionCommand()
+        return True
 
     
     def _reset_hurdle_line_search(self):
@@ -3046,6 +3120,12 @@ class MainDecision(Node):
 
         elif self.status == 41:
             motion_msg.command = Motion.Ball_ForwardHalf_2
+
+        elif self.status == 42:
+            motion_msg.command = Motion.Hurdle_Forward_320
+
+        elif self.status == 43:
+            motion_msg.command = Motion.Hurdle_Forward_150
 
         else:
             # 미지원 상태가 메시지 기본값 0(Initial_Pose)으로 발행되지

@@ -1004,7 +1004,7 @@ void SDK_Motion::define_motions()
         0.5,
         1.5,
         0.3,
-        0.5
+        0.3
     };
 
     motion_pickup_ball.blends =
@@ -1541,7 +1541,7 @@ void SDK_Motion::define_motions()
         {2054,1251,2336,2087,2051,2041,2763,1616,1508,2024,2017,2109,2016,1652,1049,1970,2116,2435,3060,2144,1970,1965}
     };
 
-    for (int repeat = 0; repeat < 13; ++repeat)
+    for (int repeat = 0; repeat < 10; ++repeat)
     {
         motion_pre_hurdle_walk.poses.insert(
             motion_pre_hurdle_walk.poses.end(),
@@ -2059,6 +2059,102 @@ void SDK_Motion::define_motions()
     };
 
     motion_library_[41] = motion_webcam_ball_mode_walk2;
+
+    // ----------------------------------------------------------
+    // 모션 42번: 허들 직전 미세걷기 320픽셀이하
+    // ----------------------------------------------------------
+    MotionSequence motion_pre_hurdle_walk_320;
+
+    const std::vector<std::vector<double>> pre_hurdle_walk_320_cycle =
+    {
+        {2050,1200,2280,2062,2050,2047,2846,1647,1515,2024,2016,2094,2018,1651,1051,1971,2117,2435,3058,2145,1972,1964},
+        {2052,1134,2523,2232,2051,2042,2846,1687,1591,2008,2039,2107,2033,1651,1049,1975,2119,2436,3061,2144,1972,1964},
+        {2045,1306,2346,2152,2049,2049,2848,1644,1608,2029,2066,2100,2058,1654,1062,1978,2127,2435,3051,2143,1964,1965},
+        {2061,1244,2297,2099,2060,2079,2898,1707,1669,2049,2024,2105,2012,1648,1037,1967,2108,2436,3069,2144,1978,1965},
+        {2054,1242,2312,2106,2053,2034,2885,1424,1363,2013,2022,2109,2002,1649,1039,1967,2108,2436,3067,2144,1976,1965},
+        {2054,1251,2336,2087,2051,2041,2763,1616,1508,2024,2017,2109,2016,1652,1049,1970,2116,2435,3060,2144,1970,1965}
+    };
+
+    for (int repeat = 0; repeat < 8; ++repeat)
+    {
+        motion_pre_hurdle_walk_320.poses.insert(
+            motion_pre_hurdle_walk_320.poses.end(),
+            pre_hurdle_walk_320_cycle.begin(),
+            pre_hurdle_walk_320_cycle.end());
+        motion_pre_hurdle_walk_320.durations.insert(
+            motion_pre_hurdle_walk_320.durations.end(),
+            {0.05, 0.05, 0.05, 0.055, 0.055, 0.055});
+        motion_pre_hurdle_walk_320.blends.insert(
+            motion_pre_hurdle_walk_320.blends.end(),
+            {BlendType::Stop, BlendType::Stop, BlendType::Stop,
+             BlendType::Stop, BlendType::Stop, BlendType::Stop});
+    }
+
+    motion_pre_hurdle_walk_320.poses.insert(
+        motion_pre_hurdle_walk_320.poses.end(),
+        {
+            {2049,1336,2302,2281,2045,2040,2883,1694,1566,1976,2069,2117,2051,1653,1068,1977,2122,2429,3049,2143,1974,1960},
+            {2051,1336,2304,2276,2040,2041,2915,1334,1260,1994,2069,2117,2033,1654,1070,1978,2122,2429,3046,2143,1975,1960},
+            {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
+            {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965}
+        });
+
+    motion_pre_hurdle_walk_320.durations.insert(
+        motion_pre_hurdle_walk_320.durations.end(),
+        {0.04, 0.04, 0.04, 0.5});
+    motion_pre_hurdle_walk_320.blends.insert(
+        motion_pre_hurdle_walk_320.blends.end(),
+        {BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Smooth});
+
+    motion_library_[42] = motion_pre_hurdle_walk_320;
+
+    // ----------------------------------------------------------
+    // 모션 43번: 허들 직전 미세걷기 150픽셀이하
+    // ----------------------------------------------------------
+    MotionSequence motion_pre_hurdle_walk_150;
+
+    const std::vector<std::vector<double>> pre_hurdle_walk_150_cycle =
+    {
+        {2050,1200,2280,2062,2050,2047,2846,1647,1515,2024,2016,2094,2018,1651,1051,1971,2117,2435,3058,2145,1972,1964},
+        {2052,1134,2523,2232,2051,2042,2846,1687,1591,2008,2039,2107,2033,1651,1049,1975,2119,2436,3061,2144,1972,1964},
+        {2045,1306,2346,2152,2049,2049,2848,1644,1608,2029,2066,2100,2058,1654,1062,1978,2127,2435,3051,2143,1964,1965},
+        {2061,1244,2297,2099,2060,2079,2898,1707,1669,2049,2024,2105,2012,1648,1037,1967,2108,2436,3069,2144,1978,1965},
+        {2054,1242,2312,2106,2053,2034,2885,1424,1363,2013,2022,2109,2002,1649,1039,1967,2108,2436,3067,2144,1976,1965},
+        {2054,1251,2336,2087,2051,2041,2763,1616,1508,2024,2017,2109,2016,1652,1049,1970,2116,2435,3060,2144,1970,1965}
+    };
+
+    for (int repeat = 0; repeat < 5; ++repeat)
+    {
+        motion_pre_hurdle_walk_150.poses.insert(
+            motion_pre_hurdle_walk_150.poses.end(),
+            pre_hurdle_walk_150_cycle.begin(),
+            pre_hurdle_walk_150_cycle.end());
+        motion_pre_hurdle_walk_150.durations.insert(
+            motion_pre_hurdle_walk_150.durations.end(),
+            {0.05, 0.05, 0.05, 0.055, 0.055, 0.055});
+        motion_pre_hurdle_walk_150.blends.insert(
+            motion_pre_hurdle_walk_150.blends.end(),
+            {BlendType::Stop, BlendType::Stop, BlendType::Stop,
+             BlendType::Stop, BlendType::Stop, BlendType::Stop});
+    }
+
+    motion_pre_hurdle_walk_150.poses.insert(
+        motion_pre_hurdle_walk_150.poses.end(),
+        {
+            {2049,1336,2302,2281,2045,2040,2883,1694,1566,1976,2069,2117,2051,1653,1068,1977,2122,2429,3049,2143,1974,1960},
+            {2051,1336,2304,2276,2040,2041,2915,1334,1260,1994,2069,2117,2033,1654,1070,1978,2122,2429,3046,2143,1975,1960},
+            {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965},
+            {2072,1368,2237,2219,2051,2076,2750,1716,1464,2043,2048,2113,2060,1647,1022,1964,2100,2437,3085,2145,1987,1965}
+        });
+
+    motion_pre_hurdle_walk_150.durations.insert(
+        motion_pre_hurdle_walk_150.durations.end(),
+        {0.04, 0.04, 0.04, 0.5});
+    motion_pre_hurdle_walk_150.blends.insert(
+        motion_pre_hurdle_walk_150.blends.end(),
+        {BlendType::Stop, BlendType::Stop, BlendType::Stop, BlendType::Smooth});
+
+    motion_library_[43] = motion_pre_hurdle_walk_150;
 
 }
 

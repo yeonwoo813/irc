@@ -126,11 +126,21 @@ def _diagnostics_actions(context):
     socket_path = os.path.join(socket_dir, 'trace.sock')
     run_id = 'run-' + time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
     root = LaunchConfiguration('vision_diagnostics_dir').perform(context)
+    run_directory = os.path.join(root, run_id)
     context.environment['IRC_VISION_TRACE_SOCKET'] = socket_path
+    # The witness stays in launch's process group and only waits for termination
+    # signals. It records their provenance without reading keys or forwarding
+    # signals to any camera, decision or motion process.
     return [ExecuteProcess(
+        name='signal_witness',
+        cmd=[sys.executable, '-m', 'robot_bringup.signal_witness',
+             '--directory', run_directory],
+        output='both',
+        sigterm_timeout='2.0', sigkill_timeout='1.0',
+    ), ExecuteProcess(
         name='vision_diagnostics',
         cmd=[sys.executable, '-m', 'robot_bringup.vision_diagnostics',
-             '--socket', socket_path, '--directory', os.path.join(root, run_id),
+             '--socket', socket_path, '--directory', run_directory,
              '--settings', LaunchConfiguration('settings_ini')],
         output='both', respawn=True, respawn_delay=2.0,
         sigterm_timeout='2.0', sigkill_timeout='1.0',
