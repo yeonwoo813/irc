@@ -54,9 +54,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, String
 from frame_health import frame_health
-from vision_trace import TraceProbe, image_stamp
 
-TRACE = TraceProbe('realsense')
 
 try:
     from ultralytics import YOLO
@@ -180,8 +178,6 @@ def load_config(ini_path: str) -> Dict[str, object]:
         "depth_inner_ratio_hoop": 0.30,
         "min_valid_depth_pixels": 5,
         "publish_debug_image": True,
-        "print_every_n_frames": 10,
-        "ball_loss_log_interval_seconds": 1.0,
     }
 
     p = Path(ini_path).expanduser()
@@ -236,10 +232,6 @@ def load_config(ini_path: str) -> Dict[str, object]:
             "depth_inner_ratio_hoop": gf("depth_inner_ratio_hoop"),
             "min_valid_depth_pixels": gi("min_valid_depth_pixels"),
             "publish_debug_image": gb("publish_debug_image"),
-            "print_every_n_frames": gi("print_every_n_frames"),
-            "ball_loss_log_interval_seconds": gf(
-                "ball_loss_log_interval_seconds"
-            ),
         }
     )
     return cfg
@@ -257,9 +249,9 @@ class RealSenseYoloDetector(Node):
             self.cfg["publish_debug_image"] = bool(preview_enabled)
         model_path = str(self.cfg["model"])
         self.get_logger().info(f"Loading RealSense YOLO: {model_path}")
-        TRACE.mark('model_load')
+
         self.model = YOLO(model_path, task="detect")
-        TRACE.mark('model_ready')
+
 
         self.bridge = CvBridge()
 
@@ -280,7 +272,6 @@ class RealSenseYoloDetector(Node):
         self.display_mode = "ball"
         self.mission_reset_token = ""
         self.last_inference_time = 0.0
-        self.frame_count = 0
         self.latest_ball_detection: Optional[Detection] = None
         self.latest_backboard_detection: Optional[Detection] = None
         self.latest_ball_state = self._empty_ball_state(True)
@@ -292,7 +283,6 @@ class RealSenseYoloDetector(Node):
         self.latest_raw_ball_candidate: Optional[Detection] = None
         self.ball_loss_started_mono: Optional[float] = None
         self.ball_loss_started_at: Optional[str] = None
-        self.ball_loss_last_log_mono = 0.0
         self.ball_loss_last_reason: Optional[str] = None
         self.ball_loss_missed_frames = 0
         self.ball_loss_latest_state: Optional[Dict[str, object]] = None
@@ -422,13 +412,6 @@ class RealSenseYoloDetector(Node):
             "/camera/aligned_depth_to_color/image_raw",
             qos_profile=self.image_qos,
         )
-        # Observe each existing subscription BEFORE pairing, without another
-        # image subscription or copy. Independent CameraInfo in the recorder
-        # distinguishes driver progress when this executor itself is blocked.
-        self.color_sub.registerCallback(
-            lambda msg: TRACE.mark('raw_color', image_stamp(msg)))
-        self.depth_sub.registerCallback(
-            lambda msg: TRACE.mark('raw_depth', image_stamp(msg)))
         self.sync = ApproximateTimeSynchronizer(
             [self.color_sub, self.depth_sub],
             queue_size=2,
@@ -795,7 +778,6 @@ class RealSenseYoloDetector(Node):
     ) -> None:
         self.ball_loss_started_mono = None
         self.ball_loss_started_at = None
-        self.ball_loss_last_log_mono = 0.0
         self.ball_loss_last_reason = None
         self.ball_loss_missed_frames = 0
         self.ball_loss_latest_state = None
@@ -906,7 +888,7 @@ class RealSenseYoloDetector(Node):
         reason = self._ball_loss_reason(raw_state)
         self.ball_loss_missed_frames += 1
         self.ball_loss_latest_state = dict(raw_state)
-        event = "ongoing"
+        event = None
         should_log = False
         if self.ball_loss_started_mono is None:
             self.ball_loss_started_mono = now_sec
@@ -916,14 +898,6 @@ class RealSenseYoloDetector(Node):
         elif reason != self.ball_loss_last_reason:
             event = "reason_changed"
             should_log = True
-        else:
-            interval = max(
-                0.1,
-                float(
-                    self.cfg.get("ball_loss_log_interval_seconds", 1.0)
-                ),
-            )
-            should_log = now_sec - self.ball_loss_last_log_mono >= interval
 
         self.ball_loss_last_reason = reason
         diagnostic = raw_state.get("realsense_diagnostic")
@@ -945,7 +919,6 @@ class RealSenseYoloDetector(Node):
                 now_sec,
                 raw_state,
             )
-            self.ball_loss_last_log_mono = now_sec
 
     def _reset_ball_detection_hold(self) -> None:
         self.last_valid_ball_state = None
@@ -1482,7 +1455,6 @@ class RealSenseYoloDetector(Node):
         )
 
     def cb_images(self, color_msg: Image, depth_msg: Image) -> None:
-        TRACE.mark('callback', image_stamp(color_msg), image_stamp(depth_msg))
         received_monotonic = time.monotonic()
         received_ros_ns = self.get_clock().now().nanoseconds
         debug_requested = self._debug_view_requested()
@@ -1491,7 +1463,6 @@ class RealSenseYoloDetector(Node):
             and not self.hoop_active
             and not debug_requested
         ):
-            TRACE.mark('inactive')
             return
 
         now = time.monotonic()
@@ -1503,13 +1474,11 @@ class RealSenseYoloDetector(Node):
             now - self.last_inference_time >= (1.0 / max_fps) * 0.90
         )
         if not should_infer and not debug_requested:
-            TRACE.mark('throttled')
             return
 
         try:
             frame = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding="bgr8")
         except Exception as exc:
-            TRACE.mark('error')
             self.get_logger().warning(f"Color conversion failed: {exc}")
             failure = self._empty_ball_state(self.ball_active)
             failure["realsense_diagnostic"] = {
@@ -1532,7 +1501,6 @@ class RealSenseYoloDetector(Node):
                 depth_msg, desired_encoding="passthrough"
             )
         except Exception as exc:
-            TRACE.mark('error')
             self.get_logger().warning(f"Depth conversion failed: {exc}")
             failure = self._empty_ball_state(self.ball_active)
             failure["realsense_diagnostic"] = {
@@ -1566,11 +1534,9 @@ class RealSenseYoloDetector(Node):
             return
 
         try:
-            TRACE.mark('predict')
             dets = self._run_yolo(frame)
-            TRACE.mark('predicted')
+
         except Exception as exc:
-            TRACE.mark('error')
             self.get_logger().error(f"YOLO inference failed: {exc}")
             failure = self._empty_ball_state(self.ball_active)
             failure["realsense_diagnostic"] = {
@@ -1632,13 +1598,11 @@ class RealSenseYoloDetector(Node):
         self.latest_hoop_state = hoop_state
         self.latest_process_ms = process_ms
 
-        TRACE.mark('publish')
         if self.ball_active:
             self._publish_ball_state(ball_state)
         if self.hoop_active:
             self._publish_hoop_state(hoop_state)
 
-        TRACE.mark('preview')
         self._publish_debug_views(
             frame,
             color_msg,
@@ -1649,21 +1613,10 @@ class RealSenseYoloDetector(Node):
             process_ms,
         )
 
-        self.frame_count += 1
         self.frame_health_pub.publish(String(data=json.dumps(frame_health(
             [color_msg, depth_msg], received_monotonic, received_ros_ns,
             self.mission_reset_token,
         ), separators=(',', ':'))))
-        TRACE.mark('complete')
-        every = max(1, int(self.cfg["print_every_n_frames"]))
-        if not QUIET_LOGS and self.frame_count % every == 0:
-            self.get_logger().info(
-                f"RS-YOLO process={process_ms:.1f}ms "
-                f"ball={int(bool(ball_state.get('realsense_ball_detected', False)))} "
-                f"ball_hold={int(bool(ball_state.get('held_previous_detection', False)))} "
-                f"hoop={int(bool(hoop_state.get('detected', False)))} "
-                f"hoop_hold={int(bool(hoop_state.get('held_previous_detection', False)))}"
-            )
 
 
 def main() -> None:

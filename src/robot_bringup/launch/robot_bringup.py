@@ -103,7 +103,6 @@ def generate_launch_description():
             'start_realsense_yolo': use_vision,
             'start_ball': use_vision,
             'start_hurdle': use_vision,
-            'start_monitor': use_vision,
             'webcam_device': webcam_device,
             'quiet_logs': quiet_logs,
             'vision_diagnostics': LaunchConfiguration('vision_diagnostics'),

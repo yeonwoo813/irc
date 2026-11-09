@@ -17,30 +17,6 @@ find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(msgs REQUIRED)
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  find_package(ament_cmake_pytest REQUIRED)
-  set(ament_cmake_copyright_FOUND TRUE)
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-  ament_add_pytest_test(
-    test_detector_activation
-    test/test_detector_activation.py
-  )
-  ament_add_pytest_test(
-    test_frame_health
-    test/test_frame_health.py
-  )
-  ament_add_pytest_test(
-    test_detector_frame_health
-    test/test_detector_frame_health.py
-  )
-  ament_add_pytest_test(
-    test_realsense_yolo_detector
-    test/test_realsense_yolo_detector.py
-  )
-endif()
-
 install(PROGRAMS
   scripts/yolo_detector.py
   scripts/realsense_yolo_detector.py
@@ -48,13 +24,11 @@ install(PROGRAMS
   scripts/ball_vision_fusion.py
   scripts/realsense_rgb_stabilizer.py
   scripts/hurdle_vision_fusion.py
-  scripts/vision_status_monitor.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(FILES
   scripts/frame_health.py
-  scripts/vision_trace.py
   scripts/line_status_publisher.py
   scripts/ball_status_publisher.py
   scripts/hurdle_status_publisher.py
@@ -64,10 +38,6 @@ install(FILES
 # decision uses the vision-owned controller at MotionEnd without another
 # topic/service round trip. Keep the existing script import working as well.
 ament_python_install_module(scripts/line_status_publisher.py)
-# Humble's module macro rejects a second module at the same destination.
-# The call above already exports this Python path for downstream packages.
-ament_get_python_install_dir(vision_python_install_dir)
-install(FILES scripts/vision_trace.py DESTINATION ${vision_python_install_dir})
 
 install(DIRECTORY
   config

@@ -28,7 +28,6 @@ publish 값:
 """
 
 import configparser
-import os
 import cv2
 import numpy as np
 import time
@@ -41,9 +40,7 @@ from pathlib import Path
 from typing import Optional
 from collections import deque
 from frame_health import frame_health
-from vision_trace import TraceProbe, image_stamp
 
-TRACE = TraceProbe('webcam')
 
 from line_status_publisher import (
     LineDecision,
@@ -57,9 +54,6 @@ from hurdle_status_publisher import HurdleStatusPublisher
 # LineDecision과 같은 기준으로 곡선 여부를 판별해, 곡선 접선각의
 # 기준점만 로봇에서 세 번째로 가까운 점으로 바꾼다.
 LINE_CURVE_A_THRESHOLD = LineDecision().curve_a
-QUIET_LOGS = os.environ.get('IRC_QUIET_LOGS', '').lower() in {
-    '1', 'true', 'yes', 'on',
-}
 
 try:
     from ultralytics import YOLO
@@ -147,6 +141,7 @@ MOTION_NAME = {
     41: "Ball_ForwardHalf_2",
     42: "Hurdle_Forward_320",
     43: "Hurdle_Forward_150",
+    44: "Hurdle_Forward_400",
 }
 
 
@@ -358,7 +353,6 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "yolo_model": "best.pt",
         "yolo_conf": 0.20,
         "line_conf": 0.35,
-        "line_diagnostic_conf": 0.30,
         "line_display_conf": 0.40,
         "ball_conf": 0.20,
         "ball_detection_hold_seconds": 0.5,
@@ -384,7 +378,6 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         # output
         "show_window": True,
         "save_video": "",
-        "print_every_n_frames": 5,
         # Fusion 노드와 hurdle_result 중복 발행을 막기 위해 기본 False.
         "publish_hurdle_result": False,
     }
@@ -427,9 +420,6 @@ def load_config(ini_path: str = "settings.ini") -> dict:
         "yolo_model": gs("yolo", "model", defaults["yolo_model"]),
         "yolo_conf": gf("yolo", "conf", defaults["yolo_conf"]),
         "line_conf": gf("yolo", "line_conf", defaults["line_conf"]),
-        "line_diagnostic_conf": gf(
-            "yolo", "line_diagnostic_conf", defaults["line_diagnostic_conf"]
-        ),
         "line_display_conf": gf(
             "yolo", "line_display_conf", defaults["line_display_conf"]
         ),
@@ -481,7 +471,6 @@ def load_config(ini_path: str = "settings.ini") -> dict:
 
         "show_window": gb("output", "show_window", defaults["show_window"]),
         "save_video": gs("output", "save_video", defaults["save_video"]),
-        "print_every_n_frames": gi("output", "print_every_n_frames", defaults["print_every_n_frames"]),
         "publish_hurdle_result": gb("output", "publish_hurdle_result", defaults["publish_hurdle_result"]),
     })
     return cfg
@@ -558,17 +547,14 @@ def release_cuda_cache() -> None:
 
 
 def yolo_detect(model, frame: np.ndarray, cfg: dict) -> list[ObjectDetection]:
-    TRACE.mark('predict')
     results = model.predict(
         source=frame,
         imgsz=cfg["yolo_imgsz"],
-        conf=(cfg["yolo_conf"] if QUIET_LOGS else min(
-            cfg["yolo_conf"], cfg.get("line_diagnostic_conf", 0.30)
-        )),
+        conf=cfg["yolo_conf"],
         device=cfg["yolo_device"],
         verbose=False,
     )
-    TRACE.mark('predicted')
+
 
     dets: list[ObjectDetection] = []
     result = results[0]
@@ -720,7 +706,6 @@ def make_line_payload(
             payload["line_angle"] = payload["tangent_angle"]
 
     return payload
-
 
 
 def _partial_filter_class_set(cfg: dict) -> set[str]:
@@ -982,90 +967,6 @@ class BallDetectionHold:
 
         self.reset()
         return result
-
-
-def webcam_line_evidence(
-    dets: list[ObjectDetection],
-    payload: dict,
-    frame_w: int,
-    frame_h: int,
-    cfg: dict,
-    motion_state: Optional[MotionDisplayState],
-) -> dict:
-    """Record raw candidates separately from the smoothed driving result."""
-    diagnostic_conf = float(cfg.get("line_diagnostic_conf", 0.30))
-    roi_top = int(frame_h * cfg["roi_top_ratio"])
-    roi_bottom = int(frame_h * cfg["roi_bottom_ratio"])
-    roi_left = int(frame_w * cfg["roi_left_ratio"])
-    roi_right = int(frame_w * cfg["roi_right_ratio"])
-    candidates = []
-    for d in dets:
-        if d.name != cfg["line_class"] or d.conf < diagnostic_conf:
-            continue
-        if d.conf < cfg["line_conf"]:
-            rejection_reason = "below_line_conf"
-        elif d.conf < cfg["yolo_conf"]:
-            rejection_reason = "below_yolo_conf"
-        elif not (roi_left <= d.cx <= roi_right and roi_top <= d.cy <= roi_bottom):
-            rejection_reason = "outside_roi"
-        else:
-            rejection_reason = None
-        candidates.append({
-            "conf": float(d.conf),
-            "bbox": [float(d.x1), float(d.y1), float(d.x2), float(d.y2)],
-            "center": [float(d.cx), float(d.cy)],
-            "used_for_raw_line": rejection_reason is None,
-            "rejection_reason": rejection_reason,
-        })
-
-    lost = payload["status"] == LineStatus.Line_Lost
-    smoothing_rejected = payload["smooth_valid_count"] < LINE_SMOOTHER.min_valid
-    lost_reason = None
-    if lost:
-        lost_reason = (
-            "insufficient_valid_frames"
-            if smoothing_rejected else "line_geometry_unavailable"
-        )
-    return {
-        "diagnostic_conf": diagnostic_conf,
-        "yolo_conf": float(cfg["yolo_conf"]),
-        "line_conf": float(cfg["line_conf"]),
-        "candidates": candidates,
-        "candidate_count": len(candidates),
-        "max_conf": max((d["conf"] for d in candidates), default=None),
-        "raw_point_count": payload["raw_point_count"],
-        "point_count": payload["point_count"],
-        "smooth_valid_count": payload["smooth_valid_count"],
-        "smooth_window": LINE_SMOOTHER.window,
-        "smooth_min_valid": LINE_SMOOTHER.min_valid,
-        "smoothing_rejected": smoothing_rejected,
-        "status": payload["status"],
-        "lost": lost,
-        "lost_reason": lost_reason,
-        "active_motion": motion_state.active_command if motion_state else None,
-        "motion_running": motion_state.running if motion_state else False,
-    }
-
-
-def webcam_ball_evidence(
-    payload: dict,
-    frame_count: int,
-    motion_state: MotionDisplayState,
-) -> Optional[dict]:
-    """Keep current and held confidence distinguishable in diagnostic logs."""
-    if not payload.get("ball_detected", False):
-        return None
-
-    return {
-        "frame": frame_count,
-        "ball_conf": payload["ball_conf"],
-        "ball_raw": bool(payload.get("ball_raw_detected", False)),
-        "ball_hold": bool(payload.get("ball_hold_active", False)),
-        "hold_elapsed_sec": payload.get("ball_hold_elapsed_sec", 0.0),
-        "ball_bbox": payload.get("ball_bbox", []),
-        "active_motion": motion_state.active_command,
-        "motion_running": motion_state.running,
-    }
 
 
 def add_hurdle_line_intersection(
@@ -1478,10 +1379,9 @@ def analyze_frame_yolo(
     render_visualization: bool = True,
 ) -> tuple[dict, Optional[np.ndarray]]:
     h, w = frame.shape[:2]
-    diagnostic_dets = yolo_detect(model, frame, cfg)
-    # 낮은 신뢰도 후보는 진단에만 사용한다. 기존 주행/공/허들 판단과
-    # 화면에는 원래 YOLO 하한을 통과한 검출만 전달한다.
-    raw_dets = [d for d in diagnostic_dets if d.conf >= cfg["yolo_conf"]]
+    detections = yolo_detect(model, frame, cfg)
+    # 제어와 미리보기에는 설정된 YOLO 하한을 통과한 검출만 사용한다.
+    raw_dets = [d for d in detections if d.conf >= cfg["yolo_conf"]]
     dets = raw_dets
     if not ball_detection_active:
         # Webcam YOLO는 라인/공/허들을 한 모델에서 추론하므로 전체
@@ -1526,10 +1426,6 @@ def analyze_frame_yolo(
     # 디버깅용으로 raw 개수도 같이 넣어둠. 알고리즘 쪽에서 안 쓰면 무시해도 됨.
     payload["raw_point_count"] = int(len(raw_line_points))
     payload["ball_detection_active"] = bool(ball_detection_active)
-    if not QUIET_LOGS:
-        payload["line_evidence"] = webcam_line_evidence(
-            diagnostic_dets, payload, w, h, cfg, motion_state
-        )
 
     vis = None
     if render_visualization:
@@ -1569,7 +1465,7 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
             super().__init__("yolo_vision")
             self.cfg = cfg
             self.bridge = CvBridge()
-            self.frame_count = 0
+
             self.inference_failures = 0
             self.last_model_reload = 0.0
             self.motion_display_state = MotionDisplayState()
@@ -1587,9 +1483,9 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
                     self.cfg.get("ball_detection_hold_seconds", 0.5)
                 )
             )
-            TRACE.mark('model_load')
+
             self.model = load_yolo_model(self.cfg)
-            TRACE.mark('model_ready')
+
             # Keep only the newest full-resolution webcam frame while TensorRT
             # is busy.  The standard sensor-data profile has a deeper queue.
             image_qos = QoSProfile(
@@ -1775,7 +1671,6 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
             payload["hurdle_result_publisher"] = "yolo_vision"
 
         def cb_image(self, msg: Image):
-            TRACE.mark('callback', image_stamp(msg))
             received_monotonic = time.monotonic()
             received_ros_ns = self.get_clock().now().nanoseconds
             debug_subscribed = (
@@ -1801,7 +1696,6 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
                 )
                 self.inference_failures = 0
             except Exception:
-                TRACE.mark('error')
                 self.inference_failures += 1
                 self.raw_ball_in_hand_gate.reset()
                 self.pub_raw_ball_in_hand.publish(Bool(data=False))
@@ -1819,9 +1713,9 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
                     try:
                         self.model = None
                         release_cuda_cache()
-                        TRACE.mark('model_load')
+
                         self.model = load_yolo_model(self.cfg)
-                        TRACE.mark('model_ready')
+
                         self.get_logger().warn("TensorRT model reloaded after inference failure")
                     except Exception:
                         self.get_logger().error(
@@ -1835,7 +1729,7 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
                 self.get_logger().info(
                     "[VisionStartup] webcam YOLO first inference READY"
                 )
-            TRACE.mark('publish')
+
             self.publish_hurdle_status(payload)
             payload["mission_reset_token"] = getattr(
                 self,
@@ -1855,7 +1749,7 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
 
             # Build ROS image messages only while a viewer is subscribed.
             # The local preview still receives the same visualization.
-            TRACE.mark('preview')
+
             if debug_subscribed:
                 debug_msg = self.bridge.cv2_to_imgmsg(vis, encoding="bgr8")
                 debug_msg.header = msg.header
@@ -1867,49 +1761,11 @@ def main_ros2(ini_path: str = "settings.ini", preview_enabled=None):
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     rclpy.shutdown()
 
-            self.frame_count += 1
             self.frame_health_pub.publish(String(data=json.dumps(frame_health(
                 [msg], received_monotonic, received_ros_ns,
                 self.mission_reset_token,
             ), separators=(',', ':'))))
-            TRACE.mark('complete')
-            if QUIET_LOGS:
-                return
-            # 검출/미검출 전환이 주기 요약 사이에 사라지지 않도록 매 프레임 기록.
-            line_evidence = dict(payload["line_evidence"])
-            line_evidence["frame"] = self.frame_count
-            line_evidence["image_stamp"] = {
-                "sec": int(msg.header.stamp.sec),
-                "nanosec": int(msg.header.stamp.nanosec),
-            }
-            self.get_logger().info(
-                "[WebcamLineEvidence] "
-                + json.dumps(line_evidence, separators=(",", ":"))
-            )
-            # Preserve even one-frame detections between periodic summaries.
-            ball_evidence = webcam_ball_evidence(
-                payload, self.frame_count, self.motion_display_state
-            )
-            if ball_evidence is not None:
-                self.get_logger().info(
-                    "[WebcamBallEvidence] "
-                    + json.dumps(ball_evidence, separators=(",", ":"))
-                )
-            if self.frame_count % self.cfg["print_every_n_frames"] == 0:
-                self.get_logger().info(
-                    f"[{self.frame_count}] status={payload['status']}({payload['status_name']}) "
-                    f"pc={payload['point_count']} "
-                    f"dist={payload['line_distance']:+.0f}px "
-                    f"ang={payload['line_angle']:+.1f} "
-                    f"a={payload['curve_a']:+.2e} "
-                    f"ball={payload['ball_detected']} "
-                    f"ball_raw={payload.get('ball_raw_detected')} "
-                    f"ball_hold={payload.get('ball_hold_active')} "
-                    f"ball_conf={payload['ball_conf']:.6f} "
-                    f"hurdle={payload['hurdle_detected']} "
-                    f"h_dist={payload.get('line_second_point_distance_px')} "
-                    f"h_line_ang={payload.get('hurdle_line_angle_deg')}"
-                )
+
 
     rclpy.init()
     node = YoloVisionNode()
@@ -1949,7 +1805,6 @@ def main_standalone(ini_path: str = "settings.ini"):
         writer = cv2.VideoWriter(cfg["save_video"], fourcc, cfg["cam_fps"],
                                  (cfg["cam_width"], cfg["cam_height"]))
 
-    frame_count = 0
     prev_time = time.time()
 
     while cap.isOpened():
@@ -1978,9 +1833,6 @@ def main_standalone(ini_path: str = "settings.ini"):
         if writer:
             writer.write(vis)
 
-        frame_count += 1
-        if frame_count % cfg["print_every_n_frames"] == 0:
-            print(json.dumps(payload, ensure_ascii=False))
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):

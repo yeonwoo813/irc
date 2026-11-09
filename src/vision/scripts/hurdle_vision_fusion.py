@@ -35,7 +35,6 @@ class WebcamHurdlePublisherNode(Node):
         self.declare_parameter("webcam_timeout_sec", 0.6)
         self.declare_parameter("webcam_min_conf", 0.0)
         self.declare_parameter("publish_hz", 15.0)
-        self.declare_parameter("print_every_n_frames", 10)
         self.declare_parameter("post_crossing_cooldown_sec", 2.0)
 
         self.webcam_state_topic = str(
@@ -59,10 +58,6 @@ class WebcamHurdlePublisherNode(Node):
             1.0,
             float(self.get_parameter("publish_hz").value),
         )
-        self.print_every_n_frames = max(
-            1,
-            int(self.get_parameter("print_every_n_frames").value),
-        )
         self.post_crossing_cooldown_sec = max(
             0.0,
             float(
@@ -74,7 +69,6 @@ class WebcamHurdlePublisherNode(Node):
 
         self.latest_webcam: Optional[Dict[str, Any]] = None
         self.latest_webcam_time = 0.0
-        self.publish_count = 0
         self.required_mission_reset_token = ""
         self.mission_reset_waiting = False
 
@@ -130,7 +124,6 @@ class WebcamHurdlePublisherNode(Node):
         self.mission_reset_waiting = True
         self.latest_webcam = None
         self.latest_webcam_time = 0.0
-        self.publish_count = 0
         self.hurdle_status_publisher.reset_for_mission_start()
         self.get_logger().info(
             "Mission start reset: waiting for a fresh webcam frame."
@@ -344,23 +337,6 @@ class WebcamHurdlePublisherNode(Node):
             String(data=json.dumps(output, ensure_ascii=False))
         )
 
-        self.publish_count += 1
-        if self.publish_count % self.print_every_n_frames == 0:
-            self.get_logger().info(
-                "hurdle_webcam "
-                f"detected={int(webcam_detected)} "
-                f"entry_eligible={int(self.hurdle_status_publisher.entry_eligible)} "
-                f"entry_reason={self.hurdle_status_publisher.entry_reason} "
-                f"confirmed={int(self.hurdle_status_publisher.hurdle_detected)} "
-                f"line_points={line_point_count} "
-                f"distance={second_point_distance} "
-                f"cross_distance={state.get('hurdle_intersection_distance_px')}px "
-                f"angle={published_angle:+.1f}deg "
-                f"status={status} "
-                f"ready={int(hurdle_ready)} "
-                f"suppressed={suppression_reason or 'no'} "
-                f"cooldown={cooldown_remaining_sec:.1f}s"
-            )
 
 
 def main(args=None) -> None:

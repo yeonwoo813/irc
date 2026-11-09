@@ -21,6 +21,7 @@ class HurdleStatus:
     Left_Turn_4 = 39
     Hurdle_Forward_320 = 42
     Hurdle_Forward_150 = 43
+    Hurdle_Forward_400 = 44
     Hurdle_None = 99
 
 
@@ -51,7 +52,8 @@ class HurdleDecision:
         # 로봇 중심선에서 두 번째 라인점까지의 거리 기준
         self.center_distance_px = 100.0
         # 최초 허들 진입 거리와 정렬 후 전진 모션 선택 거리는 별도로 둔다.
-        self.entry_distance_px = 400.0
+        self.entry_distance_px = 480.0
+        self.medium_forward_distance_px = 400.0
         self.short_forward_distance_px = 320.0
         self.near_forward_distance_px = 150.0
 
@@ -146,6 +148,8 @@ class HurdleDecision:
             forward = HurdleStatus.Hurdle_Forward_150
         elif cross_distance <= self.short_forward_distance_px:
             forward = HurdleStatus.Hurdle_Forward_320
+        elif cross_distance <= self.medium_forward_distance_px:
+            forward = HurdleStatus.Hurdle_Forward_400
         else:
             forward = HurdleStatus.Hurdle_Forward_20
         return forward, angle, True
@@ -402,6 +406,15 @@ class HurdleStatusPublisher:
         msg.status = int(status)
         msg.angle = float(angle)
         msg.hurdle_ready = bool(ready)
+        # Carry the distance from this decision's features with its result.
+        # Do not substitute a newer webcam sample when recording the vote.
+        cross_distance = (
+            self.hurdle_decision.intersection_distance(features)
+            if suppression_reason is None else None
+        )
+        msg.hurdle_intersection_distance_px = (
+            cross_distance if cross_distance is not None else -1.0
+        )
 
         self.hurdle_pub.publish(msg)
 

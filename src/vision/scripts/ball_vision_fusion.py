@@ -60,7 +60,6 @@ class BallVisionFusionNode(Node):
         self.declare_parameter("webcam_timeout_sec", 0.5)
         self.declare_parameter("hoop_timeout_sec", 0.5)
         self.declare_parameter("publish_hz", 15.0)
-        self.declare_parameter("print_every_n_frames", 10)
 
         def text_param(name: str) -> str:
             return str(self.get_parameter(name).value)
@@ -87,9 +86,6 @@ class BallVisionFusionNode(Node):
         self.webcam_timeout_sec = float_param("webcam_timeout_sec")
         self.hoop_timeout_sec = float_param("hoop_timeout_sec")
         self.publish_hz = float_param("publish_hz")
-        self.print_every_n_frames = max(
-            1, int(self.get_parameter("print_every_n_frames").value)
-        )
 
         self.latest_realsense: Optional[Dict[str, Any]] = None
         self.latest_realsense_time = 0.0
@@ -102,7 +98,6 @@ class BallVisionFusionNode(Node):
         self.webcam_ball_allowed = bool(
             self.get_parameter("webcam_allowed_on_start").value
         )
-        self.frame_count = 0
         self.last_realsense_diagnostic_label: Optional[str] = None
         self.ball_detection_active = bool(
             self.get_parameter("active_on_start").value
@@ -204,7 +199,6 @@ class BallVisionFusionNode(Node):
         self.latest_hoop = None
         self.latest_hoop_time = 0.0
         self.ball_in_hand = False
-        self.frame_count = 0
         self.last_realsense_diagnostic_label = None
         self._set_webcam_ball_active(False, "mission start reset")
         self.ball_status_publisher.reset_for_mission_start()
@@ -755,16 +749,6 @@ class BallVisionFusionNode(Node):
         self.pub_vision_state.publish(
             String(data=json.dumps(output, ensure_ascii=False))
         )
-
-        self.frame_count += 1
-        if self.frame_count % self.print_every_n_frames == 0:
-            self.get_logger().info(
-                f"ball_vision src={source} "
-                f"rs={features['realsense_ball_detected']} "
-                f"webcam={features['webcam_ball_detected']} "
-                f"hand={features['ball_in_hand']} "
-                f"status={status} angle={angle:.2f}"
-            )
 
     @staticmethod
     def _age(

@@ -16,7 +16,6 @@ import os
 import shlex
 import stat
 import sys
-import tempfile
 import time
 import uuid
 
@@ -41,7 +40,7 @@ from launch_ros.actions import Node
 from robot_bringup.depth_settings import depth_parameters
 from robot_bringup.realsense_guard import READY_MARKER
 from robot_bringup.quiet_process import (
-    configure_launch_logging, process_prefix, quiet_python_command,
+    DIAGNOSTICS_ENV, configure_launch_logging, process_prefix, quiet_python_command,
 )
 
 
@@ -112,22 +111,14 @@ def _start_stack(context):
 
 
 def _diagnostics_actions(context):
+    context.environment.pop('IRC_VISION_TRACE_SOCKET', None)
     if not IfCondition(LaunchConfiguration('vision_diagnostics', default='true')).evaluate(context):
-        context.environment.pop('IRC_VISION_TRACE_SOCKET', None)
+        context.environment.pop(DIAGNOSTICS_ENV, None)
         return []
-    # A private per-launch address prevents packets from another run mixing in.
-    # Creating it never opens a camera, GPU or robot device.
-    try:
-        socket_dir = tempfile.mkdtemp(prefix='irc-vdiag-')
-    except OSError as exc:
-        print(f'[VisionDiagnostics] Disabled: cannot create trace socket directory: {exc}', flush=True)
-        context.environment.pop('IRC_VISION_TRACE_SOCKET', None)
-        return []
-    socket_path = os.path.join(socket_dir, 'trace.sock')
+    context.environment[DIAGNOSTICS_ENV] = '1'
     run_id = 'run-' + time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
     root = LaunchConfiguration('vision_diagnostics_dir').perform(context)
     run_directory = os.path.join(root, run_id)
-    context.environment['IRC_VISION_TRACE_SOCKET'] = socket_path
     # The witness stays in launch's process group and only waits for termination
     # signals. It records their provenance without reading keys or forwarding
     # signals to any camera, decision or motion process.
@@ -140,7 +131,7 @@ def _diagnostics_actions(context):
     ), ExecuteProcess(
         name='vision_diagnostics',
         cmd=[sys.executable, '-m', 'robot_bringup.vision_diagnostics',
-             '--socket', socket_path, '--directory', run_directory,
+             '--directory', run_directory,
              '--settings', LaunchConfiguration('settings_ini')],
         output='both', respawn=True, respawn_delay=2.0,
         sigterm_timeout='2.0', sigkill_timeout='1.0',
@@ -172,7 +163,6 @@ def _make_stack_actions(context, webcam_nodes):
     realsense_view_topic = LaunchConfiguration("realsense_view_topic")
     start_ball = LaunchConfiguration("start_ball")
     start_hurdle = LaunchConfiguration("start_hurdle")
-    start_monitor = LaunchConfiguration("start_monitor")
 
     yolo_script = PathJoinSubstitution([scripts_dir, "yolo_detector.py"])
     realsense_yolo_script = PathJoinSubstitution(
@@ -184,9 +174,6 @@ def _make_stack_actions(context, webcam_nodes):
     ball_script = PathJoinSubstitution([scripts_dir, "ball_vision_fusion.py"])
     hurdle_script = PathJoinSubstitution(
         [scripts_dir, "hurdle_vision_fusion.py"]
-    )
-    monitor_script = PathJoinSubstitution(
-        [scripts_dir, "vision_status_monitor.py"]
     )
     rgb_stabilizer_script = PathJoinSubstitution(
         [scripts_dir, "realsense_rgb_stabilizer.py"]
@@ -396,17 +383,6 @@ def _make_stack_actions(context, webcam_nodes):
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
-    monitor_process = ExecuteProcess(
-        name="vision_status_monitor_process",
-        prefix=process_prefix('--python'),
-        cmd=[sys.executable, monitor_script],
-        cwd=scripts_dir,
-        output="both",
-        emulate_tty=True,
-        condition=IfCondition(start_monitor),
-        additional_env={"PYTHONUNBUFFERED": "1"},
-    )
-
     # Without a forced hardware reset the camera normally declares its dynamic
     # RGB parameters within a few seconds.  The stabilizer also waits for the
     # parameter services, so a small launch delay is sufficient.
@@ -420,7 +396,6 @@ def _make_stack_actions(context, webcam_nodes):
         actions=[
             ball_process,
             hurdle_process,
-            monitor_process,
         ],
     )
 
@@ -470,7 +445,7 @@ def generate_launch_description() -> LaunchDescription:
             description='Hide runtime console logs; diagnostic warnings are still recorded.',
         ),
         DeclareLaunchArgument('vision_diagnostics', default_value='true',
-                             description='Record bounded camera health metadata, without images.'),
+                             description='Record control changes and ROS warnings, without periodic sampling.'),
         DeclareLaunchArgument('vision_diagnostics_dir', default_value=PathJoinSubstitution([
             EnvironmentVariable('HOME'), '.ros', 'vision_diagnostics'])),
         DeclareLaunchArgument(
@@ -529,7 +504,6 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument("start_ball", default_value="true"),
         DeclareLaunchArgument("start_hurdle", default_value="true"),
-        DeclareLaunchArgument("start_monitor", default_value="true"),
         DeclareLaunchArgument(
             "webcam_device",
             default_value="auto",
