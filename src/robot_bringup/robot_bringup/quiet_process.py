@@ -104,6 +104,18 @@ def main(argv=None):
     rclpy.init = configured_init
     if Path(command[0]).name.startswith('python'):
         command = command[1:]
+    if not command:
+        parser.error('Python script or -m module required')
+    if command[0] == '-m':
+        if len(command) < 2:
+            parser.error('-m requires a module name')
+        module = command[1]
+        sys.argv = command[1:]
+        # Match python -m: resolve modules from the working directory and
+        # expose the module's filename as argv[0] while executing __main__.
+        sys.path.insert(0, str(Path.cwd()))
+        runpy.run_module(module, run_name='__main__', alter_sys=True)
+        return
     script = command[0]
     sys.argv = command
     sys.path.insert(0, str(Path(script).resolve().parent))

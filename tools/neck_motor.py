@@ -21,7 +21,7 @@ import sys
 import time
 
 
-PORT = '/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRLQ9-if00-port0'
+PORT = '/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRKTW-if00-port0'
 BAUDRATE = 2000000
 NECK_ID = 23
 OPERATING_MODE = 11

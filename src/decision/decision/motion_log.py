@@ -41,6 +41,7 @@ STATE_FIELDS = (
     'post_pick_failure_return_pending', 'startup_back_to_walk_pending',
     'turn_count', 'ball_count', 'goal_count', 'lost_body_turn_count',
     'hurdle_line_turn_count',
+    'hurdle_initial_pose_done', 'hurdle_exception_deadline',
 )
 
 

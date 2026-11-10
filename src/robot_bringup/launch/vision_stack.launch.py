@@ -37,6 +37,7 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 
+from robot_bringup.camera_settings import load_camera_settings, realsense_rgb_parameters
 from robot_bringup.depth_settings import depth_parameters
 from robot_bringup.realsense_guard import READY_MARKER
 from robot_bringup.quiet_process import (
@@ -105,6 +106,10 @@ def _make_webcam_node(context):
 def _start_stack(context):
     # Resolve/validate the webcam before returning ANY process actions.  An
     # exception in a later OpaqueFunction used to leave the driver orphaned.
+    settings_path = LaunchConfiguration("settings_ini").perform(context)
+    for camera, argument in (("webcam", "start_webcam"), ("realsense", "start_realsense")):
+        if IfCondition(LaunchConfiguration(argument)).evaluate(context):
+            load_camera_settings(settings_path, camera)
     webcam_nodes = _make_webcam_node(context)
     diagnostics = _diagnostics_actions(context)
     return diagnostics + _make_stack_actions(context, webcam_nodes)
@@ -153,12 +158,10 @@ def _make_stack_actions(context, webcam_nodes):
     webcam_preview = (
         IfCondition(LaunchConfiguration("start_webcam_viewer")).evaluate(context)
         and IfCondition(LaunchConfiguration("start_webcam")).evaluate(context)
-        and IfCondition(start_yolo).evaluate(context)
     )
     realsense_preview = (
         IfCondition(LaunchConfiguration("start_realsense_viewer")).evaluate(context)
         and IfCondition(start_realsense).evaluate(context)
-        and IfCondition(start_realsense_yolo).evaluate(context)
     )
     realsense_view_topic = LaunchConfiguration("realsense_view_topic")
     start_ball = LaunchConfiguration("start_ball")
@@ -174,9 +177,6 @@ def _make_stack_actions(context, webcam_nodes):
     ball_script = PathJoinSubstitution([scripts_dir, "ball_vision_fusion.py"])
     hurdle_script = PathJoinSubstitution(
         [scripts_dir, "hurdle_vision_fusion.py"]
-    )
-    rgb_stabilizer_script = PathJoinSubstitution(
-        [scripts_dir, "realsense_rgb_stabilizer.py"]
     )
 
     # RealSense color/depth는 하나의 YOLO 노드에서 공과 후프 검출에 사용한다.
@@ -222,34 +222,12 @@ def _make_stack_actions(context, webcam_nodes):
                 # 3=auto. 이 RealSense는 [0, 2]만 지원하므로 한국 실내
                 # 조명에서는 auto(3)가 아니라 60 Hz(2)를 명시한다.
                 "rgb_camera.power_line_frequency": 2,
-                # 시작 직후에는 현장 조명에 적응시킨다. 아래 stabilizer가
-                # 3~5초 뒤 수렴값을 읽고 자동 기능을 끈다.
-                "rgb_camera.enable_auto_exposure": True,
-                "rgb_camera.enable_auto_white_balance": True,
+                # Saved automatic/manual modes remain in effect until changed
+                # in the camera window. No delayed auto-lock overrides them.
+                **(realsense_rgb_parameters(settings_ini.perform(context))
+                   if IfCondition(start_realsense).evaluate(context) else {}),
             }
         ],
-    )
-
-    rgb_stabilizer_process = ExecuteProcess(
-        name="realsense_rgb_stabilizer_process",
-        prefix=process_prefix('--python'),
-        cmd=[
-            sys.executable,
-            rgb_stabilizer_script,
-            "--camera-node",
-            "/camera",
-            "--warmup-seconds",
-            LaunchConfiguration("realsense_rgb_warmup_seconds"),
-            "--power-line-frequency",
-            "2",
-        ],
-        cwd=scripts_dir,
-        output="both",
-        emulate_tty=True,
-        condition=IfCondition(
-            LaunchConfiguration("lock_realsense_rgb_after_warmup")
-        ),
-        additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
     yolo_process = ExecuteProcess(
@@ -338,24 +316,29 @@ def _make_stack_actions(context, webcam_nodes):
             additional_env={"FASTDDS_BUILTIN_TRANSPORTS": "UDPv4"},
             output="both",
         ))
-    for name, topic, enabled in (
-        ("webcam", "/line_tracker/debug_image", webcam_preview),
-        ("realsense", realsense_view_topic, realsense_preview),
+    # Apply camera settings even with previews/YOLO disabled. Each process
+    # owns its camera controls; optional Qt windows open after YOLO is ready.
+    camera_control_processes = []
+    for name, camera_node, enabled, preview, detector, topic, raw_topic in (
+        ("webcam", "/webcam", LaunchConfiguration("start_webcam"), webcam_preview,
+         start_yolo, "/line_tracker/debug_image", "/camera/image_raw"),
+        ("realsense", "/camera", start_realsense, realsense_preview,
+         start_realsense_yolo, realsense_view_topic, "/camera/color/image_raw"),
     ):
-        if not enabled:
+        if not IfCondition(enabled).evaluate(context):
             continue
-        viewer_processes.append(ExecuteProcess(
-            name=f"{name}_image_view",
+        cmd = [sys.executable, "-m", "robot_bringup.camera_controls",
+               "--camera", name, "--camera-node", camera_node,
+               "--settings", settings_ini]
+        if preview:
+            has_detector = IfCondition(detector).evaluate(context)
+            cmd += ["--preview", "--image-topic", topic if has_detector else raw_topic]
+            if has_detector:
+                cmd += ["--ready-topic", preview_ready_topic]
+        camera_control_processes.append(ExecuteProcess(
+            name=f"{name}_camera_controls",
             prefix=process_prefix('--python'),
-            cmd=[
-                sys.executable, ready_gate_script,
-                "--node-name", f"{name}_viewer_gate",
-                "--waiting-message", "Preview is waiting for YOLO readiness.",
-                "--gate-topic", preview_ready_topic,
-                "--", "ros2", "run", "rqt_image_view", "rqt_image_view", topic,
-            ],
-            # Isolate the viewers from stale Fast DDS SHM ports; camera and
-            # inference nodes retain their existing transport configuration.
+            cmd=cmd,
             additional_env={"FASTDDS_BUILTIN_TRANSPORTS": "UDPv4"},
             output="both",
         ))
@@ -383,14 +366,6 @@ def _make_stack_actions(context, webcam_nodes):
         additional_env={"PYTHONUNBUFFERED": "1"},
     )
 
-    # Without a forced hardware reset the camera normally declares its dynamic
-    # RGB parameters within a few seconds.  The stabilizer also waits for the
-    # parameter services, so a small launch delay is sufficient.
-    delayed_rgb_stabilizer = TimerAction(
-        period=3.0,
-        actions=[rgb_stabilizer_process],
-    )
-
     delayed_vision = TimerAction(
         period=2.0,
         actions=[
@@ -401,6 +376,7 @@ def _make_stack_actions(context, webcam_nodes):
 
     startup_actions = [
         *webcam_nodes,
+        *camera_control_processes,
         yolo_process,
         realsense_yolo_process,
         *viewer_processes,
@@ -408,7 +384,6 @@ def _make_stack_actions(context, webcam_nodes):
     ]
     if not IfCondition(start_realsense).evaluate(context):
         return startup_actions
-    startup_actions.insert(0, delayed_rgb_stabilizer)
     return _after_camera_ownership(context, realsense_node, startup_actions)
 
 
@@ -480,17 +455,17 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("start_realsense_yolo", default_value="true"),
         DeclareLaunchArgument(
             "show_preview", default_value="false",
-            description="Open detection views and the depth exposure tuner; overrides INI preview settings.",
+            description="Open camera detection views with RGB controls and the depth exposure tuner.",
         ),
         DeclareLaunchArgument(
             "start_webcam_viewer",
             default_value=LaunchConfiguration("show_preview"),
-            description="Open the webcam detection/status view.",
+            description="Open webcam video with live camera controls and INI save.",
         ),
         DeclareLaunchArgument(
             "start_realsense_viewer",
             default_value=LaunchConfiguration("show_preview"),
-            description="Open the RealSense detection/status view and enable its debug images.",
+            description="Open RealSense RGB video with live camera controls and INI save.",
         ),
         DeclareLaunchArgument(
             "start_depth_viewer",
@@ -500,7 +475,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "realsense_view_topic",
             default_value="/vision/realsense_combined_image",
-            description="RealSense YOLO debug image topic shown by rqt.",
+            description="RealSense YOLO image topic shown in the camera control window.",
         ),
         DeclareLaunchArgument("start_ball", default_value="true"),
         DeclareLaunchArgument("start_hurdle", default_value="true"),
@@ -515,19 +490,6 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("webcam_width", default_value="640"),
         DeclareLaunchArgument("webcam_height", default_value="480"),
         DeclareLaunchArgument("webcam_fps", default_value="30"),
-        DeclareLaunchArgument(
-            "lock_realsense_rgb_after_warmup",
-            default_value="true",
-            description=(
-                "Warm up RealSense RGB auto exposure/WB, then lock the "
-                "settled values for stable YOLO input."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "realsense_rgb_warmup_seconds",
-            default_value="5.0",
-            description="Auto exposure/WB warmup time before locking.",
-        ),
     ]
     return LaunchDescription(declarations + [
         OpaqueFunction(function=configure_launch_logging),

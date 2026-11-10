@@ -3,6 +3,7 @@ import os
 import math
 import time
 import json
+import uuid
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -12,6 +13,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from decision.vision_startup_gate import VisionStartupGate
 from decision.motion_log import TOPIC, clear_details, decision_scope, emit_motion, remember_hurdle
+from hurdle_detection_block import HurdleDetectionBlock
 
 class Motion:
     Initial_Pose = 0
@@ -81,11 +83,9 @@ class Ball:
     Ball_None = 99
     Ball_Lost = 45
     Pick_Ready = Motion.Pick
-    Shoot = Motion.Shoot
     Shoot_Close = Motion.Shoot_Close
     Shoot_Mid = Motion.Shoot_Mid
     Shoot_65 = Motion.Shoot_65
-    Shoot_60 = Motion.Shoot_60
 
 class Line:
     Line_None = 99
@@ -207,7 +207,6 @@ class MainDecision(Node):
         self.neck_down_pending = False
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
-        self.post_shoot_motion = None
         self.turn_shoot = Motion.Right_Turn
         # Shoot 명령 발행부터 Shoot 이후 강제회전 종료까지 공/골대 검출을 모두 중지한다.
         self.post_shoot_detection_suppressed = False
@@ -227,6 +226,8 @@ class MainDecision(Node):
         self.hurdle_detected = False
         self.hurdle_go_active = False
         self.hurdle_go_started = False
+        self.hurdle_detection_block = HurdleDetectionBlock()
+        MainDecision._reset_hurdle_exception_recovery(self)
         self.hurdle_ball_suppressed = False
         self.hurdle_previous_ball_active = True
         MainDecision._reset_hurdle_line_search(self)
@@ -402,6 +403,10 @@ class MainDecision(Node):
         self.post_pick_failure_timer = self.create_timer(
             0.02, self._check_post_pick_failure_wait,
         )
+        self.hurdle_exception_timer = self.create_timer(
+            0.02, self._check_hurdle_exception_timeout,
+            clock=self.vision_startup_clock,
+        )
 
         #vision의 공 검출 상태 저장
         self.ball_vision_active = None
@@ -569,8 +574,12 @@ class MainDecision(Node):
         self.hurdle_detected = False
         self.hurdle_ignore_until = None
         self.hurdle_step = 0
+        detection_block = getattr(self, 'hurdle_detection_block', None)
+        if detection_block is not None:
+            detection_block.reset()
         self.hurdle_forward_started = False
         self.hurdle_ignore_active = True
+        MainDecision._reset_hurdle_exception_recovery(self)
         self.mission_started = True
         MainDecision._set_mission_armed_state(self, False)
         self.mission_started_at = time.monotonic()
@@ -792,6 +801,21 @@ class MainDecision(Node):
         self.motion_ready = motion_end_msg.motion_ready
         self.motion_end = motion_end_msg.motion_end
 
+        detection_block = getattr(self, 'hurdle_detection_block', None)
+        if detection_block is not None and detection_block.observe(motion_end_msg, received_at):
+            self.get_logger().info(
+                '[HurdleReentryBlock] approach started: ignore new hurdle '
+                'results for 30.0s; finish the current crossing normally.'
+            )
+
+        if getattr(self, 'hurdle_initial_pose_pending', False):
+            if not self.motion_end:
+                self.hurdle_initial_pose_started = True
+            elif self.motion_ready and self.hurdle_initial_pose_started:
+                self.hurdle_initial_pose_pending = False
+                self.hurdle_initial_pose_started = False
+                self.hurdle_initial_pose_done = True
+
         # 허들 전진 모션은 실제 실행 시작(false) 후 완료(true)를 확인해야 한다.
         # 전진 중 교점을 놓쳐도 새 비전 투표 없이 19번으로 이어간다.
         if (
@@ -837,6 +861,13 @@ class MainDecision(Node):
                 self.hurdle_go_active = False
                 self.hurdle_go_started = False
                 self.hurdle_detected = False
+                if MainDecision._hurdle_reentry_blocked(self):
+                    # Do not let queued pre-crossing positives own the next decision.
+                    MainDecision._clear_hurdle_result_votes(self)
+                    self.hurdle_data = False
+                    self.hurdle_ready = False
+                    self.latest_hurdle_angle = 0.0
+                MainDecision._reset_hurdle_exception_recovery(self)
                 if getattr(self, 'hurdle_ball_suppressed', False):
                     self.hurdle_ball_suppressed = False
                     MainDecision._set_vision_activity(
@@ -1440,8 +1471,8 @@ class MainDecision(Node):
                 Motion.Left_Turn, Motion.Right_Turn, Motion.Backward_half,
                 Motion.Left_Turn_Mission_5, Motion.Right_Turn_Mission_5,
                 Motion.Left_Turn_Shoot_3, Motion.Right_Turn_Shoot_3,
-                Motion.Shoot_Forward, Motion.Shoot, Motion.Shoot_Close,
-                Motion.Shoot_Mid, Motion.Shoot_65, Motion.Shoot_60,
+                Motion.Shoot_Forward, Motion.Shoot_Close,
+                Motion.Shoot_Mid, Motion.Shoot_65,
             )
         )
         vote = dict(detail, status=detail['status'] if valid else Ball.Ball_None)
@@ -1663,8 +1694,7 @@ class MainDecision(Node):
         )
         with decision_scope(self, 'goal_recheck' if detail else 'goal_timeout', ball_details=evidence):
             if status in (
-                Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
-                Ball.Shoot_60,
+                Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
             ):
                 MainDecision._execute_shoot(self, status)
             else:
@@ -1713,11 +1743,14 @@ class MainDecision(Node):
             self.hurdle_data = False
             self.hurdle_ignore_active = False
 
+        # This is separate from the startup gate: never clear the current
+        # approach/crossing flags while blocking a second hurdle entry.
+        suppress_hurdle = ignore_hurdle or MainDecision._hurdle_reentry_blocked(self)
         hurdle_status = (
-            Hurdle.Hurdle_None if ignore_hurdle else hurdle_msg.status
+            Hurdle.Hurdle_None if suppress_hurdle else hurdle_msg.status
         )
-        hurdle_ready = False if ignore_hurdle else hurdle_msg.hurdle_ready
-        self.latest_hurdle_angle = 0.0 if ignore_hurdle else hurdle_msg.angle
+        hurdle_ready = False if suppress_hurdle else hurdle_msg.hurdle_ready
+        self.latest_hurdle_angle = 0.0 if suppress_hurdle else hurdle_msg.angle
 
         if (
             not self.motion_ready
@@ -1744,7 +1777,7 @@ class MainDecision(Node):
         self.hurdle_buffer.append(hurdle_status)
         self.hurdle_ready_buffer.append(bool(hurdle_ready))
         remember_hurdle(
-            self, hurdle_status, self.latest_hurdle_angle, hurdle_ready, ignore_hurdle,
+            self, hurdle_status, self.latest_hurdle_angle, hurdle_ready, suppress_hurdle,
             hurdle_msg.hurdle_intersection_distance_px,
         )
         if self.motion_end == True:
@@ -1752,6 +1785,9 @@ class MainDecision(Node):
 
     #모션 종료 후 저장된 비전값으로 다음 행동 결정
     def _try_decision_from_cached_results(self):
+        deadline = getattr(self, 'hurdle_exception_deadline', None)
+        if deadline is not None and time.monotonic() >= deadline:
+            return MainDecision._check_hurdle_exception_timeout(self)
         if MainDecision._pick_recheck_blocks_decision(self):
             return False
         if MainDecision._goal_pose_recheck_blocks_decision(self):
@@ -1929,7 +1965,9 @@ class MainDecision(Node):
                 if status != Hurdle.Hurdle_None
             ]
             if not hurdle_status_candidates:
-                return False
+                return MainDecision._begin_hurdle_exception_recovery(
+                    self, 'confirmed hurdle has no usable intersection/status',
+                )
         forward_statuses = HURDLE_FORWARD_MOTIONS
         # ready가 false인 동안에는 모든 허들 전진 모션을 상태 투표에서 제외
         if not self.hurdle_ready and not hurdle_search_active:
@@ -1955,9 +1993,12 @@ class MainDecision(Node):
                 if ready and status in forward_statuses
             )
             ranked = forward_votes.most_common()
+            if self.hurdle_buffer[-1] == Hurdle.Hurdle_None:
+                return MainDecision._begin_hurdle_exception_recovery(
+                    self, 'latest hurdle intersection/status is missing',
+                )
             if (
-                self.hurdle_buffer[-1] == Hurdle.Hurdle_None
-                or sum(forward_votes.values()) < 3
+                sum(forward_votes.values()) < 3
                 or (len(ranked) > 1 and ranked[0][1] == ranked[1][1])
             ):
                 return False
@@ -2110,8 +2151,8 @@ class MainDecision(Node):
             if self.pick_failed:
                 self.goal_count += 1
 
-        # 최소 한 번 회전한 뒤, 라인이 보이면 회전 종료
-        if self.turn_count > 0 and self.line_status != Line.Line_None:
+        # 최소 3회 회전한 뒤, 라인이 보이면 회전 종료
+        if self.turn_count >= 3 and self.line_status != Line.Line_None:
             MainDecision._finish_post_pick_turn(self)
             self.turn_count = 0
             self.pick_try_count = 0
@@ -2146,15 +2187,11 @@ class MainDecision(Node):
         self.MotionCommand()
 
     def TurnAfterShoot(self):
-        shoot_13_return = (
-            getattr(self, 'post_shoot_motion', None) == Motion.Shoot
-        )
         #회전 시작 첫 호출 시에만 방향을 결정
         if self.turn_count == 0:
             if self.goal_count == 0:
                 self.turn_shoot = Motion.Right_Turn_Afterpick
-            elif self.goal_count == 1 or shoot_13_return:
-                # 13번은 세 번째 이후에도 마지막 골대의 왼쪽 방향으로 탐색한다.
+            elif self.goal_count == 1:
                 self.turn_shoot = Motion.Left_Turn_Afterpick
             else:
                 self._finish_turn_after_shoot('post-shoot turn skipped')
@@ -2163,12 +2200,10 @@ class MainDecision(Node):
 
             self.goal_count += 1
 
-        # 13번만 짧은 30/31번 회전을 최소 5회 수행한다.
-        # 나머지 Shoot은 최소 4회 회전한다.
+        # 슛 후 30/31번 회전을 최소 4회 수행한다.
         # 그 뒤부터 라인이 보이면 회전을 끝내고 보행 자세로 복귀한다.
-        min_turn_count = 5 if shoot_13_return else 4
         if (
-            self.turn_count >= min_turn_count
+            self.turn_count >= 4
             and self.line_status != Line.Line_None
         ):
             self.turn_after_shoot = False
@@ -2181,8 +2216,7 @@ class MainDecision(Node):
             self.MotionCommand()
             return
         
-        # 13번은 라인이 보일 때까지 계속 회전한다. 다른 슛은 기존 10회 제한.
-        if not shoot_13_return and self.turn_count >= 10:
+        if self.turn_count >= 10:
             self._finish_turn_after_shoot('post-shoot turn limit reached')
             self.LostMode()
             return
@@ -2195,7 +2229,6 @@ class MainDecision(Node):
         """강제회전을 끝내고 다음 공의 RealSense 검출을 시작한다."""
         self.turn_after_shoot = False
         self.back_to_walk_after_shoot = False
-        self.post_shoot_motion = None
         self.turn_count = 0
 
         # 골대 또는 Shoot 직후 결과가 이후 판단에 섞이지 않도록 기존
@@ -2320,8 +2353,7 @@ class MainDecision(Node):
         if self.has_ball == True:
             #shoot 준비완료
             if self.ball_status in (
-                Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
-                Ball.Shoot_60,
+                Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
             ):
                 MainDecision._execute_shoot(self, self.ball_status)
                 return
@@ -2333,8 +2365,7 @@ class MainDecision(Node):
         ##### 공이 없으면 Pick Mode #####
         #공이 없는데 ShootReady이면 무시
         if self.ball_status in (
-            Ball.Shoot, Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
-            Ball.Shoot_60,
+            Ball.Shoot_Close, Ball.Shoot_Mid, Ball.Shoot_65,
         ):
             self.LineTracking()
             return
@@ -2365,7 +2396,6 @@ class MainDecision(Node):
 
         MainDecision._reset_goal_recheck(self, clear_seen=True)
         self.status = status
-        self.post_shoot_motion = status
         self.has_ball = False
         self.pick_done = False
         self.turn_after_pick = False
@@ -2420,6 +2450,10 @@ class MainDecision(Node):
                     MainDecision._advance_hurdle_line_search(self)
                     return
                 if self.hurdle_status == Hurdle.Hurdle_None:
+                    if MainDecision._begin_hurdle_exception_recovery(
+                        self, 'hurdle mode has no actionable status',
+                    ):
+                        return
                     self.get_logger().info(
                         "HurdleMode에서 status=99는 모션으로 발행하지 않습니다."
                     )
@@ -2431,6 +2465,10 @@ class MainDecision(Node):
 
             # 정렬/거리 투표가 선택한 전진 모션을 한 번만 실행한다.
             if self.hurdle_status not in HURDLE_FORWARD_MOTIONS:
+                if MainDecision._begin_hurdle_exception_recovery(
+                    self, 'hurdle ready without a forward motion',
+                ):
+                    return
                 self._reset_vision_decision_cycle()
                 return
             self.hurdle_step = 1
@@ -2442,6 +2480,10 @@ class MainDecision(Node):
         #step 1: 허들 넘기 실행
         elif self.hurdle_step == 1:
             MainDecision._finish_hurdle_forward(self)
+        else:
+            MainDecision._begin_hurdle_exception_recovery(
+                self, f'unsupported hurdle step={self.hurdle_step}',
+            )
 
     def _finish_hurdle_forward(self):
         """Finish any approach motion before crossing, even without vision."""
@@ -2519,7 +2561,9 @@ class MainDecision(Node):
             MainDecision._reset_hurdle_line_search(self)
             self.status = Motion.Backward_half
         else:
-            return False
+            return MainDecision._begin_hurdle_exception_recovery(
+                self, f'unsupported hurdle search step={step}',
+            )
 
         self.get_logger().info(
             f"[HurdleLineSearch] step={self.hurdle_line_search_step}, "
@@ -2752,9 +2796,21 @@ class MainDecision(Node):
         clear_details(self, 'ball')
         if getattr(self, 'ball_start_reset_pending', False):
             self.ball_buffer.extend([Ball.Ball_None] * 3)
+        MainDecision._clear_hurdle_result_votes(self)
+
+    def _hurdle_reentry_blocked(self):
+        block = getattr(self, 'hurdle_detection_block', None)
+        return block is not None and block.active(time.monotonic())
+
+    def _clear_hurdle_result_votes(self):
         self.hurdle_buffer.clear()
         clear_details(self, 'hurdle')
         self.hurdle_ready_buffer.clear()
+        if MainDecision._hurdle_reentry_blocked(self):
+            # A blocked detector is known to be ineligible. Other vision
+            # inputs need not wait for three redundant hurdle-none messages.
+            self.hurdle_buffer.extend([Hurdle.Hurdle_None] * 3)
+            self.hurdle_ready_buffer.extend([False] * 3)
 
     def _begin_post_pick_failure_ball_suppression(self):
         """Keep RealSense on but suppress webcam during failed-pick recovery."""
@@ -2851,6 +2907,90 @@ class MainDecision(Node):
         )
         self.MotionCommand()
 
+    def _reset_hurdle_exception_recovery(self):
+        self.hurdle_initial_pose_pending = False
+        self.hurdle_initial_pose_started = False
+        self.hurdle_initial_pose_done = False
+        self.hurdle_exception_deadline = None
+
+    def _begin_hurdle_exception_recovery(self, reason):
+        """After hurdle 27 completes, allow fresh vision 0.5 s to recover."""
+        if (
+            self.current_mode != 'HurdleMode'
+            or not getattr(self, 'hurdle_detected', False)
+            or not getattr(self, 'hurdle_initial_pose_done', False)
+            or getattr(self, 'hurdle_go_active', False)
+            or getattr(self, 'hurdle_step', 0) == 1
+            or not self.motion_ready
+            or not self.motion_end
+            or not MainDecision._mission_has_started(self)
+            or not MainDecision._vision_stack_ready(self)
+            or getattr(self, 'vision_reset_pending', False)
+        ):
+            return False
+        # 반복 예외는 기한을 연장하거나 수집 중인 새 비전 표를 지우지 않는다.
+        # HurdleMode에서 판단 플래그를 설정한 뒤 들어온 경우에도 재판단한다.
+        self.line_data = False
+        self.ball_data = False
+        self.hurdle_data = False
+        if getattr(self, 'hurdle_exception_deadline', None) is not None:
+            return True
+        self.hurdle_exception_deadline = time.monotonic() + 0.5
+        self.hurdle_step = 0
+        self.hurdle_forward_started = False
+        MainDecision._reset_hurdle_line_search(self)
+        self._reset_vision_decision_cycle()
+        self.get_logger().warning(
+            f'[HurdleExceptionRecovery] {reason}: '
+            '27 already completed; wait up to 0.5s for a normal vision command, '
+            'otherwise execute 26 -> 19'
+        )
+        return True
+
+    def _check_hurdle_exception_timeout(self):
+        deadline = getattr(self, 'hurdle_exception_deadline', None)
+        if deadline is None or time.monotonic() < deadline:
+            return False
+        if (
+            self.current_mode != 'HurdleMode'
+            or not getattr(self, 'hurdle_detected', False)
+            or not getattr(self, 'hurdle_initial_pose_done', False)
+            or getattr(self, 'hurdle_go_active', False)
+            or getattr(self, 'hurdle_step', 0) == 1
+        ):
+            self.hurdle_exception_deadline = None
+            return False
+        if (
+            not self.motion_ready
+            or not self.motion_end
+            or not MainDecision._mission_has_started(self)
+            or not MainDecision._vision_stack_ready(self)
+            or getattr(self, 'vision_reset_pending', False)
+        ):
+            return False
+        # 새 비전이 전혀 오지 않아도 타이머가 실행한다. 27은 반복하지 않는다.
+        # 기존 전진 완료 경로가 26의 false -> true 확인 후 19를 실행한다.
+        self.hurdle_exception_deadline = None
+        with decision_scope(self, 'hurdle_exception_timeout', line=True, hurdle=True):
+            self.hurdle_step = 1
+            self.hurdle_forward_started = False
+            self.status = Motion.Hurdle_Forward_20
+            self.get_logger().info(
+                '[HurdleExceptionRecovery] 0.5s expired without a normal command: '
+                'execute 26, then 19 after MotionEnd (27 already completed)'
+            )
+            self.MotionCommand()
+        return True
+
+    def _cancel_hurdle_exception_wait(self, command):
+        if getattr(self, 'hurdle_exception_deadline', None) is None:
+            return
+        self.hurdle_exception_deadline = None
+        self.get_logger().info(
+            f'[HurdleExceptionRecovery] normal command={command}: '
+            'cancel exception wait and resume existing logic'
+        )
+
     def MotionCommand(self):
         if (
             getattr(self, 'pick_recheck_motion_active', False)
@@ -2918,9 +3058,6 @@ class MainDecision(Node):
         elif self.status == 12:
             motion_msg.command = Motion.Pick
         
-        elif self.status == 13:
-            motion_msg.command = Motion.Shoot
-
         elif self.status == 14:
             motion_msg.command = Motion.Neck_Up
 
@@ -2999,9 +3136,6 @@ class MainDecision(Node):
         elif self.status == 39:
             motion_msg.command = Motion.Left_Turn_4
 
-        elif self.status == 40:
-            motion_msg.command = Motion.Shoot_60
-
         elif self.status == 41:
             motion_msg.command = Motion.Ball_ForwardHalf_2
 
@@ -3015,6 +3149,10 @@ class MainDecision(Node):
             motion_msg.command = Motion.Hurdle_Forward_400
 
         else:
+            if MainDecision._begin_hurdle_exception_recovery(
+                self, f'unsupported hurdle motion status={self.status}',
+            ):
+                return
             # 미지원 상태가 메시지 기본값 0(Initial_Pose)으로 발행되지
             # 않게 한다. 새 판단에 쓸 비전 버퍼와 motion_end는 유지한다.
             self.get_logger().info(
@@ -3075,12 +3213,24 @@ class MainDecision(Node):
         if motion_msg.command == Motion.Back_To_Walk and getattr(self, 'has_ball', False):
             self.goal_initial_pending = False
             self.goal_initial_done = False
+        if (
+            motion_msg.command == Motion.Back_To_Initial
+            and self.current_mode == 'HurdleMode'
+        ):
+            self.hurdle_initial_pose_pending = True
+            self.hurdle_initial_pose_started = False
+            self.hurdle_initial_pose_done = False
+        MainDecision._cancel_hurdle_exception_wait(self, motion_msg.command)
+        # New identity for every execution, including repeats and node restarts.
+        # Completion handling and mission sequencing remain unchanged.
+        motion_msg.request_id = uuid.uuid4().hex
         self.motion_pub.publish(motion_msg)
         emit_motion(self, motion_msg.command)
         motion_name = MOTION_NAME.get(motion_msg.command, 'Unknown')
         self.get_logger().info(
             f"[MotionCommand] command={motion_msg.command}, "
-            f"motion={motion_name}, mode={self.current_mode}"
+            f"motion={motion_name}, mode={self.current_mode}, "
+            f"request_id={motion_msg.request_id}"
         )
         if getattr(self, 'first_motion_after_start_pending', False):
             started_at = getattr(self, 'mission_started_at', None)

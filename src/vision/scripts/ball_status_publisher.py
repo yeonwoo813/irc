@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 from rclpy.node import Node
 from msgs.msg import BallResult, MotionCommand, MotionEnd
+from motion_completion_gate import MotionCompletionGate
 
 
 class BallStatus:
@@ -22,7 +23,6 @@ class BallStatus:
     Left_Move = 10
     Right_Move = 11
     Pick_Ready = 12
-    Shoot = 13
     Neck_Up = 14
     Neck_Down = 18
     Left_Half_Forward_3step = 21
@@ -43,7 +43,6 @@ class BallStatus:
     Right_Turn_Shoot_3 = 37
     Right_Turn_4 = 38
     Left_Turn_4 = 39
-    Shoot_60 = 40
     Ball_ForwardHalf_2 = 41
     Ball_Lost = 45
     Ball_None = 99
@@ -83,32 +82,22 @@ class BallDecision:
         # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
         # 27번 뒤에는 새 검출을 재확인하고, 33번 뒤에는 verified 결과를 쓴다.
         self.goal_pre_shoot_entry_distance_cm = 85.0
-        self.goal_shoot_max_distance_cm = 72.0
-        self.goal_shoot_min_distance_cm = 70.0
         self.goal_mid_shoot_max_distance_cm = 70.0
         self.goal_mid_shoot_min_distance_cm = 68.0
         self.goal_65_shoot_max_distance_cm = 68.0
         self.goal_65_shoot_min_distance_cm = 65.0
         self.goal_close_shoot_max_distance_cm = 65.0
         self.goal_close_shoot_min_distance_cm = 63.0
-        self.goal_60_shoot_max_distance_cm = 63.0
-        self.goal_60_shoot_min_distance_cm = 60.0
-        self.goal_too_close_distance_cm = 60.0
 
         self.goal_approach_center_min = -5.0
         self.goal_approach_center_max = 5.0
         self.goal_approach_large_angle = 60.0
-        self.goal_shoot_60_min = -7.0
-        self.goal_shoot_60_max = -3.5
         self.goal_shoot_close_min = -7.0
         self.goal_shoot_close_max = -3.5
         self.goal_shoot_65_min = -7.0
         self.goal_shoot_65_max = -3.0
         self.goal_shoot_mid_min = -5.0
         self.goal_shoot_mid_max = -1.0
-        self.goal_shoot_far_min = -5.0
-        self.goal_shoot_far_max = 0.0
-        self.goal_shoot_large_angle = 20.0
 
         # Webcam 접근 및 pick 기준
         self.webcam_angle_center_tol = 8.0
@@ -222,18 +211,12 @@ class BallDecision:
         ):
             return BallStatus.Ball_None, 0.0
 
-        if distance < self.goal_too_close_distance_cm:
+        if distance <= self.goal_close_shoot_min_distance_cm:
             return BallStatus.Backward_half, 0.0
 
-        if distance <= self.goal_shoot_max_distance_cm:
-            # 60 [60, 63], Close (63, 65], 65 (65, 68], Mid (68, 70], Shoot (70, 72].
+        if distance <= self.goal_mid_shoot_max_distance_cm:
+            # Close (63, 65], 65 (65, 68], Mid (68, 70].
             if (
-                self.goal_60_shoot_min_distance_cm
-                <= distance
-                <= self.goal_60_shoot_max_distance_cm
-            ):
-                shoot_status = BallStatus.Shoot_60
-            elif (
                 self.goal_close_shoot_min_distance_cm
                 < distance
                 <= self.goal_close_shoot_max_distance_cm
@@ -251,8 +234,6 @@ class BallDecision:
                 <= self.goal_mid_shoot_max_distance_cm
             ):
                 shoot_status = BallStatus.Shoot_Mid
-            elif distance > self.goal_shoot_min_distance_cm:
-                shoot_status = BallStatus.Shoot
             else:
                 return BallStatus.Ball_None, 0.0
             return self._shoot_status_from_goal_angle(angle, shoot_status)
@@ -280,10 +261,7 @@ class BallDecision:
         angle: float,
         shoot_status: int,
     ) -> Tuple[int, float]:
-        if shoot_status == BallStatus.Shoot_60:
-            center_min = self.goal_shoot_60_min
-            center_max = self.goal_shoot_60_max
-        elif shoot_status == BallStatus.Shoot_Close:
+        if shoot_status == BallStatus.Shoot_Close:
             center_min = self.goal_shoot_close_min
             center_max = self.goal_shoot_close_max
         elif shoot_status == BallStatus.Shoot_65:
@@ -293,8 +271,7 @@ class BallDecision:
             center_min = self.goal_shoot_mid_min
             center_max = self.goal_shoot_mid_max
         else:
-            center_min = self.goal_shoot_far_min
-            center_max = self.goal_shoot_far_max
+            return BallStatus.Ball_None, 0.0
 
         # 모든 슛에서 큰 각도에 동일한 5도 회전 기준 적용
         if angle <= -15.0:
@@ -332,7 +309,7 @@ class BallStatusPublisher:
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
         self.pick_return_motion_active = False
-        self.pick_return_motion_started = False
+        self._pick_return_completion = MotionCompletionGate()
         self.webcam_resume_after = None
         self.pick_command_seen = False
         # Pick 이후 비전에서 true를 한 번 확인하면 Shoot 완료까지
@@ -349,7 +326,7 @@ class BallStatusPublisher:
         self.pre_shoot_distance_buffer = deque(maxlen=3)
         self.last_pre_shoot_goal_stamp_sec = None
         self.pre_shoot_motion_active = False
-        self.pre_shoot_motion_started = False
+        self._pre_shoot_completion = MotionCompletionGate()
         self.pre_shoot_verified_pending = False
         self.pre_shoot_cancel_pending = False
         self.pre_shoot_motion_name = None
@@ -382,7 +359,7 @@ class BallStatusPublisher:
         self.back_to_initial_waiting = False
         self.back_to_initial_done = False
         self.pick_return_motion_active = False
-        self.pick_return_motion_started = False
+        self._pick_return_completion.cancel()
         self.webcam_resume_after = None
 
     def _clock_seconds(self) -> float:
@@ -401,7 +378,7 @@ class BallStatusPublisher:
         self.pre_shoot_distance_buffer.clear()
         self.last_pre_shoot_goal_stamp_sec = None
         self.pre_shoot_motion_active = False
-        self.pre_shoot_motion_started = False
+        self._pre_shoot_completion.cancel()
         self.pre_shoot_verified_pending = False
         self.pre_shoot_cancel_pending = False
         self.pre_shoot_motion_name = None
@@ -413,6 +390,8 @@ class BallStatusPublisher:
         """Discard every decision state derived before the operator starts."""
         self._reset_webcam_detection_cycle()
         self._reset_shoot_cycle()
+        self._pick_return_completion.reset()
+        self._pre_shoot_completion.reset()
         self.pick_command_seen = False
         self.ball_in_hand = False
         self._latest_motion_end = None
@@ -432,10 +411,15 @@ class BallStatusPublisher:
         ):
             # The decision node timed out after the pick-only 27. Do not
             # confirm another webcam approach while motion 25 is running.
+            if self._pick_return_completion.has_seen(msg):
+                return
             self._reset_webcam_detection_cycle()
+            self._pick_return_completion.begin(msg)
             self.pick_return_motion_active = True
-            self.pick_return_motion_started = self._latest_motion_end is False
             self._log_info('[PickRecheck] returning to walk; suspend webcam entry.')
+            if not getattr(msg, 'request_id', ''):
+                self._log_info('Pick return command has no request_id; completion remains blocked.')
+            self._finish_pick_return_if_complete()
 
         goal_pose_return = bool(
             self.shoot_initial_done
@@ -474,7 +458,7 @@ class BallStatusPublisher:
         ):
             self.shoot_initial_waiting = False
             self.shoot_initial_done = True
-            self._wait_for_pre_shoot_motion('Back_To_Initial')
+            self._wait_for_pre_shoot_motion('Back_To_Initial', msg)
 
         if (
             command == BallStatus.Shoot_Forward
@@ -484,14 +468,12 @@ class BallStatusPublisher:
         ):
             # 33번은 공과 슛 준비 자세를 유지한다. 27번을 재요청하지 않고
             # 이번 미세전진의 MotionEnd 이후 골대 결과만 다시 확인한다.
-            self._wait_for_pre_shoot_motion('Shoot_Forward')
+            self._wait_for_pre_shoot_motion('Shoot_Forward', msg)
 
         if command in (
-            BallStatus.Shoot,
             BallStatus.Shoot_Close,
             BallStatus.Shoot_Mid,
             BallStatus.Shoot_65,
-            BallStatus.Shoot_60,
         ):
             self.shoot_command_seen = True
 
@@ -526,19 +508,25 @@ class BallStatusPublisher:
                 "lock released."
             )
 
-    def _wait_for_pre_shoot_motion(self, motion_name: str) -> None:
+    def _wait_for_pre_shoot_motion(self, motion_name: str, msg: MotionCommand) -> None:
+        if not self._pre_shoot_completion.begin(msg):
+            return
         self.pre_shoot_motion_name = motion_name
         self.pre_shoot_motion_active = True
-        self.pre_shoot_motion_started = self._latest_motion_end is False
         self.pre_shoot_verified_pending = False
         self._log_info(
             f"Shoot {motion_name} execution confirmed; "
             "wait for its MotionEnd before verified goal result."
         )
+        if not getattr(msg, 'request_id', ''):
+            self._log_info('Pre-Shoot command has no request_id; completion remains blocked.')
+        self._finish_pre_shoot_if_complete()
 
     def _motion_end_callback(self, msg: MotionEnd) -> None:
         motion_ended = bool(msg.motion_end)
         self._latest_motion_end = motion_ended
+        self._pick_return_completion.observe(msg)
+        self._pre_shoot_completion.observe(msg)
 
         if self.shoot_return_motion_active:
             if not motion_ended:
@@ -555,26 +543,25 @@ class BallStatusPublisher:
             return
 
         if self.pick_return_motion_active:
-            if not motion_ended:
-                self.pick_return_motion_started = True
-            elif self.pick_return_motion_started:
-                self._reset_webcam_detection_cycle()
-                self.webcam_resume_after = self._clock_seconds()
-                self._log_info(
-                    '[PickRecheck] walk restored; restart webcam entry with new frames.'
-                )
+            self._finish_pick_return_if_complete()
             return
 
-        if not self.pre_shoot_motion_active:
+        self._finish_pre_shoot_if_complete()
+
+    def _finish_pick_return_if_complete(self) -> None:
+        if not self.pick_return_motion_active or not self._pick_return_completion.consume():
             return
-        if not motion_ended:
-            self.pre_shoot_motion_started = True
-            return
-        if not self.pre_shoot_motion_started:
+        self._reset_webcam_detection_cycle()
+        self.webcam_resume_after = self._clock_seconds()
+        self._log_info(
+            '[PickRecheck] walk restored; restart webcam entry with new frames.'
+        )
+
+    def _finish_pre_shoot_if_complete(self) -> None:
+        if not self.pre_shoot_motion_active or not self._pre_shoot_completion.consume():
             return
 
         self.pre_shoot_motion_active = False
-        self.pre_shoot_motion_started = False
         self.pre_shoot_verified_pending = True
         self._log_info(
             "Pre-Shoot positioning MotionEnd confirmed; the next valid "
@@ -758,11 +745,9 @@ class BallStatusPublisher:
             self.ball_in_hand
             and not self.shoot_initial_done
             and status in (
-                BallStatus.Shoot,
                 BallStatus.Shoot_Close,
                 BallStatus.Shoot_Mid,
                 BallStatus.Shoot_65,
-                BallStatus.Shoot_60,
                 BallStatus.Backward_half,
             )
         ):

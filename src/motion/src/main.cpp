@@ -114,7 +114,9 @@ void MainNode::StartInitialPose()
 }
 
 
-bool MainNode::StartMotion(int motion_id, bool initial_motion)
+bool MainNode::StartMotion(
+    int motion_id, bool initial_motion,
+    const std::string& request_id)
 {
     if (!dxl_port_->IsReady())
     {
@@ -130,7 +132,7 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
     if (motion_id == kNeckUpMotionId ||
         motion_id == kNeckDownMotionId)
     {
-        return StartNeckMotion(motion_id, initial_motion);
+        return StartNeckMotion(motion_id, initial_motion, request_id);
     }
 
     if (!callback_->HasMotion(motion_id))
@@ -202,11 +204,11 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
 
     if (initial_motion)
     {
-        PublishMotionState(false, false);
+        PublishMotionState(false, false, motion_id, request_id);
     }
     else
     {
-        PublishMotionState(false, true);
+        PublishMotionState(false, true, motion_id, request_id);
     }
 
     try
@@ -216,7 +218,8 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
             this,
             motion_id,
             initial_motion,
-            start_raw);
+            start_raw,
+            request_id);
     }
     catch (const std::exception& error)
     {
@@ -242,7 +245,8 @@ bool MainNode::StartMotion(int motion_id, bool initial_motion)
 // Prepare the neck target and start its dedicated motion thread.
 bool MainNode::StartNeckMotion(
     int motion_id,
-    bool initial_motion)
+    bool initial_motion,
+    const std::string& request_id)
 {
     const int32_t goal_raw =
         motion_id == kNeckUpMotionId
@@ -295,7 +299,7 @@ bool MainNode::StartNeckMotion(
 
     current_motion_id_.store(motion_id);
     motion_running_.store(true);
-    PublishMotionState(false, !initial_motion);
+    PublishMotionState(false, !initial_motion, motion_id, request_id);
 
     try
     {
@@ -306,7 +310,8 @@ bool MainNode::StartNeckMotion(
             initial_motion,
             start_raw,
             goal_raw,
-            duration_seconds);
+            duration_seconds,
+            request_id);
     }
     catch (const std::exception& error)
     {
@@ -334,10 +339,12 @@ bool MainNode::StartNeckMotion(
 void MainNode::RunMotionStreamlitStyle(
     int motion_id,
     bool initial_motion,
-    Dxl::RawArray start_raw)
+    Dxl::RawArray start_raw,
+    std::string request_id)
 {
     MotionCompletion result;
     result.motion_id = motion_id;
+    result.request_id = std::move(request_id);
     result.initial_motion = initial_motion;
 
     Dxl::RawArray last_raw = start_raw;
@@ -441,10 +448,12 @@ void MainNode::RunNeckMotion(
     bool initial_motion,
     int32_t start_raw,
     int32_t goal_raw,
-    double duration_seconds)
+    double duration_seconds,
+    std::string request_id)
 {
     MotionCompletion result;
     result.motion_id = motion_id;
+    result.request_id = std::move(request_id);
     result.initial_motion = initial_motion;
 
     const auto motion_start =
@@ -576,7 +585,10 @@ void MainNode::HandleMotionCompletion()
     if (!result.has_value() || result->stopped)
     {
         callback_->AbortMotion();
-        PublishMotionState(false, false);
+        PublishMotionState(
+            false, false,
+            result.has_value() ? result->motion_id : -1,
+            result.has_value() ? result->request_id : std::string{});
         RCLCPP_ERROR(
             this->get_logger(),
             "모션 %d 실행이 중단되었습니다.",
@@ -626,7 +638,7 @@ void MainNode::HandleMotionCompletion()
 
         initial_pose_done_ = true;
         initialization_ready_ = true;
-        PublishMotionState(true, true);
+        PublishMotionState(true, true, result->motion_id, result->request_id);
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -636,7 +648,7 @@ void MainNode::HandleMotionCompletion()
         return;
     }
 
-    PublishMotionState(true, true);
+    PublishMotionState(true, true, result->motion_id, result->request_id);
 }
 
 
@@ -677,12 +689,14 @@ void MainNode::MotionCallback(
         return;
     }
 
-    if (!StartMotion(command, false))
+    if (!StartMotion(command, false, msg->request_id))
     {
         RCLCPP_ERROR(
             this->get_logger(),
             "모션 %d 시작 실패",
             command);
+        // Preserve the legacy ready signal, but never label a failed start
+        // as successful completion of this request.
         PublishMotionState(true, true);
     }
 }
@@ -690,11 +704,15 @@ void MainNode::MotionCallback(
 
 void MainNode::PublishMotionState(
     bool motion_end,
-    bool motion_ready)
+    bool motion_ready,
+    int motion_id,
+    const std::string& request_id)
 {
     msgs::msg::MotionEnd msg;
     msg.motion_end = motion_end;
     msg.motion_ready = motion_ready;
+    msg.motion_id = motion_id;
+    msg.request_id = request_id;
     motion_end_pub_->publish(msg);
 }
 

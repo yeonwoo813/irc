@@ -28,6 +28,7 @@
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <diagnostic_updater/publisher.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <rcl_interfaces/srv/get_parameters.hpp>
 #include "realsense2_camera_msgs/msg/imu_info.hpp"
 #include "realsense2_camera_msgs/msg/extrinsics.hpp"
 #include "realsense2_camera_msgs/msg/metadata.hpp"
@@ -175,6 +176,7 @@ namespace realsense2_camera
         std::vector<rs2_option> _monitor_options;
         rclcpp::Logger _logger;
         rclcpp::Service<std_srvs::srv::Empty>::SharedPtr _reset_srv;
+        rclcpp::Service<rcl_interfaces::srv::GetParameters>::SharedPtr _rgb_controls_srv;
         rclcpp::Service<realsense2_camera_msgs::srv::DeviceInfo>::SharedPtr _device_info_srv;
         rclcpp::Service<realsense2_camera_msgs::srv::CalibConfigRead>::SharedPtr _calib_config_read_srv;
         rclcpp::Service<realsense2_camera_msgs::srv::CalibConfigWrite>::SharedPtr _calib_config_write_srv;

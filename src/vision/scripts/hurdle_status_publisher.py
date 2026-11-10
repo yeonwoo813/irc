@@ -6,6 +6,8 @@ from typing import Callable, Optional, Tuple
 
 from rclpy.node import Node
 from msgs.msg import HurdleResult, MotionCommand, MotionEnd
+from motion_completion_gate import MotionCompletionGate
+from hurdle_detection_block import HurdleDetectionBlock
 
 
 class HurdleStatus:
@@ -172,24 +174,18 @@ class HurdleStatusPublisher:
         self,
         node: Node,
         topic_name: str = 'hurdle_result',
-        post_crossing_cooldown_sec: float = 2.0,
         monotonic_clock: Optional[Callable[[], float]] = None,
         startup_ignore_sec: float = 3.0,
     ):
         self.node = node
         self.hurdle_decision = HurdleDecision()
-        self.post_crossing_cooldown_sec = max(
-            0.0,
-            float(post_crossing_cooldown_sec),
-        )
         self._clock = monotonic_clock or time.monotonic
         self.startup_ignore_sec = max(0.0, float(startup_ignore_sec))
         self._startup_ignore_until: Optional[float] = None
         self._startup_gate_open = self.startup_ignore_sec <= 0.0
         self._crossing_active = False
-        self._crossing_started = False
-        self._cooldown_until = 0.0
-        self._latest_motion_end: Optional[bool] = None
+        self._crossing_completion = MotionCompletionGate()
+        self._detection_block = HurdleDetectionBlock()
         # 진입 조건을 만족한 검출이 5개 중 3개 이상일 때 허들을 확정합니다.
         # 확정 후에는 거리/검출 변화와 관계없이 Hurdle_Go 종료까지 유지합니다.
         self.hurdle_detection_buffer = deque(maxlen=5)
@@ -232,9 +228,8 @@ class HurdleStatusPublisher:
         self._startup_ignore_until = None
         self._startup_gate_open = self.startup_ignore_sec <= 0.0
         self._crossing_active = False
-        self._crossing_started = False
-        self._cooldown_until = 0.0
-        self._latest_motion_end = None
+        self._crossing_completion.reset()
+        self._detection_block.reset()
         self._reset_hurdle_detection()
         self._log_info(
             "Mission start reset: cleared hurdle votes and latches; "
@@ -283,15 +278,16 @@ class HurdleStatusPublisher:
                 return
 
         if command == HurdleStatus.Hurdle_Go:
+            if not self._crossing_completion.begin(msg):
+                return
             self._crossing_active = True
-            # motion 노드가 command를 먼저 처리했다면 motion_end=false가
-            # 이 콜백보다 먼저 도착했을 수 있습니다.
-            self._crossing_started = self._latest_motion_end is False
-            self._cooldown_until = 0.0
             self.hurdle_decision.reset_detection_cycle()
             self._log_info(
                 "Hurdle detection suppressed while Hurdle_Go is running."
             )
+            if not getattr(msg, 'request_id', ''):
+                self._log_info('Hurdle command has no request_id; completion remains blocked.')
+            self._finish_crossing_if_complete()
             return
 
         if not self.hurdle_decision.back_to_initial_waiting:
@@ -305,32 +301,24 @@ class HurdleStatusPublisher:
         self.hurdle_decision.back_to_initial_done = True
 
     def _motion_end_callback(self, msg: MotionEnd) -> None:
-        motion_ended = bool(msg.motion_end)
-        self._latest_motion_end = motion_ended
+        if self._detection_block.observe(msg, self._clock()):
+            self._log_info(
+                f'Hurdle approach {msg.motion_id} started: suppress hurdle '
+                'detection for 30.0s, including approach and crossing.'
+            )
+        self._crossing_completion.observe(msg)
+        self._finish_crossing_if_complete()
 
-        if not self._crossing_active:
-            return
-
-        if not motion_ended:
-            self._crossing_started = True
-            return
-
-        # motion_command와 motion_end는 서로 다른 노드가 발행하므로 직전
-        # 모션의 motion_end=true가 19번 명령보다 늦게 도착할 수 있습니다.
-        # 19번 시작을 나타내는 false를 먼저 확인한 뒤의 true만 완료로 봅니다.
-        if not self._crossing_started:
+    def _finish_crossing_if_complete(self) -> None:
+        if not self._crossing_active or not self._crossing_completion.consume():
             return
 
         self._crossing_active = False
-        self._crossing_started = False
         self._reset_hurdle_detection()
-        self._cooldown_until = (
-            self._clock() + self.post_crossing_cooldown_sec
-        )
         self._log_info(
-            "Hurdle_Go completed; hurdle_detected=false and detection "
-            "cooldown started for "
-            f"{self.post_crossing_cooldown_sec:.1f}s."
+            'Hurdle_Go completed; cleared hurdle votes and latch. '
+            f'Approach-start block remaining={self.cooldown_remaining_sec():.1f}s; '
+            'deadline unchanged.'
         )
 
     def suppression_reason(self) -> Optional[str]:
@@ -338,14 +326,12 @@ class HurdleStatusPublisher:
             return 'startup'
         if self._crossing_active:
             return 'crossing'
-        if self._clock() < self._cooldown_until:
+        if self._detection_block.active(self._clock()):
             return 'cooldown'
         return None
 
     def cooldown_remaining_sec(self) -> float:
-        if self._crossing_active:
-            return 0.0
-        return max(0.0, self._cooldown_until - self._clock())
+        return self._detection_block.remaining(self._clock())
 
     # publish 함수
     def publish_hurdle_status(

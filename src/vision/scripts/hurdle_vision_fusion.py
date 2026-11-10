@@ -35,7 +35,6 @@ class WebcamHurdlePublisherNode(Node):
         self.declare_parameter("webcam_timeout_sec", 0.6)
         self.declare_parameter("webcam_min_conf", 0.0)
         self.declare_parameter("publish_hz", 15.0)
-        self.declare_parameter("post_crossing_cooldown_sec", 2.0)
 
         self.webcam_state_topic = str(
             self.get_parameter("webcam_state_topic").value
@@ -57,14 +56,6 @@ class WebcamHurdlePublisherNode(Node):
         self.publish_hz = max(
             1.0,
             float(self.get_parameter("publish_hz").value),
-        )
-        self.post_crossing_cooldown_sec = max(
-            0.0,
-            float(
-                self.get_parameter(
-                    "post_crossing_cooldown_sec"
-                ).value
-            ),
         )
 
         self.latest_webcam: Optional[Dict[str, Any]] = None
@@ -97,7 +88,6 @@ class WebcamHurdlePublisherNode(Node):
         self.hurdle_status_publisher = HurdleStatusPublisher(
             self,
             self.hurdle_result_topic,
-            post_crossing_cooldown_sec=self.post_crossing_cooldown_sec,
         )
         self.pub_vision_state = self.create_publisher(
             String,

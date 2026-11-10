@@ -122,7 +122,6 @@ MOTION_NAME = {
     10: "Left_Move",
     11: "Right_Move",
     12: "Pick",
-    13: "Shoot",
     14: "Neck_Up",
     15: "Neck_Left",
     16: "Neck_Right",

@@ -107,6 +107,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(realsense2_camera_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -287,6 +288,7 @@ set(dependencies
   cv_bridge
   image_transport
   rclcpp
+  rcl_interfaces
   rclcpp_components
   realsense2_camera_msgs
   std_srvs
@@ -302,6 +304,7 @@ set (targets
   ${CV_BRIDGE_TARGET}
   ${IMAGE_TRANSPORT_TARGET}
   rclcpp::rclcpp
+  ${rcl_interfaces_TARGETS}
   ${RCLCPP_COMPONENT_TARGET}
   ${realsense2_camera_msgs_TARGETS}
   ${std_srvs_TARGETS}

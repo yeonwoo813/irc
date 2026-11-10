@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 
 #include <rclcpp/rclcpp.hpp>
@@ -24,6 +25,7 @@ private:
     struct MotionCompletion
     {
         int motion_id{-1};
+        std::string request_id;
         bool initial_motion{false};
         bool stopped{false};
         std::uint64_t tick_count{0};
@@ -55,21 +57,27 @@ private:
     bool initialization_ready_{false};
 
     void StartInitialPose();
-    bool StartMotion(int motion_id, bool initial_motion);
+    bool StartMotion(
+        int motion_id, bool initial_motion,
+        const std::string& request_id = {});
     void RunMotionStreamlitStyle(
         int motion_id,
         bool initial_motion,
-        Dxl::RawArray start_raw);
+        Dxl::RawArray start_raw,
+        std::string request_id);
 
     // Neck motion runs independently from the 22-joint body trajectory.
-    bool StartNeckMotion(int motion_id, bool initial_motion);
+    bool StartNeckMotion(
+        int motion_id, bool initial_motion,
+        const std::string& request_id);
 
     void RunNeckMotion(
         int motion_id,
         bool initial_motion,
         int32_t start_raw,
         int32_t goal_raw,
-        double duration_seconds);
+        double duration_seconds,
+        std::string request_id);
 
     void HandleMotionCompletion();
     void JoinFinishedMotionThread();
@@ -77,5 +85,7 @@ private:
     void MotionCallback(
         const msgs::msg::MotionCommand::SharedPtr msg);
 
-    void PublishMotionState(bool motion_end, bool motion_ready);
+    void PublishMotionState(
+        bool motion_end, bool motion_ready,
+        int motion_id = -1, const std::string& request_id = {});
 };

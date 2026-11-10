@@ -10,7 +10,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from robot_bringup.quiet_process import configure_launch_logging, process_prefix
 
@@ -30,6 +30,12 @@ def generate_launch_description():
             description='Hide runtime console logs; diagnostic warnings are still recorded.',
         ),
         DeclareLaunchArgument('vision_diagnostics', default_value='true'),
+        DeclareLaunchArgument(
+            'settings_ini',
+            default_value=PathJoinSubstitution([
+                EnvironmentVariable('HOME'), 'irc', 'src', 'vision', 'config', 'settings.ini']),
+            description='Vision and saved camera settings applied at every startup.',
+        ),
         DeclareLaunchArgument(
             'show_preview', default_value='false',
             description='Open both camera detection/status views.',
@@ -107,6 +113,7 @@ def generate_launch_description():
             'quiet_logs': quiet_logs,
             'vision_diagnostics': LaunchConfiguration('vision_diagnostics'),
             'show_preview': LaunchConfiguration('show_preview'),
+            'settings_ini': LaunchConfiguration('settings_ini'),
         }.items(),
     )
 

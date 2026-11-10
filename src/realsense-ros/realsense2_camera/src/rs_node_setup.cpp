@@ -559,6 +559,43 @@ void BaseRealSenseNode::startUpdatedSensors()
 
 void BaseRealSenseNode::publishServices()
 {
+    // Read the sensor rather than the ROS parameter cache: automatic exposure
+    // and white balance can change without a parameter update. Queries run in
+    // the executor, never in the frame callback, and do not open another stream.
+    for (const auto& sensor : _dev_sensors)
+    {
+        if (!sensor.is<rs2::color_sensor>()) continue;
+        _rgb_controls_srv = _node.create_service<rcl_interfaces::srv::GetParameters>(
+            "~/get_rgb_controls",
+            [sensor](const rcl_interfaces::srv::GetParameters::Request::SharedPtr req,
+                     rcl_interfaces::srv::GetParameters::Response::SharedPtr res)
+            {
+                const std::map<std::string, rs2_option> options = {
+                    {"exposure", RS2_OPTION_EXPOSURE}, {"gain", RS2_OPTION_GAIN},
+                    {"white_balance", RS2_OPTION_WHITE_BALANCE},
+                    {"brightness", RS2_OPTION_BRIGHTNESS}, {"contrast", RS2_OPTION_CONTRAST},
+                    {"saturation", RS2_OPTION_SATURATION}, {"sharpness", RS2_OPTION_SHARPNESS}};
+                for (const auto& name : req->names)
+                {
+                    rcl_interfaces::msg::ParameterValue value;
+                    const auto option = options.find(name);
+                    try
+                    {
+                        if (option != options.end() && sensor.supports(option->second))
+                        {
+                            value = rclcpp::Parameter(name,
+                                static_cast<int64_t>(sensor.get_option(option->second))).get_parameter_value().to_value_msg();
+                        }
+                    }
+                    catch (const rs2::error&)
+                    {
+                        // PARAMETER_NOT_SET means unavailable, never a cached setpoint.
+                    }
+                    res->values.push_back(value);
+                }
+            });
+        break;
+    }
     // adding "~/" to the service name will add node namespace and node name to the service
     // see "Private Namespace Substitution Character" section on https://design.ros2.org/articles/topic_and_service_names.html
     _reset_srv = _node.create_service<std_srvs::srv::Empty>(
