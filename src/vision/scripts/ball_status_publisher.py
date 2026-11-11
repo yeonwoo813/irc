@@ -45,6 +45,8 @@ class BallStatus:
     Left_Turn_4 = 39
     Ball_ForwardHalf_2 = 41
     Ball_Lost = 45
+    Shoot_Forward_Safe = 46
+    Shoot_Backward_Safe = 47
     Ball_None = 99
 
 
@@ -80,7 +82,7 @@ class BallDecision:
         # 공을 잡은 뒤 Realsense 골대 기준
         self.goal_entry_distance_cm = 120.0
         # 27번 진입용 원본 3프레임 다수결 기준과 실제 슛 상한을 분리한다.
-        # 27번 뒤에는 새 검출을 재확인하고, 33번 뒤에는 verified 결과를 쓴다.
+        # 27번 뒤에는 새 검출을 재확인하고, 46번 뒤에는 verified 결과를 쓴다.
         self.goal_pre_shoot_entry_distance_cm = 85.0
         self.goal_mid_shoot_max_distance_cm = 70.0
         self.goal_mid_shoot_min_distance_cm = 68.0
@@ -212,7 +214,7 @@ class BallDecision:
             return BallStatus.Ball_None, 0.0
 
         if distance <= self.goal_close_shoot_min_distance_cm:
-            return BallStatus.Backward_half, 0.0
+            return BallStatus.Shoot_Backward_Safe, 0.0
 
         if distance <= self.goal_mid_shoot_max_distance_cm:
             # Close (63, 65], 65 (65, 68], Mid (68, 70].
@@ -239,7 +241,7 @@ class BallDecision:
             return self._shoot_status_from_goal_angle(angle, shoot_status)
 
         if features.shoot_initial_done:
-            return BallStatus.Shoot_Forward, 0.0
+            return BallStatus.Shoot_Forward_Safe, 0.0
 
         return self._goal_status_from_angle(angle)
 
@@ -461,14 +463,14 @@ class BallStatusPublisher:
             self._wait_for_pre_shoot_motion('Back_To_Initial', msg)
 
         if (
-            command == BallStatus.Shoot_Forward
+            command == BallStatus.Shoot_Forward_Safe
             and self.ball_in_hand
             and self.shoot_initial_done
             and not self.shoot_command_seen
         ):
-            # 33번은 공과 슛 준비 자세를 유지한다. 27번을 재요청하지 않고
+            # 46번은 공과 슛 준비 자세를 유지한다. 27번을 재요청하지 않고
             # 이번 미세전진의 MotionEnd 이후 골대 결과만 다시 확인한다.
-            self._wait_for_pre_shoot_motion('Shoot_Forward', msg)
+            self._wait_for_pre_shoot_motion('Shoot_Forward_Safe', msg)
 
         if command in (
             BallStatus.Shoot_Close,
@@ -748,7 +750,7 @@ class BallStatusPublisher:
                 BallStatus.Shoot_Close,
                 BallStatus.Shoot_Mid,
                 BallStatus.Shoot_65,
-                BallStatus.Backward_half,
+                BallStatus.Shoot_Backward_Safe,
             )
         ):
             # 아직 3프레임 투표가 끝나지 않은 한 27번을 건너뛰고

@@ -61,6 +61,9 @@ class Motion:
     Hurdle_Forward_320 = 42
     Hurdle_Forward_150 = 43
     Hurdle_Forward_400 = 44
+
+    Shoot_Forward_Safe = 46
+    Shoot_Backward_Safe = 47
     Data_None = 99
     
     # 모션 번호 나열하기
@@ -212,7 +215,7 @@ class MainDecision(Node):
         self.post_shoot_detection_suppressed = False
         self.shoot_in_progress = False
         self.shoot_motion_started = False
-        # 골대 27 뒤에는 새 검출 2/3을 확인하고, 33 뒤에는 verified를 기다린다.
+        # 골대 27 뒤에는 새 검출 2/3을 확인하고, 46 뒤에는 verified를 기다린다.
         self.pre_shoot_result_waiting = False
         self.pre_shoot_verified_result = None
         self.back_to_walk_after_pre_shoot_cancel = False
@@ -1104,7 +1107,7 @@ class MainDecision(Node):
 
         if getattr(self, 'pre_shoot_result_waiting', False):
             # Preserve the motion's final votes even while the separate
-            # 33 verified-result path is waiting.
+            # 46 verified-result path is waiting.
             self.ball_buffer.append(int(ball_msg.status))
             detail_buffer = getattr(self, 'ball_vote_detail_buffer', None)
             if detail_buffer is not None:
@@ -1468,10 +1471,10 @@ class MainDecision(Node):
             and 0.0 < detail['goal_distance_cm'] <= 120.0
             and detail['status'] in (
                 Motion.Forward, Motion.Left_Half_Forward, Motion.Right_Half_Forward,
-                Motion.Left_Turn, Motion.Right_Turn, Motion.Backward_half,
+                Motion.Left_Turn, Motion.Right_Turn, Motion.Shoot_Backward_Safe,
                 Motion.Left_Turn_Mission_5, Motion.Right_Turn_Mission_5,
                 Motion.Left_Turn_Shoot_3, Motion.Right_Turn_Shoot_3,
-                Motion.Shoot_Forward, Motion.Shoot_Close,
+                Motion.Shoot_Forward_Safe, Motion.Shoot_Close,
                 Motion.Shoot_Mid, Motion.Shoot_65,
             )
         )
@@ -1659,7 +1662,7 @@ class MainDecision(Node):
             if deadline is not None:
                 MainDecision._reset_goal_recheck(self, clear_seen=True)
             return
-        # 33 can otherwise wait forever when the camera stops delivering
+        # 46 can otherwise wait forever when the camera stops delivering
         # results after MotionEnd. The same deadline covers that path.
         ended_at = getattr(self, 'goal_motion_end_at', None)
         if (
@@ -1806,7 +1809,7 @@ class MainDecision(Node):
             return False
         if MainDecision._maybe_begin_goal_recheck(self):
             return False
-        # Pre-Shoot Shoot_Forward 뒤에는 일반 투표 대신
+        # Pre-Shoot Shoot_Forward_Safe 뒤에는 일반 투표 대신
         # BallStatusPublisher가 표시한 verified 결과 하나만 사용한다.
         if getattr(self, 'pre_shoot_result_waiting', False):
             return False
@@ -3148,6 +3151,12 @@ class MainDecision(Node):
         elif self.status == 44:
             motion_msg.command = Motion.Hurdle_Forward_400
 
+        elif self.status == 46:
+            motion_msg.command = Motion.Shoot_Forward_Safe
+
+        elif self.status == 47:
+            motion_msg.command = Motion.Shoot_Backward_Safe
+
         else:
             if MainDecision._begin_hurdle_exception_recovery(
                 self, f'unsupported hurdle motion status={self.status}',
@@ -3164,7 +3173,7 @@ class MainDecision(Node):
         if (
             motion_msg.command in (
                 Motion.Back_To_Initial,
-                Motion.Shoot_Forward,
+                Motion.Shoot_Forward_Safe,
             )
             and getattr(self, 'has_ball', False)
             and getattr(self, 'current_mode', None) == "BallMode"
@@ -3182,7 +3191,7 @@ class MainDecision(Node):
             else:
                 self.pre_shoot_result_waiting = True
                 self.get_logger().info(
-                    '[PreShoot] Shoot_Forward 실행: '
+                    '[PreShoot] Shoot_Forward_Safe 실행: '
                     'MotionEnd 이후 BallStatusPublisher 결과를 기다립니다.'
                 )
         

@@ -141,6 +141,8 @@ MOTION_NAME = {
     42: "Hurdle_Forward_320",
     43: "Hurdle_Forward_150",
     44: "Hurdle_Forward_400",
+    46: "Shoot_Forward_Safe",
+    47: "Shoot_Backward_Safe",
 }
 
 
